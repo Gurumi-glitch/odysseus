@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from .identity import artifact_identity, artifact_version, digest
+from src.tool_capabilities import tool_result_was_denied
 
 
 @dataclass
@@ -46,8 +47,7 @@ class ActionReceipt:
             return
         code = result.get('exit_code')
         valid_code = isinstance(code, int) and not isinstance(code, bool)
-        denied = bool(result.get('blocked') or result.get('approval_required')
-                      or str(result.get('failure_kind', '')).endswith('_denied'))
+        denied = tool_result_was_denied(result)
         self.outcome = {
             'exit_code': code if valid_code else None,
             'success': valid_code and code == 0 and not result.get('error') and not denied,

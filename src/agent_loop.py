@@ -74,6 +74,7 @@ from src.tool_capabilities import (
     capabilities_for_tool,
     messages_contain_external_untrusted_context,
     tool_result_is_successful,
+    tool_result_never_ran,
     tool_result_should_arm_gate,
 )
 from src.tool_approvals import (
@@ -25527,15 +25528,10 @@ async def stream_agent_loop(
             )
             _approved_read_completed = True
             _approved_result_injected = True
-        elif (
-            approved_result.get("blocked")
-            or approved_result.get("approval_required")
-            or str(approved_result.get("failure_kind") or "").endswith("_denied")
-            or approved_result.get("executed") is False
-        ):
-            # Dispatch rejected the sealed action (e.g. the tool was disabled
-            # between proposal and approval): report it rather than let the
-            # model improvise. A call that ran and failed (HTTP 403, timeout,
+        elif tool_result_never_ran(approved_result):
+            # The sealed action never ran (e.g. the tool was disabled between
+            # proposal and approval): report it rather than let the model
+            # improvise. A call that ran and failed (HTTP 403, timeout,
             # non-zero exit) falls through to the model so it can recover.
             _approval_error = str(
                 approved_result.get("error")
