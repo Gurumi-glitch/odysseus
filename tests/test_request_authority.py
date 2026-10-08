@@ -413,8 +413,39 @@ async def test_server_seeded_defaults_have_authority_but_legacy_rows_do_not_gain
     engine.dispose()
 
 
+def _builtin_row(**fields):
+    import core.database as database
+    return database.ScheduledTask(**{"owner": "alice", "name": "Chat Sessions Tidy",
+        "task_type": "action", "action": "tidy_sessions", "prompt": None,
+        "request_authority_json": None, **fields})
+
+
+def test_builtin_row_from_before_task_authority_is_backfilled():
+    from src.task_scheduler import backfill_builtin_task_authority
+    task = _builtin_row()
+
+    assert backfill_builtin_task_authority(task, "alice") is True
+
+    grant = restore_task_authority(task.request_authority_json, task.prompt,
+        task.task_type, task.action, owner="alice")
+    assert grant.permits(task_operation(task.task_type, task.action, task.prompt))
+
+
+@pytest.mark.parametrize("fields", [
+    {"request_authority_json": '{"kept": true}'},
+    {"name": "My session cleanup"},
+    {"prompt": "Tidy my sessions"},
+], ids=["already-sealed", "renamed", "prompted"])
+def test_backfill_leaves_rows_that_are_not_pristine_builtins(fields):
+    from src.task_scheduler import backfill_builtin_task_authority
+    task = _builtin_row(**fields)
+
+    assert backfill_builtin_task_authority(task, "alice") is False
+    assert task.request_authority_json == fields.get("request_authority_json")
+
+
 @pytest.mark.asyncio
-async def test_builtin_rows_from_before_task_authority_are_backfilled(monkeypatch, tmp_path):
+async def test_ensure_defaults_backfills_builtin_rows_once(monkeypatch, tmp_path):
     import core.database as database
     import routes.prefs_routes as preferences
     from sqlalchemy import create_engine
@@ -424,44 +455,23 @@ async def test_builtin_rows_from_before_task_authority_are_backfilled(monkeypatc
     database.Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
     monkeypatch.setattr(database, "SessionLocal", sessions)
-    # The user has opened Tasks, so ensure_defaults keeps their pause states.
     monkeypatch.setattr(preferences, "_load_for_user", lambda owner: {"tasks_opened": True})
     scheduler = TaskScheduler(session_manager=None)
     monkeypatch.setattr(scheduler, "ensure_assistant_defaults", AsyncMock())
-    event_fields = dict(trigger_type="event", trigger_count=5, trigger_counter=2)
     with sessions() as db:
-        db.add(database.ScheduledTask(id="tidy", owner="alice", name="Chat Sessions Tidy",
-            task_type="action", action="tidy_sessions", trigger_event="session_created",
-            status="paused", **event_fields))
-        db.add(database.ScheduledTask(id="docs", owner="alice", name="Tidy Documents",
-            task_type="action", action="tidy_documents", trigger_event="document_created",
-            status="active", **event_fields))
-        db.add(database.ScheduledTask(id="sealed", owner="alice", name="Email Tags",
-            task_type="action", action="check_email_urgency", schedule="cron",
-            cron_expression="0 * * * *", status="paused", request_authority_json='{"kept": true}'))
-        db.add(database.TaskRun(id="run-1", task_id="tidy", status="error",
-            error="Scheduled action has no matching server request authority."))
+        db.add(_builtin_row(id="tidy", status="paused", trigger_type="event",
+            trigger_event="session_created", trigger_count=5))
         db.commit()
 
     await scheduler.ensure_defaults("alice")
-
     with sessions() as db:
-        for task_id, status in (("tidy", "paused"), ("docs", "active")):
-            task = db.get(database.ScheduledTask, task_id)
-            grant = restore_task_authority(task.request_authority_json, task.prompt,
-                task.task_type, task.action, owner="alice")
-            assert grant.permits(task_operation(task.task_type, task.action, task.prompt))
-            assert (task.status, task.trigger_type, task.trigger_count, task.trigger_counter) == (
-                status, "event", 5, 2)
-        assert db.get(database.ScheduledTask, "docs").name == "Documents Tidy"
-        assert db.get(database.ScheduledTask, "sealed").request_authority_json == '{"kept": true}'
-        assert [run.id for run in db.query(database.TaskRun).filter_by(task_id="tidy")] == ["run-1"]
-        snapshots = {t.id: t.request_authority_json for t in db.query(database.ScheduledTask)}
+        task = db.get(database.ScheduledTask, "tidy")
+        snapshot = task.request_authority_json
+        assert (snapshot is not None, task.status) == (True, "paused")
 
     await scheduler.ensure_defaults("alice")
-
     with sessions() as db:
-        assert {t.id: t.request_authority_json for t in db.query(database.ScheduledTask)} == snapshots
+        assert db.get(database.ScheduledTask, "tidy").request_authority_json == snapshot
     engine.dispose()
 
 

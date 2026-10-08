@@ -282,6 +282,22 @@ RETIRED_HOUSEKEEPING_ACTIONS = frozenset({
 })
 
 
+def _builtin_task_authority(action: str, owner: str) -> str:
+    from src.agent_runtime.authority import seal_task_authority
+    return seal_task_authority(None, "action", action, owner=owner)
+
+
+def backfill_builtin_task_authority(task, owner: str) -> bool:
+    """Built-ins predating request_authority_json fail every run (fork #4); a
+    renamed or prompted row keeps the authority it was created with."""
+    defs = HOUSEKEEPING_DEFAULTS.get(task.action)
+    if (not defs or task.request_authority_json or task.prompt is not None
+            or task.name != defs["name"]):
+        return False
+    task.request_authority_json = _builtin_task_authority(task.action, owner)
+    return True
+
+
 def _digest_windows(now):
     """(label, start, end) buckets for the calendar check-in digest.
 
@@ -2539,7 +2555,6 @@ class TaskScheduler:
                     db.delete(dupe)
                     removed_dupes.append(action)
 
-            from src.agent_runtime.authority import seal_task_authority
             backfilled = []
             for task in [t for t in builtin_tasks if t.id in kept_ids]:
                 defs = HOUSEKEEPING_DEFAULTS.get(task.action)
@@ -2628,14 +2643,7 @@ class TaskScheduler:
                 task.notifications_enabled = False
                 if (task.output_target or "session") == "session":
                     task.output_target = defs.get("output_target", "none")
-                # Built-ins created before request_authority_json existed have
-                # no snapshot and fail every run. Seal exactly what a fresh seed
-                # gets, but only for rows that carry the built-in name and no
-                # prompt; other rows keep the authority they were created with.
-                if (not task.request_authority_json and task.prompt is None
-                        and task.name == defs["name"]):
-                    task.request_authority_json = seal_task_authority(
-                        None, "action", task.action, owner=owner)
+                if backfill_builtin_task_authority(task, owner):
                     backfilled.append(task.action)
             seeded = []
             for action, defs in HOUSEKEEPING_DEFAULTS.items():
@@ -2655,7 +2663,7 @@ class TaskScheduler:
                     name=defs["name"],
                     task_type="action",
                     action=action,
-                    request_authority_json=seal_task_authority(None, "action", action, owner=owner),
+                    request_authority_json=_builtin_task_authority(action, owner),
                     trigger_type=trigger_type,
                     trigger_event=defs.get("trigger_event"),
                     trigger_count=defs.get("trigger_count"),
