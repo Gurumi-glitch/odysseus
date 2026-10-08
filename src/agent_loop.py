@@ -25527,17 +25527,16 @@ async def stream_agent_loop(
             )
             _approved_read_completed = True
             _approved_result_injected = True
-        elif not tool_result_is_successful(approved_result) and (
-            approved_result.get("error")
-            or approved_result.get("blocked")
+        elif (
+            approved_result.get("blocked")
             or approved_result.get("approval_required")
-            or approved_result.get("exit_code") not in (None, 0)
+            or str(approved_result.get("failure_kind") or "").endswith("_denied")
+            or approved_result.get("executed") is False
         ):
-            # An approval continuation is a sealed action, not a fresh agent
-            # turn. If dispatch rejects that exact action (for example because
-            # the tool was disabled between proposal and approval), report the
-            # authoritative failure instead of asking the model to improvise a
-            # different domain or invent a generic synthesis.
+            # Dispatch rejected the sealed action (e.g. the tool was disabled
+            # between proposal and approval): report it rather than let the
+            # model improvise. A call that ran and failed (HTTP 403, timeout,
+            # non-zero exit) falls through to the model so it can recover.
             _approval_error = str(
                 approved_result.get("error")
                 or approved_result.get("output")
