@@ -1,17 +1,15 @@
-"""Skill runners that stop at a tool approval must close the agent stream.
-
-Abandoning the stream left its ContextVar cleanup to asyncio's finalizer in
-another Context, which raised "created in a different Context" and kept the
-run's request authority bound in the consuming task (fork #7).
-"""
+"""Agent stream consumers that stop early must close the stream in their own task
+(fork #7)."""
 import asyncio
 import gc
 import json
 
 import pytest
 
+import routes.chat_routes as chat_routes
 import routes.skills_routes as skills_routes
 from src.agent_runtime.authority import (
+    RequestAuthority,
     active_request_authority,
     with_request_authority,
 )
@@ -38,7 +36,6 @@ async def _stream_stopping_at_approval(url, model, messages, *, request_authorit
 
 
 def _run_and_collect_loop_errors(runner):
-    """Run *runner* in one task; return its result, post-run context, loop errors."""
     errors = []
 
     async def main():
@@ -88,5 +85,23 @@ def test_skill_audit_arm_closes_stream_when_stopping_at_approval(stub_stream):
 
     assert approval == APPROVAL
     assert "never consumed" not in transcript
+    assert bound_after == (None, None)
+    assert errors == []
+
+
+def test_chat_bridge_closes_stream_when_client_disconnects(monkeypatch):
+    monkeypatch.setattr(chat_routes, "stream_agent_loop", _stream_stopping_at_approval)
+
+    async def disconnect_after_first_chunk():
+        stream = chat_routes._stream_agent_with_execution_bridge(
+            None, "http://example.test", "model", [], owner="owner",
+            request_authority=RequestAuthority.empty(owner="owner"))
+        first = await anext(stream)
+        await stream.aclose()
+        return first
+
+    first, bound_after, errors = _run_and_collect_loop_errors(disconnect_after_first_chunk)
+
+    assert "Waiting for an exact user approval." in first
     assert bound_after == (None, None)
     assert errors == []
