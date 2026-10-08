@@ -2539,6 +2539,8 @@ class TaskScheduler:
                     db.delete(dupe)
                     removed_dupes.append(action)
 
+            from src.agent_runtime.authority import seal_task_authority
+            backfilled = []
             for task in [t for t in builtin_tasks if t.id in kept_ids]:
                 defs = HOUSEKEEPING_DEFAULTS.get(task.action)
                 if not defs:
@@ -2626,8 +2628,16 @@ class TaskScheduler:
                 task.notifications_enabled = False
                 if (task.output_target or "session") == "session":
                     task.output_target = defs.get("output_target", "none")
+                # Built-ins created before request_authority_json existed have
+                # no snapshot and fail every run. Seal exactly what a fresh seed
+                # gets, but only for rows that carry the built-in name and no
+                # prompt; other rows keep the authority they were created with.
+                if (not task.request_authority_json and task.prompt is None
+                        and task.name == defs["name"]):
+                    task.request_authority_json = seal_task_authority(
+                        None, "action", task.action, owner=owner)
+                    backfilled.append(task.action)
             seeded = []
-            from src.agent_runtime.authority import seal_task_authority
             for action, defs in HOUSEKEEPING_DEFAULTS.items():
                 if action in existing_actions:
                     continue
@@ -2663,10 +2673,12 @@ class TaskScheduler:
                 )
                 db.add(task)
                 seeded.append(action)
-            if seeded or renamed or removed_dupes or retired_count:
+            if seeded or renamed or removed_dupes or retired_count or backfilled:
                 logger.info(
-                    "Housekeeping defaults for %s: seeded=%s renamed=%s deduped=%s retired=%s",
+                    "Housekeeping defaults for %s: seeded=%s renamed=%s deduped=%s retired=%s "
+                    "authority_backfilled=%s",
                     owner, seeded, sorted(set(renamed)), sorted(set(removed_dupes)), retired_count,
+                    backfilled,
                 )
             # Always commit — the orphan-run sweep above may have produced
             # pending deletes even when no defaults changed.
