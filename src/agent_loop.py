@@ -17086,6 +17086,12 @@ _WEB_SEARCH_QUERY_FILLER_RE = re.compile(
 )
 
 
+_WEB_SEARCH_LEAD_IN_RE = re.compile(
+    r"^(?:(?:let(?:'s|\s+us)|maybe|now|just|try)\s+)*(?:about\s+)?",
+    re.IGNORECASE,
+)
+
+
 _WEB_SEARCH_POLLUTION_RE = re.compile(
     r"\b(?:official\s+links?|scientific\s+links?|reliable\s+sources?|"
     r"python\s+packaging|packaging\.python\.org|pypi|setuptools|"
@@ -17174,6 +17180,7 @@ def _web_search_query_from_user_text(user_text: str) -> str:
         if word.lower() not in _WEB_SEARCH_QUERY_STOPWORDS
     )
     text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    text = _WEB_SEARCH_LEAD_IN_RE.sub("", text, count=1) or text
     if not text:
         return str(user_text or "").strip()
     words = text.split()
@@ -17230,6 +17237,16 @@ def _web_search_query_is_actionable(query: str) -> bool:
     if _is_generic_web_search_followup(value):
         return False
     return len(_web_search_meaningful_words(value)) >= 2
+
+
+def _web_search_keyword_query_is_actionable(user_text: str, query: str) -> bool:
+    """A lone keyword ("cat", "NVDA") is a real query unless it drops the user's topic (fork #13)."""
+    value = str(query or "").strip()
+    if not value or _is_generic_web_search_followup(value):
+        return False
+    if len(_web_search_meaningful_words(value)) != 1:
+        return False
+    return not _web_search_query_drops_user_terms(user_text, value)
 
 
 def _web_fetch_failure_needs_private_browser(result: Any) -> bool:
@@ -18355,7 +18372,10 @@ def _normalize_web_search_block_query(
             cleaned = re.sub(r"\s+", " ", f"{replacement} {cleaned}").strip(" ,.;:")
     # Trust useful model-generated search terms. Everything below is for
     # literal wrapper/control phrases or polluted pseudo-queries.
-    if _web_search_query_is_actionable(cleaned) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
+    if (
+        _web_search_query_is_actionable(cleaned)
+        or _web_search_keyword_query_is_actionable(user_text, cleaned)
+    ) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
         if cleaned == query:
             return block
@@ -32269,10 +32289,15 @@ async def stream_agent_loop(
                     current_user_text=_last_user,
                 )
                 if normalized_web_block.content != block.content:
+                    _model_web_query = block.content.strip()
                     block = normalized_web_block
                     full_command = block.content.strip()
                     cmd_display = full_command
-                    logger.info("Normalized web_search query to remove generic query pollution: %s", full_command[:160])
+                    logger.info(
+                        "Normalized web_search query to remove generic query pollution: %r -> %r",
+                        _model_web_query[:160],
+                        full_command[:160],
+                    )
 
             if (
                 _contextual_public_web_followup
