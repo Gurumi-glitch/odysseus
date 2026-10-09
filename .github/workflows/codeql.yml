@@ -4,9 +4,9 @@ name: CodeQL
 # surfacing findings before merge instead of only after a change lands on dev.
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, devGuru, main]
   pull_request:
-    branches: [dev]
+    branches: [dev, devGuru]
   schedule:
     - cron: "17 3 * * 1"
 

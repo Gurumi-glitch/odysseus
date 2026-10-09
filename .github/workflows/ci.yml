@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, devGuru]
   pull_request:
 
 # Least privilege: none of the jobs write to the repo.
