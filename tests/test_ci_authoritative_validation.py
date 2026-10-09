@@ -23,7 +23,9 @@ def test_ci_runs_on_integrated_dev_pushes():
     workflow = _WORKFLOW.read_text()
     push = _indented_block(workflow, "push", 2)
 
-    assert re.search(r"(?m)^    branches:\s*\[main,\s*dev\]\s*$", push)
+    branches = re.search(r"(?m)^    branches:\s*\[(?P<names>[^\]]*)\]\s*$", push)
+    assert branches is not None
+    assert {"main", "dev", "devGuru"} <= {name.strip() for name in branches["names"].split(",")}
     assert "paths-ignore:" not in push
 
 
