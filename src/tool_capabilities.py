@@ -633,18 +633,6 @@ def tool_result_was_denied(result: Any, *, failure_kind: str | None = None) -> b
     )
 
 
-def tool_result_never_ran(result: Any) -> bool:
-    """Return whether a failed result reports that its tool never executed."""
-    if not isinstance(result, dict) or tool_result_is_successful(result):
-        return False
-    containment = result.get("containment")
-    return (
-        tool_result_was_denied(result)
-        or result.get("executed") is False
-        or (isinstance(containment, dict) and containment.get("executed") is False)
-    )
-
-
 def tool_result_should_arm_gate(
     tool_name: Any,
     result: Any,

@@ -4181,7 +4181,10 @@ def test_approval_continuation_cannot_fallback_into_host_shell(monkeypatch):
             "failure_kind": "request_authority_denied",
         })
 
+    model_requests = []
+
     async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
         yield "data: {\"delta\":\"\"}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -4208,8 +4211,7 @@ def test_approval_continuation_cannot_fallback_into_host_shell(monkeypatch):
         event.get("type") == "tool_start" and event.get("tool") == "host_shell"
         for event in events
     )
-    final = next(event for event in events if event.get("type") == "final_response")
-    assert "disabled by user" in final["content"]
+    assert model_requests and "disabled by user" in json.dumps(model_requests[0])
 
 
 _BLOCKED_PAGE = {"url": "https://blocked.example/page"}
@@ -4324,7 +4326,7 @@ _NEVER_RAN_RESULTS = {
 
 
 @pytest.mark.parametrize("case", list(_NEVER_RAN_RESULTS))
-def test_approved_action_that_never_ran_ends_the_turn(monkeypatch, case):
+def test_approved_action_that_never_ran_returns_to_the_model(monkeypatch, case):
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: owner == "admin")
     produce = _NEVER_RAN_RESULTS[case]
     produced = []
@@ -4343,11 +4345,10 @@ def test_approved_action_that_never_ran_ends_the_turn(monkeypatch, case):
     _, events = _run_approved_web_fetch(
         monkeypatch, f"approval-never-ran-{case}", _fake_exec, _fake_stream, max_rounds=2)
 
-    assert model_requests == []
-    final = next(event for event in events if event.get("type") == "final_response")
-    assert final["content"] == (
-        f"The approved web_fetch action could not run: {produced[0]['error']}"
-    )
+    assert model_requests, "the never-ran approved result did not reach the model"
+    assert json.dumps(produced[0]["error"])[1:-1] in json.dumps(model_requests[0])
+    finals = [event["content"] for event in events if event.get("type") == "final_response"]
+    assert not any("could not run" in final for final in finals)
 
 
 def test_eval_local_network_tool_budget_forces_final_synthesis(monkeypatch):

@@ -2013,7 +2013,7 @@ async def _execute_tool_block_impl(
         and not policy_names.isdisjoint(disabled_tools)
     ):
         desc = f"{tool}: BLOCKED"
-        result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1, "executed": False}
+        result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
 
@@ -2025,14 +2025,13 @@ async def _execute_tool_block_impl(
         result = {
             "error": f"Execution of tool '{tool}' is forbade by the active guide-only policy.",
             "exit_code": 1,
-            "executed": False,
         }
         logger.warning("Tool policy blocked tool=%s", tool)
         return desc, result
 
     if tool in _ADMIN_TOOLS and not _owner_is_admin(owner):
         desc = f"{tool}: BLOCKED"
-        result = {"error": f"Tool '{tool}' requires an admin user.", "exit_code": 1, "executed": False}
+        result = {"error": f"Tool '{tool}' requires an admin user.", "exit_code": 1}
         logger.warning("Admin tool blocked for non-admin owner=%r tool=%s", owner, tool)
         return desc, result
 
@@ -2069,7 +2068,6 @@ async def _execute_tool_block_impl(
                 "Ask an admin to perform this action or grant the needed permission."
             ),
             "exit_code": 1,
-            "executed": False,
         }
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
