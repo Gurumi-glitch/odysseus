@@ -86,6 +86,32 @@ def test_one_url_read_still_narrows_to_fetch(user_text):
     assert "web_search" not in granted
 
 
+@pytest.mark.parametrize("user_text", [
+    "web search cat",
+    "please web search cat",
+    "web search cat please",
+    "try web search cat",
+    "now web search cat",
+    "maybe web search cat",
+    "i want you to web search cat",
+    "let us try web search about cat",
+])
+def test_web_search_request_grants_web_after_any_lead_word(user_text):
+    assert "web_search" in _granted_tools(user_text)
+
+
+@pytest.mark.parametrize("user_text", [
+    "don't search the web",
+    "don't web search cat",
+    "try not to web search cat",
+    "No web search please, just tell me what you know about Python decorators.",
+    "is web search enabled?",
+    "why did the web search fail earlier?",
+])
+def test_web_search_denial_or_mention_grants_no_web(user_text):
+    assert "web_search" not in _granted_tools(user_text)
+
+
 def test_safe_task_read_does_not_authorize_same_tool_mutation():
     grant = create_request_authority("List my tasks")
     assert grant.permits(ExactOperation.normalize("manage_tasks", '{"action":"list"}'))

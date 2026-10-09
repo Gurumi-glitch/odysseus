@@ -4748,6 +4748,24 @@ def corrected_browser_target(message: str, history: Iterable = ()) -> dict | Non
     return None
 
 
+_WEB_SEARCH_VERB = re.compile(
+    r"(?:^|[.!?;,]\s*|\b(?:please|pls|now|then|and|also|just|try|maybe|you|to)\s+)"
+    r"(?P<phrase>(?:quick(?:ly)?\s+)?web\s+search)\b",
+    re.I,
+)
+_CLAUSE_NEGATION = re.compile(r"\b(?:no|not|never|without|dont)\b|n['’]t\b", re.I)
+
+
+def _requests_web_search(text: str) -> bool:
+    # "web search" as a verb after a lead word, not as a noun ("the web search
+    # failed") or under a negation ("try not to web search") (fork #12).
+    match = _WEB_SEARCH_VERB.search(text)
+    if not match:
+        return False
+    clause = re.split(r"[.!?;,]", text[:match.start("phrase")])[-1]
+    return not _CLAUSE_NEGATION.search(clause)
+
+
 def requested_capabilities(message: str, history: Iterable = (), *, active_document=False, workspace=False, image_attachment=False) -> frozenset[str]:
     """Classify once; inherit a prior capability only for a referential follow-up."""
     message = _routing_email_scope(editor_request_instructions(message))
@@ -5836,7 +5854,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         re.I,
     ):
         return frozenset({"search_browser"})
-    if re.match(r"^\s*(?:quick(?:ly)?\s+)?web\s+search\b", text, re.I):
+    if _requests_web_search(text):
         return frozenset({"search_browser"})
     if re.match(r"^\s*search\s*:\s*\S", text, re.I):
         return frozenset({"search_browser"})
