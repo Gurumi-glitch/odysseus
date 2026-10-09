@@ -65,3 +65,39 @@ def test_skill_test_stops_once_approvals_exceed_the_cap(approval_stream, retired
     assert job["verdict"]["verdict"] == "inconclusive"
     assert "5" in job["verdict"]["summary"]
     assert retired == [(approval_stream[-1]["approval_id"], "deny")]
+
+
+def _run_past_the_cap(key):
+    skills_routes._skill_test_jobs[key] = {
+        "status": "running", "log": [], "verdict": None,
+        "approvals_requested": skills_routes.SKILL_TEST_MAX_APPROVALS,
+    }
+    try:
+        return _run(key)
+    finally:
+        skills_routes._skill_test_jobs.pop(key, None)
+
+
+def test_cap_stop_is_logged_as_its_own_event(approval_stream, retired):
+    job = _run_past_the_cap(("owner", "cap-log-skill"))
+
+    assert [entry["type"] for entry in job["log"]][-1] == "approval_limit"
+    assert not any(entry["type"] == "approval_denied" for entry in job["log"])
+
+
+def test_cap_stops_the_test_even_if_retiring_the_approval_fails(approval_stream, monkeypatch):
+    from src.tool_approvals import tool_approval_store
+
+    def _broken_consume(*args, **kwargs):
+        raise RuntimeError("approval store unavailable")
+
+    async def _no_grading(*args, **kwargs):
+        raise AssertionError("a capped test must not be graded")
+
+    monkeypatch.setattr(tool_approval_store, "consume", _broken_consume)
+    monkeypatch.setattr(skills_routes, "_eval_skill_run", _no_grading)
+
+    job = _run_past_the_cap(("owner", "cap-retire-fails-skill"))
+
+    assert job["status"] == "done"
+    assert job["verdict"]["verdict"] == "inconclusive"

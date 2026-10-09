@@ -1371,7 +1371,7 @@ function _renderTestLog(logEl, verdictEl, job, card, name) {
     else if (ev.type === 'agent_step') add('— round ' + ev.round + ' —', 'skill-test-round');
     else if (ev.type === 'tool_start') add('▸ ' + ev.tool + '  ' + String(ev.command || '').slice(0, 200), 'skill-test-tool');
     else if (ev.type === 'tool_output') add(String(ev.output || '').slice(0, 500), 'skill-test-out');
-    else if (ev.type === 'approval_granted' || ev.type === 'approval_denied') add(ev.text || '', 'skill-test-meta');
+    else if (ev.type === 'approval_granted' || ev.type === 'approval_denied' || ev.type === 'approval_limit') add(ev.text || '', 'skill-test-meta');
     else if (ev.type === 'say') add(ev.text || '', 'skill-test-say');
     else if (ev.type === 'evaluating') add('Evaluating run…', 'skill-test-meta');
     else if (ev.type === 'error') add('Error: ' + (ev.error || 'run failed'), 'skill-test-err');

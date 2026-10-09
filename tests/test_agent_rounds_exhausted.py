@@ -17,7 +17,9 @@ from src.tool_capabilities import capabilities_for_action
 from src.tool_approvals import tool_approval_store
 from tests.runtime_evidence_helpers import authoritative_executor
 import src.tool_execution as execution
-from src.agent_runtime.authority import ExactOperation, active_request_authority, create_request_authority
+from src.agent_runtime.authority import (
+    ExactOperation, RequestAuthority, active_request_authority, create_request_authority,
+)
 from src.containment import ContainmentUnavailable, unavailable_tool_result
 from src.tool_policy import ToolPolicy
 
@@ -37,6 +39,9 @@ def _types(chunks):
             except Exception:
                 pass
     return out
+
+
+_REAL_DECISION_FOR = al.ToolRunSecurityContext.decision_for
 
 
 def _patch_common(monkeypatch):
@@ -4219,24 +4224,30 @@ _BLOCKED_REQUEST = "Summarize https://blocked.example/page"
 
 
 def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, max_rounds,
-                            request=_BLOCKED_REQUEST, relevant_tools=frozenset({"web_fetch"})):
+                            request=_BLOCKED_REQUEST, relevant_tools=frozenset({"web_fetch"}),
+                            origin=None, approved_call=("web_fetch", json.dumps(_BLOCKED_PAGE)),
+                            real_security_gate=False, allow_continuation=True):
     _patch_common(monkeypatch)
-    content = json.dumps(_BLOCKED_PAGE)
-    origin = create_request_authority(request, owner="admin", session_id=session_id)
+    if real_security_gate:
+        monkeypatch.setattr(al.ToolRunSecurityContext, "decision_for", _REAL_DECISION_FOR)
+    tool_name, content = approved_call
+    if origin is None:
+        origin = create_request_authority(request, owner="admin", session_id=session_id)
     pending = tool_approval_store.create(
         owner="admin",
         session_id=session_id,
         origin_run_id=f"{session_id}-run",
-        tool_name="web_fetch",
+        tool_name=tool_name,
         content=content,
         workspace=None,
         external_untrusted_context_seen=True,
-        capabilities=capabilities_for_action("web_fetch", content),
+        capabilities=capabilities_for_action(tool_name, content),
         request_text=request,
         request_authority=origin,
     )
     grant = tool_approval_store.consume(
         pending.approval_id, decision="approve", owner="admin", session_id=session_id,
+        allow_continuation=allow_continuation,
     )
     assert grant is not None
     monkeypatch.setattr(al, "execute_tool_block", fake_exec, raising=False)
@@ -4297,13 +4308,23 @@ def test_approved_action_that_fails_at_execution_returns_to_the_model(monkeypatc
     assert not any("could not run" in final for final in finals)
 
 
-@pytest.mark.parametrize("request_text,search_offered", [
-    (_BLOCKED_REQUEST, False),
-    ("Web search about the page, then fetch https://blocked.example/page", True),
+_SEARCH_AND_FETCH_REQUEST = "Web search about the page, then fetch https://blocked.example/page"
+
+
+@pytest.mark.parametrize("request_text,restrict,search_offered", [
+    # web_search is ungranted and read-only: it would run straight into BLOCKED.
+    (_BLOCKED_REQUEST, None, False),
+    (_SEARCH_AND_FETCH_REQUEST, None, True),
+    # Granted at first, then denied in the sealed authority (fork #11, 2a).
+    (_SEARCH_AND_FETCH_REQUEST, {"web_search"}, False),
 ])
-def test_approval_continuation_offers_only_sealed_authority_tools(
-        monkeypatch, request_text, search_offered):
+def test_approval_continuation_offers_only_tools_that_can_still_run(
+        monkeypatch, request_text, restrict, search_offered):
     offered = []
+    session_id = "approval-offer-scope-test"
+    origin = create_request_authority(request_text, owner="admin", session_id=session_id)
+    if restrict:
+        origin = origin.restrict(disabled_tools=restrict)
 
     async def _fake_exec(block, *args, **kwargs):
         return (block.tool_type, {"error": "web_fetch: Client error '403 Forbidden'", "exit_code": 1})
@@ -4314,12 +4335,78 @@ def test_approval_continuation_offers_only_sealed_authority_tools(
         yield "data: [DONE]\n\n"
 
     _run_approved_web_fetch(
-        monkeypatch, "approval-offer-scope-test", _fake_exec, _fake_stream, max_rounds=2,
-        request=request_text, relevant_tools={"web_fetch", "web_search", "bash"})
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=2,
+        request=request_text, relevant_tools={"web_fetch", "web_search", "bash"},
+        origin=origin, real_security_gate=True)
 
     assert offered
-    assert all("bash" not in names for names in offered)
     assert all(("web_search" in names) is search_offered for names in offered)
+
+
+def test_empty_authority_continuation_still_offers_approvable_tools(monkeypatch):
+    """A skill-test continuation: one-use grant, RequestAuthority.empty (fork #15)."""
+    offered = []
+    session_id = "approval-empty-authority-test"
+    next_page = json.dumps({"url": "https://next.example/page"})
+
+    async def _fake_exec(block, *args, **kwargs):
+        return (block.tool_type, {"output": "Page text.", "exit_code": 0})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        names = {tool["function"]["name"] for tool in kwargs.get("tools") or ()}
+        offered.append(names)
+        if "web_fetch" in names and len(offered) == 1:
+            yield "data: " + json.dumps({"type": "tool_calls", "calls": [{
+                "id": "next-page", "name": "web_fetch", "arguments": next_page,
+            }]}) + "\n\n"
+        else:
+            yield 'data: {"delta":"Stopped."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _, events = _run_approved_web_fetch(
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=3,
+        origin=RequestAuthority.empty(owner="admin", session_id=session_id),
+        real_security_gate=True, allow_continuation=False)
+
+    # Ungranted, but the gate seals it for a fresh approval, so the test's
+    # approval cap can actually be reached.
+    assert offered and "web_fetch" in offered[0]
+    approvals = [event for event in events
+                 if event.get("type") == "tool_output" and isinstance(event.get("ask_user"), dict)]
+    assert approvals and approvals[0]["ask_user"].get("kind") == "tool_approval"
+
+
+def test_approved_call_that_needs_approval_again_raises_no_second_prompt(monkeypatch):
+    """The identical sealed call re-proposed in the same turn is not re-approved (fork #5)."""
+    session_id = "approval-duplicate-prompt-test"
+    note = json.dumps({"action": "add", "title": "Groceries", "content": "milk"})
+    executed = []
+    model_requests = []
+
+    async def _fake_exec(block, *args, **kwargs):
+        executed.append(block.content)
+        return (block.tool_type, {"error": "Approval required.", "exit_code": 1, "approval_required": True})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
+        if len(model_requests) == 1:
+            yield "data: " + json.dumps({"type": "tool_calls", "calls": [{
+                "id": "same-note", "name": "manage_notes", "arguments": note,
+            }]}) + "\n\n"
+        else:
+            yield 'data: {"delta":"I could not save the note."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _, events = _run_approved_web_fetch(
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=3,
+        request="Add a note called Groceries with milk", relevant_tools={"manage_notes"},
+        approved_call=("manage_notes", note), real_security_gate=True)
+
+    assert model_requests, "the approval_required result did not reach the model"
+    assert "Approval required." in json.dumps(model_requests[0])
+    assert executed == [note]
+    assert '"kind": "tool_approval"' not in json.dumps(events)
+    assert any(event.get("type") == "tool_retry_blocked" for event in events)
 
 
 async def _dispatch_gate_result(block, **gates):

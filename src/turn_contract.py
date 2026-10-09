@@ -1010,6 +1010,15 @@ def _routing_email_scope(message: str) -> str:
     )
 
 
+# A search verb, not the noun ("the search results", "its search engine").
+_SEARCH_VERB = re.compile(
+    r"(?<!\bthe )(?<!\ba )(?<!\bits )(?<!\bmy )(?<!\byour )(?<!\bthis )(?<!\bthat )"
+    r"\b(?:search(?:ing|es)?|look(?:ing|s)?\s*up|googl(?:e|ing))\b"
+    r"(?!\s+(?:results?|engines?|bar|box|page|history|quer(?:y|ies)|terms?)\b)",
+    re.I,
+)
+
+
 def selected_tools_for_request(message: str) -> frozenset[str] | None:
     """Narrow only a complete, explicit operation; None retains family scope.
 
@@ -2073,7 +2082,7 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         # A single concrete HTML target is a complete operation. Narrowing it
         # avoids sending unrelated family schemas (notably union-root PDF
         # schemas rejected by some OpenAI-compatible providers).
-        if re.search(r"\b(?:search|look\s*up|google)\b", text.replace(urls[0], ""), re.I):
+        if _SEARCH_VERB.search(text.replace(urls[0], "")):
             # "Search X, then fetch URL" is two operations (fork #11).
             return frozenset({"web_search", "web_fetch"})
         return frozenset({"web_fetch"})
@@ -4749,7 +4758,8 @@ def corrected_browser_target(message: str, history: Iterable = ()) -> dict | Non
 
 
 _WEB_SEARCH_VERB = re.compile(
-    r"(?:^|[.!?;,]\s*|\b(?:please|pls|now|then|and|also|just|try|maybe|you|to)\s+)"
+    r"(?:^|[.!?;,]\s*|\b(?:please|pls|now|then|and|also|just|try|maybe)\s+"
+    r"|\b(?:can|could|would|will)\s+you\s+|\b(?:want|need|like|try)\s+(?:you\s+)?to\s+)"
     r"(?P<phrase>(?:quick(?:ly)?\s+)?web\s+search)\b",
     re.I,
 )

@@ -524,13 +524,32 @@ _skill_test_jobs: dict = {}
 SKILL_TEST_MAX_APPROVALS = 5
 
 
-def _stop_skill_test(job: dict, note: str, summary: str) -> None:
+def _stop_skill_test(job: dict, log_type: str, note: str, summary: str) -> None:
     job.pop("approval", None)
     job.pop("_transcript", None)
     job.pop("_run", None)
-    job["log"].append({"type": "approval_denied", "text": note})
+    job["log"].append({"type": log_type, "text": note})
     job["verdict"] = {"verdict": "inconclusive", "confidence": 1.0, "summary": summary, "issues": []}
     job["status"] = "done"
+
+
+def _stop_at_approval_cap(job: dict, approval: dict, owner) -> bool:
+    """Count one more approval; past the cap, retire it and stop the test."""
+    job["approvals_requested"] = job.get("approvals_requested", 0) + 1
+    if job["approvals_requested"] <= SKILL_TEST_MAX_APPROVALS:
+        return False
+    from src.tool_approvals import tool_approval_store
+    try:
+        tool_approval_store.consume(approval["approval_id"], decision="deny", owner=owner, session_id=None)
+    except Exception:
+        logger.warning("Could not retire the capped skill-test approval", exc_info=True)
+    _stop_skill_test(
+        job,
+        "approval_limit",
+        f"Approval limit reached ({SKILL_TEST_MAX_APPROVALS}); the skill test stopped.",
+        f"The test stopped after {SKILL_TEST_MAX_APPROVALS} approvals without finishing.",
+    )
+    return True
 
 
 async def _run_skill_test_job(
@@ -611,17 +630,7 @@ async def _run_skill_test_job(
                         # chat session. Pause the run and retain only server-side
                         # continuation state until the same owner approves/denies
                         # this exact sealed action.
-                        requested = job.get("approvals_requested", 0) + 1
-                        job["approvals_requested"] = requested
-                        if requested > SKILL_TEST_MAX_APPROVALS:
-                            from src.tool_approvals import tool_approval_store
-                            tool_approval_store.consume(
-                                approval["approval_id"], decision="deny", owner=owner, session_id=None)
-                            _stop_skill_test(
-                                job,
-                                f"Approval limit reached ({SKILL_TEST_MAX_APPROVALS}); the skill test stopped.",
-                                f"The test stopped after {SKILL_TEST_MAX_APPROVALS} approvals without finishing.",
-                            )
+                        if _stop_at_approval_cap(job, approval, owner):
                             return
                         job["status"] = "awaiting_approval"
                         job["approval"] = approval
@@ -2179,6 +2188,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if decision == "deny":
             _stop_skill_test(
                 job,
+                "approval_denied",
                 "Exact action denied; the skill test stopped without executing it.",
                 "The test stopped because its exact action was denied.",
             )

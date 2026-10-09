@@ -71,6 +71,8 @@ def _granted_tools(user_text):
 @pytest.mark.parametrize("user_text", [
     "web search about recent trump news, then fetch https://apnews.com/hub/donald-trump",
     "search recent trump news then read https://apnews.com/hub/donald-trump",
+    "searching trump news then read https://apnews.com/hub/donald-trump",
+    "google the latest trump news and compare with https://apnews.com/hub/donald-trump",
 ])
 def test_search_plus_one_url_grants_search_and_fetch(user_text):
     assert {"web_search", "web_fetch"} <= _granted_tools(user_text)
@@ -79,6 +81,8 @@ def test_search_plus_one_url_grants_search_and_fetch(user_text):
 @pytest.mark.parametrize("user_text", [
     "read https://apnews.com/hub/donald-trump",
     "Summarize https://example.com/search?q=trump",
+    "summarize the search results at https://example.com/results",
+    "read https://example.com/docs and explain its search engine design",
 ])
 def test_one_url_read_still_narrows_to_fetch(user_text):
     granted = _granted_tools(user_text)
@@ -95,6 +99,10 @@ def test_one_url_read_still_narrows_to_fetch(user_text):
     "maybe web search cat",
     "i want you to web search cat",
     "let us try web search about cat",
+    "can you web search cat",
+    "could you please web search cat",
+    "I'd like you to web search cat",
+    "try to web search cat",
 ])
 def test_web_search_request_grants_web_after_any_lead_word(user_text):
     assert "web_search" in _granted_tools(user_text)
@@ -107,6 +115,8 @@ def test_web_search_request_grants_web_after_any_lead_word(user_text):
     "No web search please, just tell me what you know about Python decorators.",
     "is web search enabled?",
     "why did the web search fail earlier?",
+    "did you web search cat?",
+    "I told you to web search cat yesterday",
 ])
 def test_web_search_denial_or_mention_grants_no_web(user_text):
     assert "web_search" not in _granted_tools(user_text)

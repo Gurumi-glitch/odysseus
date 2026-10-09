@@ -463,23 +463,11 @@
   flex: 0 0 auto;
   min-height: 0;
 }
-/* The completed-task filters are a compact toolbar, not a flexible panel.
-   Without this override the shared chip frame grows into the available
-   height of the card, which is especially visible the first time the mobile
-   view switches to Completed. */
-.tasks-completed-card > .doclib-chip-scroll-frame:has(> #tasks-completed-status-chips) {
-  flex: 0 0 auto;
-  min-height: 0;
-}
-/* The active Tasks filter row is also a compact toolbar.  Keep its wrapper
-   content-sized so changing a filter cannot make the mobile panel grow a
-   large empty gap between the chips and the task cards. */
-.admin-card > .doclib-chip-scroll-frame:has(> #tasks-filter-chips) {
-  flex: 0 0 auto;
-  min-height: 0;
-}
-/* Activity chips: a growing frame takes the whole card height and leaves the
-   run list at zero height (fork #10). */
+/* The Tasks modal filter rows are compact toolbars, not flexible panels.
+   The shared chip frame otherwise grows into the card's height: an empty gap
+   under Tasks/Completed chips, and a zero-height Activity run list (fork #10). */
+.tasks-completed-card > .doclib-chip-scroll-frame:has(> #tasks-completed-status-chips),
+.admin-card > .doclib-chip-scroll-frame:has(> #tasks-filter-chips),
 .tasks-activity-card > .doclib-chip-scroll-frame:has(> #tasks-activity-chips) {
   flex: 0 0 auto;
   min-height: 0;

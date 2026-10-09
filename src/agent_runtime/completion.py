@@ -207,13 +207,23 @@ def _is_answer_delta(event: dict) -> bool:
     return 'delta' in event and event.get('thinking') is not True and event.get('type') != 'final_response'
 
 
+def _last_span(text: str, fragment: str) -> tuple[int, int] | None:
+    start = text.rfind(fragment) if fragment else -1
+    return (start, start + len(fragment)) if start >= 0 else None
+
+
+def _cut_last(text: str, fragment: str) -> str:
+    span = _last_span(text, fragment)
+    return text[:span[0]] + text[span[1]:] if span else text
+
+
 def _retract_answer(events: list[dict], fragment: str) -> list[dict]:
     """Cut the last occurrence of ``fragment`` out of the buffered answer deltas."""
     text = ''.join(str(event.get('delta') or '') for event in events if _is_answer_delta(event))
-    start = text.rfind(fragment) if fragment else -1
-    if start < 0:
+    span = _last_span(text, fragment)
+    if span is None:
         return events
-    end = start + len(fragment)
+    start, end = span
     kept: list[dict] = []
     offset = 0
     for event in events:
@@ -313,9 +323,8 @@ def with_completion_gate(func):
                     if kind == 'retract_answer':
                         fragment = str(data.get('content') or '')
                         answer_events = _retract_answer(answer_events, fragment)
-                        if not has_final and fragment in answer:
-                            start = answer.rfind(fragment)
-                            answer = answer[:start] + answer[start + len(fragment):]
+                        if not has_final:
+                            answer = _cut_last(answer, fragment)
                         continue
                     if kind == 'final_response':
                         if first_answer_at is None:

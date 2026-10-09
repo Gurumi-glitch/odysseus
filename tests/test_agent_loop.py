@@ -246,6 +246,8 @@ def test_web_search_normalizer_trusts_model_chosen_contextual_query():
         ("web search about cat", "cat", "cat"),
         ("look up the Rust language", "Rust", "Rust"),
         ("tell me about NVDA stock", "NVDA", "NVDA"),
+        ("what does NVDA stock do today", "NVDA", "NVDA"),
+        ("search for recent news about Rust compiler releases", "Rust", "Rust"),
     ],
 )
 def test_web_search_normalizer_keeps_topical_model_query(user_text, model_query, expected):
@@ -262,6 +264,8 @@ def test_web_search_normalizer_keeps_topical_model_query(user_text, model_query,
         ("web search about cat", "web search", "cat"),
         ("maybe try a web search for rust", "search", "rust"),
         ("now search the web for nvda earnings", "search", "nvda earnings"),
+        ("try web search cat now", "search", "cat"),
+        ("let us web search cat then", "web search", "cat"),
     ],
 )
 def test_web_search_normalizer_replaces_control_phrase_with_bare_topic(user_text, model_query, expected):

@@ -17092,6 +17092,9 @@ _WEB_SEARCH_LEAD_IN_RE = re.compile(
 )
 
 
+_WEB_SEARCH_TRAILING_LEAD_IN_RE = re.compile(r"(?:\s+(?:now|then|again|too))+$", re.IGNORECASE)
+
+
 _WEB_SEARCH_POLLUTION_RE = re.compile(
     r"\b(?:official\s+links?|scientific\s+links?|reliable\s+sources?|"
     r"python\s+packaging|packaging\.python\.org|pypi|setuptools|"
@@ -17180,6 +17183,7 @@ def _web_search_query_from_user_text(user_text: str) -> str:
         if word.lower() not in _WEB_SEARCH_QUERY_STOPWORDS
     )
     text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    text = _WEB_SEARCH_TRAILING_LEAD_IN_RE.sub("", text)
     text = _WEB_SEARCH_LEAD_IN_RE.sub("", text, count=1) or text
     if not text:
         return str(user_text or "").strip()
@@ -17223,30 +17227,47 @@ def _web_search_query_has_topic(text: str) -> bool:
     return bool(_web_search_meaningful_words(text))
 
 
-def _web_search_query_is_actionable(query: str) -> bool:
+def _web_search_query_is_actionable(query: str, user_text: str | None = None) -> bool:
     """True when the model already supplied a usable search query.
 
     Odysseus should let the model choose search terms from the full chat
     context. The server-side normalizer exists to stop literal control phrases
     like "can you search" from becoming queries, not to rewrite topical model
-    queries into brittle app heuristics.
+    queries into brittle app heuristics. With ``user_text``, a lone keyword
+    ("cat", "NVDA") also counts unless it loses the user's topic (fork #13).
     """
     value = str(query or "").strip()
     if not value:
         return False
     if _is_generic_web_search_followup(value):
         return False
-    return len(_web_search_meaningful_words(value)) >= 2
+    words = _web_search_meaningful_words(value)
+    if len(words) >= 2:
+        return True
+    return user_text is not None and len(words) == 1 and not _web_search_keyword_drops_user_topic(user_text, value)
 
 
-def _web_search_keyword_query_is_actionable(user_text: str, query: str) -> bool:
-    """A lone keyword ("cat", "NVDA") is a real query unless it drops the user's topic (fork #13)."""
-    value = str(query or "").strip()
-    if not value or _is_generic_web_search_followup(value):
-        return False
-    if len(_web_search_meaningful_words(value)) != 1:
-        return False
-    return not _web_search_query_drops_user_terms(user_text, value)
+def _web_search_user_named_terms(user_text: str) -> set[str]:
+    """Words the user wrote as names: capitalized mid-sentence or all caps."""
+    text = str(user_text or "")
+    names = set()
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9]+", text):
+        word = match.group()
+        preceding = text[:match.start()].rstrip()
+        sentence_start = not preceding or preceding[-1] in ".!?"
+        if word.isupper() or (word[0].isupper() and not sentence_start):
+            names.add(word.lower())
+    return names
+
+
+def _web_search_keyword_drops_user_topic(user_text: str, keyword: str) -> bool:
+    # A named keyword ("NVDA", "Rust") is the topic itself unless the user named
+    # something else too; a common word ("weather") must not drop "Tokyo".
+    names = _web_search_user_named_terms(user_text)
+    word = keyword.strip().lower()
+    if keyword.strip()[:1].isupper() or word in names:
+        return not names <= {word}
+    return _web_search_query_drops_user_terms(user_text, keyword)
 
 
 def _web_fetch_failure_needs_private_browser(result: Any) -> bool:
@@ -18372,10 +18393,7 @@ def _normalize_web_search_block_query(
             cleaned = re.sub(r"\s+", " ", f"{replacement} {cleaned}").strip(" ,.;:")
     # Trust useful model-generated search terms. Everything below is for
     # literal wrapper/control phrases or polluted pseudo-queries.
-    if (
-        _web_search_query_is_actionable(cleaned)
-        or _web_search_keyword_query_is_actionable(user_text, cleaned)
-    ) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
+    if _web_search_query_is_actionable(cleaned, user_text) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
         if cleaned == query:
             return block
@@ -24807,6 +24825,9 @@ async def stream_agent_loop(
     _browser_state_epoch = 0
     _last_browser_open_signature = ""
     _failed_call_history: dict[str, dict[str, Any]] = {}
+    # The approved call failed or never ran; an identical re-proposal in this
+    # turn must not run or ask for approval again (fork #5).
+    _failed_approved_signature: str | None = None
     _successful_read_call_history: dict[str, dict[str, Any]] = {}
     _tui_local_network_completed = False
     _web_search_queries: list[str] = []
@@ -25017,18 +25038,29 @@ async def stream_agent_loop(
     # grants, so offering anything else only produces BLOCKED rounds (fork #11).
     _continuation_authority = active_request_authority() if exact_approval is not None else None
 
+    def _continuation_can_run(name):
+        # An ungranted tool can still pass through a fresh exact approval when
+        # the gate would ask for one; otherwise dispatch would block it.
+        authority = _continuation_authority
+        if authority is None:
+            return True
+        if authority.restricts_tool(name):
+            return False
+        return authority.grants_tool(name) or (
+            not authority.inherited and not run_security.decision_for(name).allowed)
+
     def _filter_route_tool_schemas(schemas):
         # Keep candidate actions visible after taint so the model can propose
         # the exact call that the server will seal for user approval.  Schema
         # visibility is not authority: both the loop and dispatcher still gate
         # execution, and only a one-use server record can cross that boundary.
-        return [schema for schema in schemas or ()
-                if schema.get("function", {}).get("name", schema.get("name")) not in _caller_hard_denials
-                and (_continuation_authority is None or _continuation_authority.grants_tool(
-                    schema.get("function", {}).get("name", schema.get("name"))))
+        named = ((schema, schema.get("function", {}).get("name", schema.get("name")))
+                 for schema in schemas or ())
+        return [schema for schema, name in named
+                if name not in _caller_hard_denials
+                and _continuation_can_run(name)
                 and not (tool_policy and tool_policy.block_all_tool_calls)
-                and not (delegated_credential and delegated_tool_is_blocked(
-                    schema.get("function", {}).get("name", schema.get("name"))))]
+                and not (delegated_credential and delegated_tool_is_blocked(name))]
 
     def _tool_schemas_for_route(route_state):
         route_mcp_schemas = route_state["mcp_schemas"]
@@ -25626,6 +25658,13 @@ async def stream_agent_loop(
         tool_events.append(approved_tool_event)
         if approved.tool_name in _VERIFIER_EFFECTFUL_TOOLS:
             _effectful_used = True
+        if not tool_result_is_successful(approved_result):
+            _failed_approved_signature = _tool_call_signature(approved.tool_name, approved.content)
+            _failed_call_history[_failed_approved_signature] = {
+                "round": 0,
+                "mutation_epoch": _workspace_mutation_epoch,
+                "error": approved_output[:600],
+            }
         formatted_approved_result = format_tool_result(desc, approved_result)
         _append_tool_results(
             messages,
@@ -32166,7 +32205,7 @@ async def stream_agent_loop(
             _call_signature = _tool_call_signature(block.tool_type, block.content)
             _previous_failure = _failed_call_history.get(_call_signature)
             _blocked_failed_retry = bool(
-                _terminal_completion_contract
+                (_terminal_completion_contract or _call_signature == _failed_approved_signature)
                 and _previous_failure
                 and _previous_failure.get("mutation_epoch") == _workspace_mutation_epoch
             )
@@ -33071,7 +33110,7 @@ async def stream_agent_loop(
                 _effective_call_signature
             )
             if (
-                _terminal_completion_contract
+                (_terminal_completion_contract or _effective_call_signature == _failed_approved_signature)
                 and _effective_previous_failure
                 and _effective_previous_failure.get("mutation_epoch")
                 == _workspace_mutation_epoch
