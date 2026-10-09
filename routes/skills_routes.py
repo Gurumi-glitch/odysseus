@@ -520,6 +520,17 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
 # the test survives the modal being closed; the UI polls /test-status. (Not
 # persisted across restart — it's a "come back in a bit" convenience.)
 _skill_test_jobs: dict = {}
+# Each approval resumes a fresh agent loop, so max_rounds never bounds a test (fork #15).
+SKILL_TEST_MAX_APPROVALS = 5
+
+
+def _stop_skill_test(job: dict, note: str, summary: str) -> None:
+    job.pop("approval", None)
+    job.pop("_transcript", None)
+    job.pop("_run", None)
+    job["log"].append({"type": "approval_denied", "text": note})
+    job["verdict"] = {"verdict": "inconclusive", "confidence": 1.0, "summary": summary, "issues": []}
+    job["status"] = "done"
 
 
 async def _run_skill_test_job(
@@ -600,6 +611,18 @@ async def _run_skill_test_job(
                         # chat session. Pause the run and retain only server-side
                         # continuation state until the same owner approves/denies
                         # this exact sealed action.
+                        requested = job.get("approvals_requested", 0) + 1
+                        job["approvals_requested"] = requested
+                        if requested > SKILL_TEST_MAX_APPROVALS:
+                            from src.tool_approvals import tool_approval_store
+                            tool_approval_store.consume(
+                                approval["approval_id"], decision="deny", owner=owner, session_id=None)
+                            _stop_skill_test(
+                                job,
+                                f"Approval limit reached ({SKILL_TEST_MAX_APPROVALS}); the skill test stopped.",
+                                f"The test stopped after {SKILL_TEST_MAX_APPROVALS} approvals without finishing.",
+                            )
+                            return
                         job["status"] = "awaiting_approval"
                         job["approval"] = approval
                         job["_transcript"] = transcript
@@ -2154,19 +2177,11 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             raise HTTPException(409, "This tool approval could not be consumed.")
         job.pop("approval", None)
         if decision == "deny":
-            job.pop("_transcript", None)
-            job.pop("_run", None)
-            job["log"].append({
-                "type": "approval_denied",
-                "text": "Exact action denied; the skill test stopped without executing it.",
-            })
-            job["verdict"] = {
-                "verdict": "inconclusive",
-                "confidence": 1.0,
-                "summary": "The test stopped because its exact action was denied.",
-                "issues": [],
-            }
-            job["status"] = "done"
+            _stop_skill_test(
+                job,
+                "Exact action denied; the skill test stopped without executing it.",
+                "The test stopped because its exact action was denied.",
+            )
             return {"ok": True, "status": "done", "decision": "deny"}
 
         run = job.get("_run") or {}
