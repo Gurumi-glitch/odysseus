@@ -16,6 +16,7 @@ import re
 import sys
 import time
 import uuid
+from contextlib import aclosing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -268,54 +269,55 @@ async def _run_case(case: dict[str, Any], args: argparse.Namespace) -> dict[str,
     stream_errors: list[dict[str, Any]] = []
 
     try:
-        async for chunk in stream_agent_loop(
-            args.endpoint,
-            args.model,
-            messages,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            max_rounds=args.max_rounds,
-            max_tool_calls=args.max_tool_calls,
-            active_document=active_document,
-            session_id=f"ody-live-hard-{case['id']}",
-            owner=args.owner,
-            client_runtime_context={
-                "timezone": args.timezone,
-                "tz_offset_min": args.tz_offset_min,
-            },
-        ):
-            event = _parse_sse(chunk)
-            if not event:
-                continue
-            if event.get("type") == "done":
-                break
-            if event.get("type") == "parse_error":
-                stream_errors.append(event)
-                continue
-            if "delta" in event and not event.get("thinking"):
-                text_parts.append(str(event.get("delta") or ""))
-            elif event.get("type") == "final_response":
-                final_replacements.append(str(event.get("content") or ""))
-            elif event.get("type") == "tool_start":
-                tool_calls.append({
-                    "tool": event.get("tool"),
-                    "command": event.get("command"),
-                    "args": _parse_tool_args(event.get("full_command") or event.get("command")),
-                    "round": event.get("round"),
-                    "call_id": event.get("call_id") or event.get("tool_call_id"),
-                })
-            elif event.get("type") == "tool_output":
-                tool_outputs.append({
-                    "tool": event.get("tool"),
-                    "command": event.get("command"),
-                    "output": event.get("output"),
-                    "exit_code": event.get("exit_code"),
-                    "call_id": event.get("call_id") or event.get("tool_call_id"),
-                })
-            elif event.get("type") == "metrics":
-                metrics = event.get("data") or {}
-            elif event.get("type") == "error":
-                stream_errors.append(event)
+        async with aclosing(stream_agent_loop(
+                args.endpoint,
+                args.model,
+                messages,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                max_rounds=args.max_rounds,
+                max_tool_calls=args.max_tool_calls,
+                active_document=active_document,
+                session_id=f"ody-live-hard-{case['id']}",
+                owner=args.owner,
+                client_runtime_context={
+                    "timezone": args.timezone,
+                    "tz_offset_min": args.tz_offset_min,
+                },
+        )) as stream:
+            async for chunk in stream:
+                event = _parse_sse(chunk)
+                if not event:
+                    continue
+                if event.get("type") == "done":
+                    break
+                if event.get("type") == "parse_error":
+                    stream_errors.append(event)
+                    continue
+                if "delta" in event and not event.get("thinking"):
+                    text_parts.append(str(event.get("delta") or ""))
+                elif event.get("type") == "final_response":
+                    final_replacements.append(str(event.get("content") or ""))
+                elif event.get("type") == "tool_start":
+                    tool_calls.append({
+                        "tool": event.get("tool"),
+                        "command": event.get("command"),
+                        "args": _parse_tool_args(event.get("full_command") or event.get("command")),
+                        "round": event.get("round"),
+                        "call_id": event.get("call_id") or event.get("tool_call_id"),
+                    })
+                elif event.get("type") == "tool_output":
+                    tool_outputs.append({
+                        "tool": event.get("tool"),
+                        "command": event.get("command"),
+                        "output": event.get("output"),
+                        "exit_code": event.get("exit_code"),
+                        "call_id": event.get("call_id") or event.get("tool_call_id"),
+                    })
+                elif event.get("type") == "metrics":
+                    metrics = event.get("data") or {}
+                elif event.get("type") == "error":
+                    stream_errors.append(event)
     finally:
         active_after = ""
         if active_doc_row is not None:

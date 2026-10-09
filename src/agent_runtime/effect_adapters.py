@@ -23,6 +23,7 @@ from src.agent_runtime.effects import (
     CleanupState, Coverage, EffectClaim, ExecutionOutcome, Impact, ObservationMechanism, OperationRef,
     Postcondition, Predicate, ProducerFacts, ResourceKind, ResourceRef, producer_facts, resource_ref,
 )
+from src.tool_capabilities import tool_result_was_denied
 
 
 _FILESYSTEM_READS = frozenset({"read_file", "ls", "glob", "grep"})
@@ -301,8 +302,7 @@ def _execution(result: Any, facts: ProducerFacts, capture: DispatchCapture) -> E
             return ExecutionOutcome.RUNNING
         if result.get("detached") is True:
             return ExecutionOutcome.RUNNING
-    denied = bool(result.get("blocked") or result.get("approval_required")
-                  or facts.failure_kind.endswith("_denied"))
+    denied = tool_result_was_denied(result, failure_kind=facts.failure_kind)
     if facts.exit_code == 0 and not result.get("error") and not denied:
         return ExecutionOutcome.REPORTED_SUCCESS
     return ExecutionOutcome.FAILED

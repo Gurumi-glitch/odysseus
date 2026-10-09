@@ -496,3 +496,26 @@ def test_dotted_python_import_paths_are_not_autolinked(node_available):
     assert 'href="https://imblearn.com' not in html
     assert 'href="https://sklearn.me' not in html
     assert 'href="https://example.com/docs"' in html
+
+
+def test_reasoning_prefix_without_reply_boundary_renders_as_reply(node_available):
+    # Saved round text from fork #14: a tool preamble glued to a Chinese answer.
+    saved = (
+        "I'll look up cats on the web and share what comes back."
+        "搜尋結果主要指向兩篇關於貓咪的文章。\n\n"
+        "Cats.com 則介紹了七種常見的貓叫聲與其含義：https://cats.com/cat-vocalizations"
+    )
+    result = _run_markdown_case(saved, "mod.extractThinkingBlocks(input)")
+
+    assert result["thinkingBlocks"] == []
+    assert result["content"] == saved
+
+
+def test_plain_reasoning_followed_by_a_reply_is_still_folded(node_available):
+    result = _run_markdown_case(
+        "The user wants a greeting. I should keep it short.\n\nHello! How can I help today?",
+        "mod.extractThinkingBlocks(input)",
+    )
+
+    assert result["thinkingBlocks"] == ["The user wants a greeting. I should keep it short."]
+    assert result["content"] == "Hello! How can I help today?"

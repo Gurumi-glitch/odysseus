@@ -16,6 +16,12 @@ from src.tool_capabilities import ToolGateDecision
 from src.tool_capabilities import capabilities_for_action
 from src.tool_approvals import tool_approval_store
 from tests.runtime_evidence_helpers import authoritative_executor
+import src.tool_execution as execution
+from src.agent_runtime.authority import (
+    ExactOperation, RequestAuthority, active_request_authority, create_request_authority,
+)
+from src.containment import ContainmentUnavailable, unavailable_tool_result
+from src.tool_policy import ToolPolicy
 
 
 def _collect(gen):
@@ -33,6 +39,9 @@ def _types(chunks):
             except Exception:
                 pass
     return out
+
+
+_REAL_DECISION_FOR = al.ToolRunSecurityContext.decision_for
 
 
 def _patch_common(monkeypatch):
@@ -4172,9 +4181,15 @@ def test_approval_continuation_cannot_fallback_into_host_shell(monkeypatch):
 
     async def _fake_exec(block, *args, **kwargs):
         seen_tools.append(block.tool_type)
-        return (block.tool_type, {"error": "disabled by user", "exit_code": 1})
+        return (block.tool_type, {
+            "error": "disabled by user", "exit_code": 1, "blocked": True,
+            "failure_kind": "request_authority_denied",
+        })
+
+    model_requests = []
 
     async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
         yield "data: {\"delta\":\"\"}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -4201,8 +4216,252 @@ def test_approval_continuation_cannot_fallback_into_host_shell(monkeypatch):
         event.get("type") == "tool_start" and event.get("tool") == "host_shell"
         for event in events
     )
-    final = next(event for event in events if event.get("type") == "final_response")
-    assert "disabled by user" in final["content"]
+    assert model_requests and "disabled by user" in json.dumps(model_requests[0])
+
+
+_BLOCKED_PAGE = {"url": "https://blocked.example/page"}
+_BLOCKED_REQUEST = "Summarize https://blocked.example/page"
+
+
+def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, max_rounds,
+                            request=_BLOCKED_REQUEST, relevant_tools=frozenset({"web_fetch"}),
+                            origin=None, approved_call=("web_fetch", json.dumps(_BLOCKED_PAGE)),
+                            real_security_gate=False, allow_continuation=True):
+    _patch_common(monkeypatch)
+    if real_security_gate:
+        monkeypatch.setattr(al.ToolRunSecurityContext, "decision_for", _REAL_DECISION_FOR)
+    tool_name, content = approved_call
+    if origin is None:
+        origin = create_request_authority(request, owner="admin", session_id=session_id)
+    pending = tool_approval_store.create(
+        owner="admin",
+        session_id=session_id,
+        origin_run_id=f"{session_id}-run",
+        tool_name=tool_name,
+        content=content,
+        workspace=None,
+        external_untrusted_context_seen=True,
+        capabilities=capabilities_for_action(tool_name, content),
+        request_text=request,
+        request_authority=origin,
+    )
+    grant = tool_approval_store.consume(
+        pending.approval_id, decision="approve", owner="admin", session_id=session_id,
+        allow_continuation=allow_continuation,
+    )
+    assert grant is not None
+    monkeypatch.setattr(al, "execute_tool_block", fake_exec, raising=False)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    events = _types(_collect(al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o",
+        [{"role": "user", "content": request}],
+        max_rounds=max_rounds,
+        relevant_tools=set(relevant_tools),
+        owner="admin",
+        session_id=session_id,
+        exact_approval=grant,
+    )))
+    return origin, events
+
+
+def test_approved_action_that_fails_at_execution_returns_to_the_model(monkeypatch):
+    calls = []
+    model_requests = []
+
+    async def _fake_exec(block, *args, **kwargs):
+        url = json.loads(block.content)["url"]
+        calls.append((url, active_request_authority()))
+        if url == _BLOCKED_PAGE["url"]:
+            return (block.tool_type, {
+                "error": f"web_fetch: {url}: Client error '403 Forbidden'",
+                "exit_code": 1,
+            })
+        return (block.tool_type, {"output": "Mirror copy of the page.", "exit_code": 0})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
+        if len(model_requests) == 1:
+            yield "data: " + json.dumps({
+                "type": "tool_calls",
+                "calls": [{
+                    "id": "retry-mirror",
+                    "name": "web_fetch",
+                    "arguments": json.dumps({"url": "https://mirror.example/page"}),
+                }],
+            }) + "\n\n"
+        else:
+            yield 'data: {"delta":"The original site refused access; the mirror says the same."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    origin, events = _run_approved_web_fetch(
+        monkeypatch, "approval-exec-failure-test", _fake_exec, _fake_stream, max_rounds=4)
+
+    assert model_requests, "the failed approved result never reached the model"
+    assert "403 Forbidden" in json.dumps(model_requests[0])
+    assert [url for url, _ in calls] == [_BLOCKED_PAGE["url"], "https://mirror.example/page"]
+    retry_authority = calls[1][1]
+    assert retry_authority.request_id == origin.request_id
+    assert retry_authority.permits(ExactOperation.normalize(
+        "web_fetch", json.dumps({"url": "https://mirror.example/page"})))
+    assert '"kind": "tool_approval"' not in json.dumps(events)
+    finals = [event["content"] for event in events if event.get("type") == "final_response"]
+    assert not any("could not run" in final for final in finals)
+
+
+_SEARCH_AND_FETCH_REQUEST = "Web search about the page, then fetch https://blocked.example/page"
+
+
+@pytest.mark.parametrize("request_text,restrict,search_offered", [
+    # web_search is ungranted and read-only: it would run straight into BLOCKED.
+    (_BLOCKED_REQUEST, None, False),
+    (_SEARCH_AND_FETCH_REQUEST, None, True),
+    # Granted at first, then denied in the sealed authority (fork #11, 2a).
+    (_SEARCH_AND_FETCH_REQUEST, {"web_search"}, False),
+])
+def test_approval_continuation_offers_only_tools_that_can_still_run(
+        monkeypatch, request_text, restrict, search_offered):
+    offered = []
+    session_id = "approval-offer-scope-test"
+    origin = create_request_authority(request_text, owner="admin", session_id=session_id)
+    if restrict:
+        origin = origin.restrict(disabled_tools=restrict)
+
+    async def _fake_exec(block, *args, **kwargs):
+        return (block.tool_type, {"error": "web_fetch: Client error '403 Forbidden'", "exit_code": 1})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        offered.append({tool["function"]["name"] for tool in kwargs.get("tools") or ()})
+        yield 'data: {"delta":"The page refused access."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _run_approved_web_fetch(
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=2,
+        request=request_text, relevant_tools={"web_fetch", "web_search", "bash"},
+        origin=origin, real_security_gate=True)
+
+    assert offered
+    assert all(("web_search" in names) is search_offered for names in offered)
+
+
+def test_empty_authority_continuation_still_offers_approvable_tools(monkeypatch):
+    """A skill-test continuation: one-use grant, RequestAuthority.empty (fork #15)."""
+    offered = []
+    session_id = "approval-empty-authority-test"
+    next_page = json.dumps({"url": "https://next.example/page"})
+
+    async def _fake_exec(block, *args, **kwargs):
+        return (block.tool_type, {"output": "Page text.", "exit_code": 0})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        names = {tool["function"]["name"] for tool in kwargs.get("tools") or ()}
+        offered.append(names)
+        if "web_fetch" in names and len(offered) == 1:
+            yield "data: " + json.dumps({"type": "tool_calls", "calls": [{
+                "id": "next-page", "name": "web_fetch", "arguments": next_page,
+            }]}) + "\n\n"
+        else:
+            yield 'data: {"delta":"Stopped."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _, events = _run_approved_web_fetch(
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=3,
+        origin=RequestAuthority.empty(owner="admin", session_id=session_id),
+        real_security_gate=True, allow_continuation=False)
+
+    # Ungranted, but the gate seals it for a fresh approval, so the test's
+    # approval cap can actually be reached.
+    assert offered and "web_fetch" in offered[0]
+    approvals = [event for event in events
+                 if event.get("type") == "tool_output" and isinstance(event.get("ask_user"), dict)]
+    assert approvals and approvals[0]["ask_user"].get("kind") == "tool_approval"
+
+
+def test_approved_call_that_needs_approval_again_raises_no_second_prompt(monkeypatch):
+    """The identical sealed call re-proposed in the same turn is not re-approved (fork #5)."""
+    session_id = "approval-duplicate-prompt-test"
+    note = json.dumps({"action": "add", "title": "Groceries", "content": "milk"})
+    executed = []
+    model_requests = []
+
+    async def _fake_exec(block, *args, **kwargs):
+        executed.append(block.content)
+        return (block.tool_type, {"error": "Approval required.", "exit_code": 1, "approval_required": True})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
+        if len(model_requests) == 1:
+            yield "data: " + json.dumps({"type": "tool_calls", "calls": [{
+                "id": "same-note", "name": "manage_notes", "arguments": note,
+            }]}) + "\n\n"
+        else:
+            yield 'data: {"delta":"I could not save the note."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _, events = _run_approved_web_fetch(
+        monkeypatch, session_id, _fake_exec, _fake_stream, max_rounds=3,
+        request="Add a note called Groceries with milk", relevant_tools={"manage_notes"},
+        approved_call=("manage_notes", note), real_security_gate=True)
+
+    assert model_requests, "the approval_required result did not reach the model"
+    assert "Approval required." in json.dumps(model_requests[0])
+    assert executed == [note]
+    assert '"kind": "tool_approval"' not in json.dumps(events)
+    assert any(event.get("type") == "tool_retry_blocked" for event in events)
+
+
+async def _dispatch_gate_result(block, **gates):
+    return (await execution._execute_tool_block_impl(block, **gates))[1]
+
+
+_NEVER_RAN_RESULTS = {
+    "request-authority": {
+        "error": "The exact operation is outside server request authority.",
+        "exit_code": 1, "blocked": True, "failure_kind": "request_authority_denied"},
+    "resource-identity": {
+        "error": "Approved action has no sealed backend identity",
+        "exit_code": 1, "blocked": True, "failure_kind": "resource_identity_denied"},
+    "turn-contract": {
+        "error": "Tool is outside the requested turn capabilities.",
+        "exit_code": 1, "failure_kind": "turn_contract_denied"},
+    "approval-required": {"error": "Approval required.", "exit_code": 1, "approval_required": True},
+    "not-executed": {
+        "error": "The configured producer cannot guarantee stable binding to the captured page.",
+        "exit_code": 1, "failure_kind": "page_binding_unavailable", "executed": False},
+    "containment-unavailable": unavailable_tool_result(
+        ContainmentUnavailable(frozenset({"network"}), "bwrap"), tool="web_fetch"),
+    "user-disabled": lambda block: _dispatch_gate_result(block, disabled_tools={"web_fetch"}),
+    "guide-only": lambda block: _dispatch_gate_result(
+        block, tool_policy=ToolPolicy(mode="guide_only", block_all_tool_calls=True)),
+    "admin-only": lambda block: _dispatch_gate_result(
+        al.ToolBlock("manage_settings", "{}"), owner="guest"),
+    "public-restricted": lambda block: _dispatch_gate_result(al.ToolBlock("bash", "ls"), owner="guest"),
+}
+
+
+@pytest.mark.parametrize("case", list(_NEVER_RAN_RESULTS))
+def test_approved_action_that_never_ran_returns_to_the_model(monkeypatch, case):
+    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: owner == "admin")
+    produce = _NEVER_RAN_RESULTS[case]
+    produced = []
+    model_requests = []
+
+    async def _fake_exec(block, *args, **kwargs):
+        result = await produce(block) if callable(produce) else dict(produce)
+        produced.append(result)
+        return (block.tool_type, result)
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        model_requests.append(messages)
+        yield 'data: {"delta":"improvised answer"}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _, events = _run_approved_web_fetch(
+        monkeypatch, f"approval-never-ran-{case}", _fake_exec, _fake_stream, max_rounds=2)
+
+    assert model_requests, "the never-ran approved result did not reach the model"
+    assert json.dumps(produced[0]["error"])[1:-1] in json.dumps(model_requests[0])
+    finals = [event["content"] for event in events if event.get("type") == "final_response"]
+    assert not any("could not run" in final for final in finals)
 
 
 def test_eval_local_network_tool_budget_forces_final_synthesis(monkeypatch):

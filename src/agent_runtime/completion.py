@@ -203,6 +203,41 @@ def _event(data: dict) -> str:
     return 'data: ' + json.dumps(data) + '\n\n'
 
 
+def _is_answer_delta(event: dict) -> bool:
+    return 'delta' in event and event.get('thinking') is not True and event.get('type') != 'final_response'
+
+
+def _last_span(text: str, fragment: str) -> tuple[int, int] | None:
+    start = text.rfind(fragment) if fragment else -1
+    return (start, start + len(fragment)) if start >= 0 else None
+
+
+def _cut_last(text: str, fragment: str) -> str:
+    span = _last_span(text, fragment)
+    return text[:span[0]] + text[span[1]:] if span else text
+
+
+def _retract_answer(events: list[dict], fragment: str) -> list[dict]:
+    """Cut the last occurrence of ``fragment`` out of the buffered answer deltas."""
+    text = ''.join(str(event.get('delta') or '') for event in events if _is_answer_delta(event))
+    span = _last_span(text, fragment)
+    if span is None:
+        return events
+    start, end = span
+    kept: list[dict] = []
+    offset = 0
+    for event in events:
+        if not _is_answer_delta(event):
+            kept.append(event)
+            continue
+        delta = str(event.get('delta') or '')
+        remaining = delta[:max(0, start - offset)] + delta[max(0, end - offset):]
+        offset += len(delta)
+        if remaining:
+            kept.append({**event, 'delta': remaining})
+    return kept
+
+
 def with_completion_gate(func):
     call_signature = signature(func)
 
@@ -285,6 +320,12 @@ def with_completion_gate(func):
                             if why:
                                 data = {**data, 'data': {**payload, 'question': question}}
                                 chunk = _event(data)
+                    if kind == 'retract_answer':
+                        fragment = str(data.get('content') or '')
+                        answer_events = _retract_answer(answer_events, fragment)
+                        if not has_final:
+                            answer = _cut_last(answer, fragment)
+                        continue
                     if kind == 'final_response':
                         if first_answer_at is None:
                             first_answer_at = perf_counter()

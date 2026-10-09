@@ -4,6 +4,8 @@ and _append_tool_results. Uses mock imports to avoid loading the full app stack.
 import sys
 import json
 from unittest.mock import MagicMock
+
+import pytest
 from src.tool_types import ToolBlock
 
 _MOCKED_IMPORTS = [
@@ -232,6 +234,53 @@ def test_web_search_normalizer_trusts_model_chosen_contextual_query():
     )
 
     assert _web_search_query_from_block(out) == "Gustav III Sweden dancing masquerade ball"
+
+
+@pytest.mark.parametrize(
+    ("user_text", "model_query", "expected"),
+    [
+        ("let us try web search about cat", "cat", "cat"),
+        ("let us try web search about cat", "cats", "cats"),
+        ("let us try web search about cat", "cat facts", "cat facts"),
+        ("let us try web search about cat", "information about cats", "information about cats"),
+        ("web search about cat", "cat", "cat"),
+        ("look up the Rust language", "Rust", "Rust"),
+        ("tell me about NVDA stock", "NVDA", "NVDA"),
+        ("what does NVDA stock do today", "NVDA", "NVDA"),
+        ("search for recent news about Rust compiler releases", "Rust", "Rust"),
+    ],
+)
+def test_web_search_normalizer_keeps_topical_model_query(user_text, model_query, expected):
+    out = _normalize_web_search_block_query(ToolBlock("web_search", model_query), user_text)
+
+    assert _web_search_query_from_block(out) == expected
+
+
+@pytest.mark.parametrize(
+    ("user_text", "model_query", "expected"),
+    [
+        ("let us try web search about cat", "search", "cat"),
+        ("let us try web search about cat", "can you search", "cat"),
+        ("web search about cat", "web search", "cat"),
+        ("maybe try a web search for rust", "search", "rust"),
+        ("now search the web for nvda earnings", "search", "nvda earnings"),
+        ("try web search cat now", "search", "cat"),
+        ("let us web search cat then", "web search", "cat"),
+    ],
+)
+def test_web_search_normalizer_replaces_control_phrase_with_bare_topic(user_text, model_query, expected):
+    out = _normalize_web_search_block_query(ToolBlock("web_search", model_query), user_text)
+
+    assert _web_search_query_from_block(out) == expected
+
+
+def test_web_search_normalizer_does_not_shrink_to_one_word_that_drops_the_topic():
+    out = _normalize_web_search_block_query(
+        ToolBlock("web_search", "weather"),
+        "what is the weather in Tokyo tomorrow",
+    )
+
+    assert "Tokyo" in _web_search_query_from_block(out)
 
 
 def test_web_search_normalizer_removes_leaked_prior_chat_prefix():

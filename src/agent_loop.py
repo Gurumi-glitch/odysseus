@@ -17086,6 +17086,15 @@ _WEB_SEARCH_QUERY_FILLER_RE = re.compile(
 )
 
 
+_WEB_SEARCH_LEAD_IN_RE = re.compile(
+    r"^(?:(?:let(?:'s|\s+us)|maybe|now|just|try)\s+)*(?:about\s+)?",
+    re.IGNORECASE,
+)
+
+
+_WEB_SEARCH_TRAILING_LEAD_IN_RE = re.compile(r"(?:\s+(?:now|then|again|too))+$", re.IGNORECASE)
+
+
 _WEB_SEARCH_POLLUTION_RE = re.compile(
     r"\b(?:official\s+links?|scientific\s+links?|reliable\s+sources?|"
     r"python\s+packaging|packaging\.python\.org|pypi|setuptools|"
@@ -17174,6 +17183,8 @@ def _web_search_query_from_user_text(user_text: str) -> str:
         if word.lower() not in _WEB_SEARCH_QUERY_STOPWORDS
     )
     text = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    text = _WEB_SEARCH_TRAILING_LEAD_IN_RE.sub("", text)
+    text = _WEB_SEARCH_LEAD_IN_RE.sub("", text, count=1) or text
     if not text:
         return str(user_text or "").strip()
     words = text.split()
@@ -17216,20 +17227,47 @@ def _web_search_query_has_topic(text: str) -> bool:
     return bool(_web_search_meaningful_words(text))
 
 
-def _web_search_query_is_actionable(query: str) -> bool:
+def _web_search_query_is_actionable(query: str, user_text: str | None = None) -> bool:
     """True when the model already supplied a usable search query.
 
     Odysseus should let the model choose search terms from the full chat
     context. The server-side normalizer exists to stop literal control phrases
     like "can you search" from becoming queries, not to rewrite topical model
-    queries into brittle app heuristics.
+    queries into brittle app heuristics. With ``user_text``, a lone keyword
+    ("cat", "NVDA") also counts unless it loses the user's topic (fork #13).
     """
     value = str(query or "").strip()
     if not value:
         return False
     if _is_generic_web_search_followup(value):
         return False
-    return len(_web_search_meaningful_words(value)) >= 2
+    words = _web_search_meaningful_words(value)
+    if len(words) >= 2:
+        return True
+    return user_text is not None and len(words) == 1 and not _web_search_keyword_drops_user_topic(user_text, value)
+
+
+def _web_search_user_named_terms(user_text: str) -> set[str]:
+    """Words the user wrote as names: capitalized mid-sentence or all caps."""
+    text = str(user_text or "")
+    names = set()
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9]+", text):
+        word = match.group()
+        preceding = text[:match.start()].rstrip()
+        sentence_start = not preceding or preceding[-1] in ".!?"
+        if word.isupper() or (word[0].isupper() and not sentence_start):
+            names.add(word.lower())
+    return names
+
+
+def _web_search_keyword_drops_user_topic(user_text: str, keyword: str) -> bool:
+    # A named keyword ("NVDA", "Rust") is the topic itself unless the user named
+    # something else too; a common word ("weather") must not drop "Tokyo".
+    names = _web_search_user_named_terms(user_text)
+    word = keyword.strip().lower()
+    if keyword.strip()[:1].isupper() or word in names:
+        return not names <= {word}
+    return _web_search_query_drops_user_terms(user_text, keyword)
 
 
 def _web_fetch_failure_needs_private_browser(result: Any) -> bool:
@@ -18355,7 +18393,7 @@ def _normalize_web_search_block_query(
             cleaned = re.sub(r"\s+", " ", f"{replacement} {cleaned}").strip(" ,.;:")
     # Trust useful model-generated search terms. Everything below is for
     # literal wrapper/control phrases or polluted pseudo-queries.
-    if _web_search_query_is_actionable(cleaned) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
+    if _web_search_query_is_actionable(cleaned, user_text) and not _WEB_SEARCH_POLLUTION_RE.search(cleaned):
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:")
         if cleaned == query:
             return block
@@ -24787,6 +24825,9 @@ async def stream_agent_loop(
     _browser_state_epoch = 0
     _last_browser_open_signature = ""
     _failed_call_history: dict[str, dict[str, Any]] = {}
+    # The approved call failed or never ran; an identical re-proposal in this
+    # turn must not run or ask for approval again (fork #5).
+    _failed_approved_signature: str | None = None
     _successful_read_call_history: dict[str, dict[str, Any]] = {}
     _tui_local_network_completed = False
     _web_search_queries: list[str] = []
@@ -24993,16 +25034,33 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # A continuation re-enables routing toggles but executes under the sealed
+    # grants, so offering anything else only produces BLOCKED rounds (fork #11).
+    _continuation_authority = active_request_authority() if exact_approval is not None else None
+
+    def _continuation_can_run(name):
+        # An ungranted tool can still pass through a fresh exact approval when
+        # the gate would ask for one; otherwise dispatch would block it.
+        authority = _continuation_authority
+        if authority is None:
+            return True
+        if authority.restricts_tool(name):
+            return False
+        return authority.grants_tool(name) or (
+            not authority.inherited and not run_security.decision_for(name).allowed)
+
     def _filter_route_tool_schemas(schemas):
         # Keep candidate actions visible after taint so the model can propose
         # the exact call that the server will seal for user approval.  Schema
         # visibility is not authority: both the loop and dispatcher still gate
         # execution, and only a one-use server record can cross that boundary.
-        return [schema for schema in schemas or ()
-                if schema.get("function", {}).get("name", schema.get("name")) not in _caller_hard_denials
+        named = ((schema, schema.get("function", {}).get("name", schema.get("name")))
+                 for schema in schemas or ())
+        return [schema for schema, name in named
+                if name not in _caller_hard_denials
+                and _continuation_can_run(name)
                 and not (tool_policy and tool_policy.block_all_tool_calls)
-                and not (delegated_credential and delegated_tool_is_blocked(
-                    schema.get("function", {}).get("name", schema.get("name"))))]
+                and not (delegated_credential and delegated_tool_is_blocked(name))]
 
     def _tool_schemas_for_route(route_state):
         route_mcp_schemas = route_state["mcp_schemas"]
@@ -25527,34 +25585,6 @@ async def stream_agent_loop(
             )
             _approved_read_completed = True
             _approved_result_injected = True
-        elif not tool_result_is_successful(approved_result) and (
-            approved_result.get("error")
-            or approved_result.get("blocked")
-            or approved_result.get("approval_required")
-            or approved_result.get("exit_code") not in (None, 0)
-        ):
-            # An approval continuation is a sealed action, not a fresh agent
-            # turn. If dispatch rejects that exact action (for example because
-            # the tool was disabled between proposal and approval), report the
-            # authoritative failure instead of asking the model to improvise a
-            # different domain or invent a generic synthesis.
-            _approval_error = str(
-                approved_result.get("error")
-                or approved_result.get("output")
-                or f"exit code {approved_result.get('exit_code')}"
-            ).strip()
-            _approval_response = (
-                f"The approved {approved.tool_name} action could not run: "
-                f"{_approval_error}"
-            )
-            full_response = _approval_response
-            yield (
-                "data: "
-                + json.dumps({"type": "final_response", "content": _approval_response})
-                + "\n\n"
-            )
-            _approved_read_completed = True
-            _approved_result_injected = True
         if approved_result.get("image_url"):
             yield (
                 "data: "
@@ -25628,6 +25658,13 @@ async def stream_agent_loop(
         tool_events.append(approved_tool_event)
         if approved.tool_name in _VERIFIER_EFFECTFUL_TOOLS:
             _effectful_used = True
+        if not tool_result_is_successful(approved_result):
+            _failed_approved_signature = _tool_call_signature(approved.tool_name, approved.content)
+            _failed_call_history[_failed_approved_signature] = {
+                "round": 0,
+                "mutation_epoch": _workspace_mutation_epoch,
+                "error": approved_output[:600],
+            }
         formatted_approved_result = format_tool_result(desc, approved_result)
         _append_tool_results(
             messages,
@@ -29960,6 +29997,7 @@ async def stream_agent_loop(
             for _idx, _earlier_text in enumerate(round_texts):
                 if str(_earlier_text or "").rstrip().endswith("?"):
                     full_response = _drop_rejected_round_response(full_response, _earlier_text)
+                    yield f'data: {json.dumps({"type": "retract_answer", "content": _earlier_text})}\n\n'
                     round_texts[_idx] = ""
                     _dropped_tool_preamble_from_stream = True
         if tool_blocks and (
@@ -29972,10 +30010,10 @@ async def stream_agent_loop(
             )
         ):
             # The model's "I'll fetch..." sentence is useful as internal
-            # progress but is not the answer. It has already streamed, so
-            # remove it from the final/history response before the next tool
-            # round contributes the actual result.
+            # progress but is not the answer. The completion gate still holds
+            # its deltas, so retract it there too (fork #14).
             full_response = _drop_rejected_round_response(full_response, cleaned_round)
+            yield f'data: {json.dumps({"type": "retract_answer", "content": cleaned_round})}\n\n'
             cleaned_round = ""
             _dropped_tool_preamble_from_stream = True
         round_texts.append(cleaned_round)
@@ -32167,7 +32205,7 @@ async def stream_agent_loop(
             _call_signature = _tool_call_signature(block.tool_type, block.content)
             _previous_failure = _failed_call_history.get(_call_signature)
             _blocked_failed_retry = bool(
-                _terminal_completion_contract
+                (_terminal_completion_contract or _call_signature == _failed_approved_signature)
                 and _previous_failure
                 and _previous_failure.get("mutation_epoch") == _workspace_mutation_epoch
             )
@@ -32290,10 +32328,15 @@ async def stream_agent_loop(
                     current_user_text=_last_user,
                 )
                 if normalized_web_block.content != block.content:
+                    _model_web_query = block.content.strip()
                     block = normalized_web_block
                     full_command = block.content.strip()
                     cmd_display = full_command
-                    logger.info("Normalized web_search query to remove generic query pollution: %s", full_command[:160])
+                    logger.info(
+                        "Normalized web_search query to remove generic query pollution: %r -> %r",
+                        _model_web_query[:160],
+                        full_command[:160],
+                    )
 
             if (
                 _contextual_public_web_followup
@@ -33067,7 +33110,7 @@ async def stream_agent_loop(
                 _effective_call_signature
             )
             if (
-                _terminal_completion_contract
+                (_terminal_completion_contract or _effective_call_signature == _failed_approved_signature)
                 and _effective_previous_failure
                 and _effective_previous_failure.get("mutation_epoch")
                 == _workspace_mutation_epoch

@@ -6,6 +6,7 @@ import os
 import re
 import time
 import logging
+from contextlib import aclosing, nullcontext
 import re as _re
 from urllib.parse import urlparse
 from datetime import datetime
@@ -852,13 +853,10 @@ def _external_execution_bridge(
 
 async def _stream_agent_with_execution_bridge(bridge, *args, **kwargs):
     with bind_turn_contract(kwargs.get("turn_contract")):
-        if bridge is None:
-            async for chunk in stream_agent_loop(*args, **kwargs):
-                yield chunk
-            return
-        with bind_execution_bridge(bridge):
-            async for chunk in stream_agent_loop(*args, **kwargs):
-                yield chunk
+        with bind_execution_bridge(bridge) if bridge is not None else nullcontext():
+            async with aclosing(stream_agent_loop(*args, **kwargs)) as stream:
+                async for chunk in stream:
+                    yield chunk
 
 
 def _should_detach_chat_stream(

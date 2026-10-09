@@ -64,6 +64,64 @@ def test_explicit_request_classes_remain_narrow(user_text, allowed, denied):
     assert not grant.permits(ExactOperation.normalize(denied, '{}'))
 
 
+def _granted_tools(user_text):
+    return {grant.tool for grant in create_request_authority(user_text).grants}
+
+
+@pytest.mark.parametrize("user_text", [
+    "web search about recent trump news, then fetch https://apnews.com/hub/donald-trump",
+    "search recent trump news then read https://apnews.com/hub/donald-trump",
+    "searching trump news then read https://apnews.com/hub/donald-trump",
+    "google the latest trump news and compare with https://apnews.com/hub/donald-trump",
+])
+def test_search_plus_one_url_grants_search_and_fetch(user_text):
+    assert {"web_search", "web_fetch"} <= _granted_tools(user_text)
+
+
+@pytest.mark.parametrize("user_text", [
+    "read https://apnews.com/hub/donald-trump",
+    "Summarize https://example.com/search?q=trump",
+    "summarize the search results at https://example.com/results",
+    "read https://example.com/docs and explain its search engine design",
+])
+def test_one_url_read_still_narrows_to_fetch(user_text):
+    granted = _granted_tools(user_text)
+    assert "web_fetch" in granted
+    assert "web_search" not in granted
+
+
+@pytest.mark.parametrize("user_text", [
+    "web search cat",
+    "please web search cat",
+    "web search cat please",
+    "try web search cat",
+    "now web search cat",
+    "maybe web search cat",
+    "i want you to web search cat",
+    "let us try web search about cat",
+    "can you web search cat",
+    "could you please web search cat",
+    "I'd like you to web search cat",
+    "try to web search cat",
+])
+def test_web_search_request_grants_web_after_any_lead_word(user_text):
+    assert "web_search" in _granted_tools(user_text)
+
+
+@pytest.mark.parametrize("user_text", [
+    "don't search the web",
+    "don't web search cat",
+    "try not to web search cat",
+    "No web search please, just tell me what you know about Python decorators.",
+    "is web search enabled?",
+    "why did the web search fail earlier?",
+    "did you web search cat?",
+    "I told you to web search cat yesterday",
+])
+def test_web_search_denial_or_mention_grants_no_web(user_text):
+    assert "web_search" not in _granted_tools(user_text)
+
+
 def test_safe_task_read_does_not_authorize_same_tool_mutation():
     grant = create_request_authority("List my tasks")
     assert grant.permits(ExactOperation.normalize("manage_tasks", '{"action":"list"}'))
@@ -410,6 +468,68 @@ async def test_server_seeded_defaults_have_authority_but_legacy_rows_do_not_gain
             grant = restore_task_authority(task.request_authority_json, task.prompt,
                 task.task_type, task.action, owner=task.owner)
             assert grant.permits(task_operation(task.task_type, task.action, task.prompt)) == (task.id != "legacy")
+    engine.dispose()
+
+
+def _builtin_row(**fields):
+    import core.database as database
+    return database.ScheduledTask(**{"owner": "alice", "name": "Chat Sessions Tidy",
+        "task_type": "action", "action": "tidy_sessions", "prompt": None,
+        "request_authority_json": None, **fields})
+
+
+def test_builtin_row_from_before_task_authority_is_backfilled():
+    from src.task_scheduler import backfill_builtin_task_authority
+    task = _builtin_row()
+
+    assert backfill_builtin_task_authority(task, "alice") is True
+
+    grant = restore_task_authority(task.request_authority_json, task.prompt,
+        task.task_type, task.action, owner="alice")
+    assert grant.permits(task_operation(task.task_type, task.action, task.prompt))
+
+
+@pytest.mark.parametrize("fields", [
+    {"request_authority_json": '{"kept": true}'},
+    {"name": "My session cleanup"},
+    {"prompt": "Tidy my sessions"},
+], ids=["already-sealed", "renamed", "prompted"])
+def test_backfill_leaves_rows_that_are_not_pristine_builtins(fields):
+    from src.task_scheduler import backfill_builtin_task_authority
+    task = _builtin_row(**fields)
+
+    assert backfill_builtin_task_authority(task, "alice") is False
+    assert task.request_authority_json == fields.get("request_authority_json")
+
+
+@pytest.mark.asyncio
+async def test_ensure_defaults_backfills_builtin_rows_once(monkeypatch, tmp_path):
+    import core.database as database
+    import routes.prefs_routes as preferences
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from src.task_scheduler import TaskScheduler
+    engine = create_engine(f"sqlite:///{tmp_path / 'tasks.db'}")
+    database.Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", sessions)
+    monkeypatch.setattr(preferences, "_load_for_user", lambda owner: {"tasks_opened": True})
+    scheduler = TaskScheduler(session_manager=None)
+    monkeypatch.setattr(scheduler, "ensure_assistant_defaults", AsyncMock())
+    with sessions() as db:
+        db.add(_builtin_row(id="tidy", status="paused", trigger_type="event",
+            trigger_event="session_created", trigger_count=5))
+        db.commit()
+
+    await scheduler.ensure_defaults("alice")
+    with sessions() as db:
+        task = db.get(database.ScheduledTask, "tidy")
+        snapshot = task.request_authority_json
+        assert (snapshot is not None, task.status) == (True, "paused")
+
+    await scheduler.ensure_defaults("alice")
+    with sessions() as db:
+        assert db.get(database.ScheduledTask, "tidy").request_authority_json == snapshot
     engine.dispose()
 
 

@@ -1010,6 +1010,15 @@ def _routing_email_scope(message: str) -> str:
     )
 
 
+# A search verb, not the noun ("the search results", "its search engine").
+_SEARCH_VERB = re.compile(
+    r"(?<!\bthe )(?<!\ba )(?<!\bits )(?<!\bmy )(?<!\byour )(?<!\bthis )(?<!\bthat )"
+    r"\b(?:search(?:ing|es)?|look(?:ing|s)?\s*up|googl(?:e|ing))\b"
+    r"(?!\s+(?:results?|engines?|bar|box|page|history|quer(?:y|ies)|terms?)\b)",
+    re.I,
+)
+
+
 def selected_tools_for_request(message: str) -> frozenset[str] | None:
     """Narrow only a complete, explicit operation; None retains family scope.
 
@@ -2073,6 +2082,9 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         # A single concrete HTML target is a complete operation. Narrowing it
         # avoids sending unrelated family schemas (notably union-root PDF
         # schemas rejected by some OpenAI-compatible providers).
+        if _SEARCH_VERB.search(text.replace(urls[0], "")):
+            # "Search X, then fetch URL" is two operations (fork #11).
+            return frozenset({"web_search", "web_fetch"})
         return frozenset({"web_fetch"})
     if _ORDINAL_EMAIL_FOLLOWUP.fullmatch(text):
         return frozenset({"read_email"})
@@ -4745,6 +4757,25 @@ def corrected_browser_target(message: str, history: Iterable = ()) -> dict | Non
     return None
 
 
+_WEB_SEARCH_VERB = re.compile(
+    r"(?:^|[.!?;,]\s*|\b(?:please|pls|now|then|and|also|just|try|maybe)\s+"
+    r"|\b(?:can|could|would|will)\s+you\s+|\b(?:want|need|like|try)\s+(?:you\s+)?to\s+)"
+    r"(?P<phrase>(?:quick(?:ly)?\s+)?web\s+search)\b",
+    re.I,
+)
+_CLAUSE_NEGATION = re.compile(r"\b(?:no|not|never|without|dont)\b|n['’]t\b", re.I)
+
+
+def _requests_web_search(text: str) -> bool:
+    # "web search" as a verb after a lead word, not as a noun ("the web search
+    # failed") or under a negation ("try not to web search") (fork #12).
+    match = _WEB_SEARCH_VERB.search(text)
+    if not match:
+        return False
+    clause = re.split(r"[.!?;,]", text[:match.start("phrase")])[-1]
+    return not _CLAUSE_NEGATION.search(clause)
+
+
 def requested_capabilities(message: str, history: Iterable = (), *, active_document=False, workspace=False, image_attachment=False) -> frozenset[str]:
     """Classify once; inherit a prior capability only for a referential follow-up."""
     message = _routing_email_scope(editor_request_instructions(message))
@@ -5833,7 +5864,7 @@ def requested_capabilities(message: str, history: Iterable = (), *, active_docum
         re.I,
     ):
         return frozenset({"search_browser"})
-    if re.match(r"^\s*(?:quick(?:ly)?\s+)?web\s+search\b", text, re.I):
+    if _requests_web_search(text):
         return frozenset({"search_browser"})
     if re.match(r"^\s*search\s*:\s*\S", text, re.I):
         return frozenset({"search_browser"})

@@ -616,6 +616,23 @@ def tool_result_is_successful(result: Any) -> bool:
     )
 
 
+def tool_result_was_denied(result: Any, *, failure_kind: str | None = None) -> bool:
+    """Return whether dispatch refused the call before its tool ran.
+
+    ``failure_kind`` replaces the raw key when the caller trusts only an
+    attested label (effect settlement ignores labels from unbound producers).
+    """
+    if not isinstance(result, dict):
+        return False
+    if failure_kind is None:
+        failure_kind = str(result.get("failure_kind") or "")
+    return bool(
+        result.get("blocked")
+        or result.get("approval_required")
+        or failure_kind.endswith("_denied")
+    )
+
+
 def tool_result_should_arm_gate(
     tool_name: Any,
     result: Any,
