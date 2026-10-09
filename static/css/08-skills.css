@@ -478,6 +478,12 @@
   flex: 0 0 auto;
   min-height: 0;
 }
+/* Activity chips: a growing frame takes the whole card height and leaves the
+   run list at zero height (fork #10). */
+.tasks-activity-card > .doclib-chip-scroll-frame:has(> #tasks-activity-chips) {
+  flex: 0 0 auto;
+  min-height: 0;
+}
 #memory-category-filters {
   flex: 0 0 auto;
   min-height: 25px;

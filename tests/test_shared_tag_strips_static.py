@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from tests.helpers.stylesheets import app_css
 
@@ -64,3 +65,23 @@ def test_memory_and_skills_filters_follow_their_search_fields():
     skills_summary = INDEX.index('id="skills-summary"')
     assert memory_search < memory_filters
     assert skills_search < skills_summary
+
+
+def test_every_tasks_modal_chip_strip_keeps_its_scroll_frame_content_sized():
+    """The shared frame grows by default; in the Tasks column cards that
+    collapses the list below it to zero height (fork #10)."""
+    tasks_js = (ROOT / "static/js/tasks.js").read_text(encoding="utf-8")
+    strip_ids = re.findall(
+        r'<div\b(?=[^>]*\bclass="tasks-activity-filters")[^>]*\bid="([^"]+)"'
+        r'|<div\b(?=[^>]*\bid="([^"]+)")[^>]*\bclass="tasks-activity-filters"',
+        tasks_js,
+    )
+    strip_ids = {a or b for a, b in strip_ids}
+    assert {"tasks-activity-chips", "tasks-completed-status-chips", "tasks-filter-chips"} <= strip_ids
+
+    for strip_id in strip_ids:
+        selector = f".doclib-chip-scroll-frame:has(> #{strip_id})"
+        assert selector in STYLE, f"no content-sized frame rule for #{strip_id}"
+        rule = STYLE[STYLE.index(selector):]
+        rule = rule[rule.index("{"):rule.index("}")]
+        assert "flex: 0 0 auto" in rule, f"#{strip_id} frame can still grow"
