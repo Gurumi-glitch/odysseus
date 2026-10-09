@@ -24993,6 +24993,10 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # A continuation re-enables routing toggles but executes under the sealed
+    # grants, so offering anything else only produces BLOCKED rounds (fork #11).
+    _continuation_authority = active_request_authority() if exact_approval is not None else None
+
     def _filter_route_tool_schemas(schemas):
         # Keep candidate actions visible after taint so the model can propose
         # the exact call that the server will seal for user approval.  Schema
@@ -25000,6 +25004,8 @@ async def stream_agent_loop(
         # execution, and only a one-use server record can cross that boundary.
         return [schema for schema in schemas or ()
                 if schema.get("function", {}).get("name", schema.get("name")) not in _caller_hard_denials
+                and (_continuation_authority is None or _continuation_authority.grants_tool(
+                    schema.get("function", {}).get("name", schema.get("name"))))
                 and not (tool_policy and tool_policy.block_all_tool_calls)
                 and not (delegated_credential and delegated_tool_is_blocked(
                     schema.get("function", {}).get("name", schema.get("name"))))]

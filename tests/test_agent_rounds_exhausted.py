@@ -4218,10 +4218,11 @@ _BLOCKED_PAGE = {"url": "https://blocked.example/page"}
 _BLOCKED_REQUEST = "Summarize https://blocked.example/page"
 
 
-def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, max_rounds):
+def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, max_rounds,
+                            request=_BLOCKED_REQUEST, relevant_tools=frozenset({"web_fetch"})):
     _patch_common(monkeypatch)
     content = json.dumps(_BLOCKED_PAGE)
-    origin = create_request_authority(_BLOCKED_REQUEST, owner="admin", session_id=session_id)
+    origin = create_request_authority(request, owner="admin", session_id=session_id)
     pending = tool_approval_store.create(
         owner="admin",
         session_id=session_id,
@@ -4231,7 +4232,7 @@ def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, 
         workspace=None,
         external_untrusted_context_seen=True,
         capabilities=capabilities_for_action("web_fetch", content),
-        request_text=_BLOCKED_REQUEST,
+        request_text=request,
         request_authority=origin,
     )
     grant = tool_approval_store.consume(
@@ -4242,9 +4243,9 @@ def _run_approved_web_fetch(monkeypatch, session_id, fake_exec, fake_stream, *, 
     monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
     events = _types(_collect(al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o",
-        [{"role": "user", "content": _BLOCKED_REQUEST}],
+        [{"role": "user", "content": request}],
         max_rounds=max_rounds,
-        relevant_tools={"web_fetch"},
+        relevant_tools=set(relevant_tools),
         owner="admin",
         session_id=session_id,
         exact_approval=grant,
@@ -4294,6 +4295,31 @@ def test_approved_action_that_fails_at_execution_returns_to_the_model(monkeypatc
     assert '"kind": "tool_approval"' not in json.dumps(events)
     finals = [event["content"] for event in events if event.get("type") == "final_response"]
     assert not any("could not run" in final for final in finals)
+
+
+@pytest.mark.parametrize("request_text,search_offered", [
+    (_BLOCKED_REQUEST, False),
+    ("Web search about the page, then fetch https://blocked.example/page", True),
+])
+def test_approval_continuation_offers_only_sealed_authority_tools(
+        monkeypatch, request_text, search_offered):
+    offered = []
+
+    async def _fake_exec(block, *args, **kwargs):
+        return (block.tool_type, {"error": "web_fetch: Client error '403 Forbidden'", "exit_code": 1})
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        offered.append({tool["function"]["name"] for tool in kwargs.get("tools") or ()})
+        yield 'data: {"delta":"The page refused access."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    _run_approved_web_fetch(
+        monkeypatch, "approval-offer-scope-test", _fake_exec, _fake_stream, max_rounds=2,
+        request=request_text, relevant_tools={"web_fetch", "web_search", "bash"})
+
+    assert offered
+    assert all("bash" not in names for names in offered)
+    assert all(("web_search" in names) is search_offered for names in offered)
 
 
 async def _dispatch_gate_result(block, **gates):

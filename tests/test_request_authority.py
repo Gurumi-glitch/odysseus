@@ -64,6 +64,28 @@ def test_explicit_request_classes_remain_narrow(user_text, allowed, denied):
     assert not grant.permits(ExactOperation.normalize(denied, '{}'))
 
 
+def _granted_tools(user_text):
+    return {grant.tool for grant in create_request_authority(user_text).grants}
+
+
+@pytest.mark.parametrize("user_text", [
+    "web search about recent trump news, then fetch https://apnews.com/hub/donald-trump",
+    "search recent trump news then read https://apnews.com/hub/donald-trump",
+])
+def test_search_plus_one_url_grants_search_and_fetch(user_text):
+    assert {"web_search", "web_fetch"} <= _granted_tools(user_text)
+
+
+@pytest.mark.parametrize("user_text", [
+    "read https://apnews.com/hub/donald-trump",
+    "Summarize https://example.com/search?q=trump",
+])
+def test_one_url_read_still_narrows_to_fetch(user_text):
+    granted = _granted_tools(user_text)
+    assert "web_fetch" in granted
+    assert "web_search" not in granted
+
+
 def test_safe_task_read_does_not_authorize_same_tool_mutation():
     grant = create_request_authority("List my tasks")
     assert grant.permits(ExactOperation.normalize("manage_tasks", '{"action":"list"}'))

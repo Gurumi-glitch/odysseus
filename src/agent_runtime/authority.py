@@ -212,6 +212,12 @@ class RequestAuthority:
     def permits(self, operation):
         return not self.restricted(operation) and any(g.permits(operation) for g in self.grants)
 
+    def grants_tool(self, name):
+        """Whether some operation of this tool can be admitted, ignoring its input."""
+        tool = canonical_tool(name)
+        return (not self.restricted(ExactOperation(tool, "", transport_tool=name))
+                and any(g.tool == tool for g in self.grants))
+
     def restrict(self, policy=None, disabled_tools=()):
         policy = policy or ToolPolicy()
         return replace(self, denied=self.denied | frozenset(

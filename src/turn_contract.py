@@ -2073,6 +2073,9 @@ def selected_tools_for_request(message: str) -> frozenset[str] | None:
         # A single concrete HTML target is a complete operation. Narrowing it
         # avoids sending unrelated family schemas (notably union-root PDF
         # schemas rejected by some OpenAI-compatible providers).
+        if re.search(r"\b(?:search|look\s*up|google)\b", text.replace(urls[0], ""), re.I):
+            # "Search X, then fetch URL" is two operations (fork #11).
+            return frozenset({"web_search", "web_fetch"})
         return frozenset({"web_fetch"})
     if _ORDINAL_EMAIL_FOLLOWUP.fullmatch(text):
         return frozenset({"read_email"})
