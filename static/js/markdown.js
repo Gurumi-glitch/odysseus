@@ -494,11 +494,8 @@ function normalizePlainThinking(text) {
     }
   }
 
-  if (/^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|i need to |i should |i will |i'll |i am going )/i.test(trimmed)) {
-    const thinkBlock = withoutPrefix.trim();
-    if (thinkBlock) return `<think>${thinkBlock}</think>`;
-  }
-
+  // No reasoning/reply boundary: a reply that merely opens with "I'll ..."
+  // must stay visible rather than collapse into one thinking block (fork #14).
   return text;
 }
 

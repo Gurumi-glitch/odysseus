@@ -29938,6 +29938,7 @@ async def stream_agent_loop(
             for _idx, _earlier_text in enumerate(round_texts):
                 if str(_earlier_text or "").rstrip().endswith("?"):
                     full_response = _drop_rejected_round_response(full_response, _earlier_text)
+                    yield f'data: {json.dumps({"type": "retract_answer", "content": _earlier_text})}\n\n'
                     round_texts[_idx] = ""
                     _dropped_tool_preamble_from_stream = True
         if tool_blocks and (
@@ -29950,10 +29951,10 @@ async def stream_agent_loop(
             )
         ):
             # The model's "I'll fetch..." sentence is useful as internal
-            # progress but is not the answer. It has already streamed, so
-            # remove it from the final/history response before the next tool
-            # round contributes the actual result.
+            # progress but is not the answer. The completion gate still holds
+            # its deltas, so retract it there too (fork #14).
             full_response = _drop_rejected_round_response(full_response, cleaned_round)
+            yield f'data: {json.dumps({"type": "retract_answer", "content": cleaned_round})}\n\n'
             cleaned_round = ""
             _dropped_tool_preamble_from_stream = True
         round_texts.append(cleaned_round)

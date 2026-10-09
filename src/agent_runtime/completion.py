@@ -203,6 +203,31 @@ def _event(data: dict) -> str:
     return 'data: ' + json.dumps(data) + '\n\n'
 
 
+def _is_answer_delta(event: dict) -> bool:
+    return 'delta' in event and event.get('thinking') is not True and event.get('type') != 'final_response'
+
+
+def _retract_answer(events: list[dict], fragment: str) -> list[dict]:
+    """Cut the last occurrence of ``fragment`` out of the buffered answer deltas."""
+    text = ''.join(str(event.get('delta') or '') for event in events if _is_answer_delta(event))
+    start = text.rfind(fragment) if fragment else -1
+    if start < 0:
+        return events
+    end = start + len(fragment)
+    kept: list[dict] = []
+    offset = 0
+    for event in events:
+        if not _is_answer_delta(event):
+            kept.append(event)
+            continue
+        delta = str(event.get('delta') or '')
+        remaining = delta[:max(0, start - offset)] + delta[max(0, end - offset):]
+        offset += len(delta)
+        if remaining:
+            kept.append({**event, 'delta': remaining})
+    return kept
+
+
 def with_completion_gate(func):
     call_signature = signature(func)
 
@@ -285,6 +310,13 @@ def with_completion_gate(func):
                             if why:
                                 data = {**data, 'data': {**payload, 'question': question}}
                                 chunk = _event(data)
+                    if kind == 'retract_answer':
+                        fragment = str(data.get('content') or '')
+                        answer_events = _retract_answer(answer_events, fragment)
+                        if not has_final and fragment in answer:
+                            start = answer.rfind(fragment)
+                            answer = answer[:start] + answer[start + len(fragment):]
+                        continue
                     if kind == 'final_response':
                         if first_answer_at is None:
                             first_answer_at = perf_counter()
