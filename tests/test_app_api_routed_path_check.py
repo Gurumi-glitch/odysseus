@@ -60,6 +60,9 @@ async def _call(method, path):
         pytest.param("POST", "/api/session/s1/delete-messages", id="session-delete-messages"),
         pytest.param("POST", "/api/chat_stream", id="chat-stream"),
         pytest.param("POST", "/api/chat/stop/s1", id="chat-run-control"),
+        pytest.param("PUT", "/api/skills/my-skill", id="skill-publish-or-user-only-toggle"),
+        pytest.param("POST", "/api/skills/my-skill/markdown", id="skill-markdown-save"),
+        pytest.param("PUT", "/api/skills/x/../my-skill", id="skill-write-dot-segments"),
     ],
 )
 async def test_app_api_refuses_blocked_route(loopback, method, path):

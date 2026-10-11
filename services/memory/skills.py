@@ -81,12 +81,15 @@ def content_digest(skill: Dict) -> str:
 
     Owner, status, confidence, source and dates are left out: renames and
     audits rewrite them without changing what the skill tells the model.
+    requires_toolsets is in: a usable skill unlocks those tools, so adding
+    one is a change the user has not approved.
     """
     # emit_body renders the parsed sections the same way SKILL.md is written,
     # so the digest depends on content, not on the dict's key layout.
     body = emit_body(skill)
     payload = json.dumps(
-        [skill.get("name") or "", skill.get("description") or "", body],
+        [skill.get("name") or "", skill.get("description") or "", body,
+         sorted(skill.get("requires_toolsets") or [])],
         ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -781,6 +784,7 @@ class SkillsManager:
         min_confidence: float = 0.0,
         available_toolsets: Optional[Iterable[str]] = None,
         platform: Optional[str] = None,
+        include_user_only: bool = False,
     ) -> List[Dict]:
         if skills is None:
             skills = self.load_all()
@@ -788,8 +792,12 @@ class SkillsManager:
             return []
         # `min_confidence` stays in the signature only because the legacy loop,
         # which this fork does not edit, still passes it; is_usable reads the
-        # owner's threshold itself.
-        skills = [s for s in skills if is_usable(s) and not s.get("disable_model_invocation")]
+        # owner's threshold itself. `include_user_only` is for the user's own
+        # `/skills search`, which lists slash commands, user-only ones included.
+        skills = [
+            s for s in skills
+            if is_usable(s) and (include_user_only or not s.get("disable_model_invocation"))
+        ]
         available = set(available_toolsets) if available_toolsets is not None else None
         if available is not None:
             skills = [

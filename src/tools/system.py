@@ -778,6 +778,10 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/session/"),
     ("POST",   "/api/chat_stream"),
     ("POST",   "/api/chat/"),
+    # Skill writes go through manage_skills; the Skills page routes carry the
+    # user's approval and the user-only toggle (#49, ADR 0008).
+    ("PUT",    "/api/skills/"),
+    ("POST",   "/api/skills/"),
 )
 
 
@@ -896,6 +900,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't hit /api/notes via app_api — use the `manage_notes` tool. It accepts natural-language due_date ('11pm today', 'tomorrow at 9am'), fires reminders from the due_date itself (no separate calendar event), and uses the caller's timezone. The raw endpoint requires ISO-UTC + a separate calendar event, both of which the agent tends to get wrong.", "exit_code": 1}
         if "/api/calendar/events" in path:
             return {"error": "Don't hit /api/calendar/events via app_api — use the `manage_calendar` tool. It handles tz-aware natural-language datetimes and reminder_minutes correctly. If the user wants a note + reminder, prefer `manage_notes` with due_date — it bundles both.", "exit_code": 1}
+        if path.startswith("/api/skills/"):
+            return {"error": f"{method} {path} is blocked — skill writes go through the `manage_skills` tool; approving a skill is the user's call on the Skills page.", "exit_code": 1}
         if "/api/cookbook/state" in path:
             return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
         return {"error": f"{method} {path} is blocked for safety — it rewrites the owner's prefs, chat history or a running chat.", "exit_code": 1}

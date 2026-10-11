@@ -19,10 +19,10 @@ from pydantic import BaseModel, Field
 
 from services.memory.skill_format import slugify
 from services.memory.skills import SkillsManager, is_usable, skill_state
-# Both rely on the loopback marker the internal-tool client sets (header token
-# or the "internal-tool" request user), so a tool call can never pose as the user.
-from src.agent_runtime.authority import is_internal_tool_request, require_user_approval_request
-from src.auth_helpers import get_current_user
+# Relies on the loopback marker the internal-tool client sets (header token or the
+# "internal-tool" request user), which stays even when X-Odysseus-Owner impersonates the user.
+from src.agent_runtime.authority import is_internal_tool_request
+from src.auth_helpers import _is_api_token_request, get_current_user
 from src.prompt_security import untrusted_context_message
 from src.text_helpers import strip_closed_think_blocks
 from core.middleware import require_admin
@@ -1760,11 +1760,18 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         ):
             raise HTTPException(404, "Skill not found")
 
-    def _record_user_approval(request: Request, before: dict, name: str,
-                              publishing: bool, user: Optional[str]) -> None:
-        """A Skills page publish approves the saved content; a later save of an
-        approved skill re-stamps it, and unpublishing withdraws it (ADR 0008)."""
-        if is_internal_tool_request(request):
+    def _from_skills_page(request: Request) -> bool:
+        # Tool loopback and bearer tokens act for the user but are not the user
+        # looking at the Skills page, so they never approve (ADR 0008).
+        return not is_internal_tool_request(request) and not _is_api_token_request(request)
+
+    def _require_skills_page(request: Request) -> None:
+        if not _from_skills_page(request):
+            raise HTTPException(403, "Only the Skills page can approve a skill or change who may invoke it.")
+
+    def _record_user_approval(request: Request, name: str, stamp: bool, user: Optional[str]) -> None:
+        """Stamp the saved content when the user approves it; unpublishing withdraws it."""
+        if not _from_skills_page(request):
             return
         after = next((s for s in skills_manager.load(owner=user)
                       if s.get("name") == slugify(name)), None)
@@ -1772,7 +1779,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             return
         if after.get("status") != "published":
             skills_manager.clear_user_approval(after)
-        elif publishing or before.get("user_approval_at") is not None:
+        elif stamp:
             skills_manager.set_user_approval(after)
 
     def _fire_skill_added(user: Optional[str]):
@@ -2419,8 +2426,8 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not sk.owner:
             sk.owner = match.get("owner") or user
         publishing = sk.status == "published" and match.get("status") != "published"
-        if publishing:
-            require_user_approval_request(request)
+        if publishing or sk.disable_model_invocation != bool(match.get("disable_model_invocation")):
+            _require_skills_page(request)
         ok = skills_manager.update_skill(match.get("name"), {
             "name": sk.name,
             "description": sk.description,
@@ -2444,7 +2451,9 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         }, owner=user)
         if not ok:
             raise HTTPException(500, "Update failed")
-        _record_user_approval(request, match, sk.name, publishing, user)
+        # The user saw the whole SKILL.md in the editor, so a save re-stamps an
+        # approval that an outside edit lapsed.
+        _record_user_approval(request, sk.name, publishing or match.get("user_approval_at") is not None, user)
         # Manual markdown edits can create or substantially rewrite a draft
         # skill without going through /add. Treat unaudited saves as new audit
         # candidates so the event-driven Skills Audit pipeline still runs.
@@ -2465,12 +2474,12 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not updates:
             return {"ok": True}
         publishing = updates.get("status") == "published"
-        if publishing:
-            require_user_approval_request(request)
+        if publishing or "disable_model_invocation" in updates:
+            _require_skills_page(request)
         ok = skills_manager.update_skill(match.get("name"), updates, owner=user)
         if not ok:
             raise HTTPException(404, "Skill not found")
-        _record_user_approval(request, match, updates.get("name") or match.get("name"), publishing, user)
+        _record_user_approval(request, updates.get("name") or match.get("name"), publishing, user)
         if not match.get("audit_verdict"):
             _fire_skill_added(user)
         return {"ok": True}
@@ -2496,7 +2505,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             raise HTTPException(400, "query is required")
         user = _owner(request)
         skills = skills_manager.load(owner=user)
-        results = skills_manager.get_relevant_skills(query, skills, max_items=10)
+        results = skills_manager.get_relevant_skills(query, skills, max_items=10, include_user_only=True)
         return {"skills": results, "query": query, "count": len(results)}
 
     return router
