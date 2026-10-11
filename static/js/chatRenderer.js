@@ -944,6 +944,13 @@ const MODEL_INFO = {
   'codestral':            { input: 0.30,  output: 0.90,  ctx: 32000 },
   'pixtral':              { input: 2.00,  output: 6.00,  ctx: 128000 },
   // --- xAI ---
+  // <200k-prompt tier from docs.x.ai/developers/models.
+  'grok-4.7':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.6':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.5':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.3':             { input: 1.25,  output: 2.50,  ctx: 1000000 },
+  'grok-4.20':            { input: 1.25,  output: 2.50,  ctx: 1000000 },
+  'grok-build':           { input: 1.00,  output: 2.00,  ctx: 256000 },
   'grok-4':               { input: 3.00,  output: 15.00, ctx: 131072 },
   'grok-3':               { input: 3.00,  output: 15.00, ctx: 131072 },
   'grok-2':               { input: 2.00,  output: 10.00, ctx: 131072 },
