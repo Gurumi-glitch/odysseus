@@ -80,6 +80,9 @@ async def _call(method, path):
         pytest.param("POST", "/api/mcp/oauth/exchange/m1", id="mcp-sign-in"),
         pytest.param("POST", "/api/copilot/device/start", id="provider-sign-in"),
         pytest.param("POST", "/api/chatgpt-subscription/device/poll", id="provider-sign-in-alias"),
+        pytest.param("PUT", "/api/skills/my-skill", id="skill-publish-or-user-only-toggle"),
+        pytest.param("POST", "/api/skills/my-skill/markdown", id="skill-markdown-save"),
+        pytest.param("PUT", "/api/skills/x/../my-skill", id="skill-write-dot-segments"),
     ],
 )
 async def test_app_api_refuses_blocked_route(loopback, method, path):

@@ -57,8 +57,11 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     # Accept legacy `skill_id` as an alias for `name`.
     name = (args.get("name") or args.get("skill_id") or "").strip()
 
+    # User-only skills are started with /name by the user and never shown to the model (#44).
+    user_only = {s["name"] for s in sm.load(owner=owner) if s.get("disable_model_invocation")}
+
     if action in ("list", "index"):
-        all_skills = sm.load(owner=owner)
+        all_skills = [s for s in sm.load(owner=owner) if s["name"] not in user_only]
         if not all_skills:
             return {"results": "No skills yet. Create one with action='add'."}
         published = [s for s in all_skills if s.get("status") == "published"]
@@ -77,6 +80,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "view":
         if not name:
             return {"error": "name is required for view", "exit_code": 1}
+        if name in user_only:
+            return {"error": f"Skill {name!r} not found", "exit_code": 1}
         if args.get("path"):
             return {"error": "view reads SKILL.md only; use view_ref with name and path to read a supporting file.", "exit_code": 1}
         md = sm.read_skill_md(name, owner=owner)
@@ -87,6 +92,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "view_ref":
         if not name:
             return {"error": "name is required for view_ref", "exit_code": 1}
+        if name in user_only:
+            return {"error": f"Skill {name!r} not found", "exit_code": 1}
         ref = (args.get("path") or "").strip()
         if not ref:
             return {"error": "path is required for view_ref", "exit_code": 1}
@@ -789,6 +796,10 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/chatgpt-subscription/device"),
     ("POST",   "/api/copilot/device"),
     ("POST",   "/api/mcp/oauth"),
+    # Skill writes go through manage_skills; the Skills page routes carry the
+    # user's approval and the user-only toggle (#49, ADR 0008).
+    ("PUT",    "/api/skills/"),
+    ("POST",   "/api/skills/"),
 )
 
 
@@ -907,6 +918,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't hit /api/notes via app_api — use the `manage_notes` tool. It accepts natural-language due_date ('11pm today', 'tomorrow at 9am'), fires reminders from the due_date itself (no separate calendar event), and uses the caller's timezone. The raw endpoint requires ISO-UTC + a separate calendar event, both of which the agent tends to get wrong.", "exit_code": 1}
         if "/api/calendar/events" in path:
             return {"error": "Don't hit /api/calendar/events via app_api — use the `manage_calendar` tool. It handles tz-aware natural-language datetimes and reminder_minutes correctly. If the user wants a note + reminder, prefer `manage_notes` with due_date — it bundles both.", "exit_code": 1}
+        if path.startswith("/api/skills/"):
+            return {"error": f"{method} {path} is blocked — skill writes go through the `manage_skills` tool; approving a skill is the user's call on the Skills page.", "exit_code": 1}
         if "/api/cookbook/state" in path:
             return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
         return {"error": f"{method} {path} is blocked for safety — sensitive endpoints are off-limits via app_api.", "exit_code": 1}

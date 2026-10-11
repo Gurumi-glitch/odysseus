@@ -14,10 +14,10 @@ from services.memory.skills import SkillsManager  # noqa: E402
 
 
 def _skill(name, description, tags):
-    # status must be published/draft or get_relevant_skills filters the skill
-    # out before the tag-scoring path runs.
+    # Must pass is_usable or get_relevant_skills filters the skill out before
+    # the tag-scoring path runs.
     return {"name": name, "description": description, "when_to_use": "",
-            "tags": tags, "procedure": [], "status": "published"}
+            "tags": tags, "procedure": [], "status": "published", "user_approved": True}
 
 
 def test_tag_substring_does_not_boost(tmp_path):
@@ -36,16 +36,19 @@ def test_tag_whole_token_still_boosts(tmp_path):
     assert any(s["name"] == "git-helper" for s in out)
 
 
-def test_relevance_keeps_inconclusive_but_rejects_failed_audits(tmp_path):
+def test_relevance_keeps_user_approved_inconclusive_but_not_unapproved(tmp_path):
+    # A user approval admits a skill the audit could not judge; without one an
+    # inconclusive audit is not enough (#49, ADR 0008).
     sm = SkillsManager(str(tmp_path))
-    inconclusive = _skill("git-inconclusive", "git workflow", ["git"])
-    inconclusive["audit_verdict"] = "inconclusive"
-    failed = _skill("git-failed", "git workflow", ["git"])
-    failed["audit_verdict"] = "fail"
+    approved = _skill("git-approved", "git workflow", ["git"])
+    approved["audit_verdict"] = "inconclusive"
+    unapproved = _skill("git-unapproved", "git workflow", ["git"])
+    unapproved["audit_verdict"] = "inconclusive"
+    unapproved["user_approved"] = False
 
     out = sm.get_relevant_skills(
         "help me with git rebase",
-        skills=[inconclusive, failed],
+        skills=[approved, unapproved],
     )
 
-    assert [skill["name"] for skill in out] == ["git-inconclusive"]
+    assert [skill["name"] for skill in out] == ["git-approved"]
