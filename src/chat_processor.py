@@ -281,6 +281,7 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        fetch_urls: bool = True,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -477,7 +478,7 @@ class ChatProcessor:
         # blog post, not a "summarize this URL" request).
         urls = extract_urls(message)
         non_yt_urls = [u for u in urls if not is_youtube_url(u)]
-        skip_url_fetch = len(message) > 2000 or len(non_yt_urls) > 3
+        skip_url_fetch = not fetch_urls or len(message) > 2000 or len(non_yt_urls) > 3
         if not skip_url_fetch:
             for url in non_yt_urls:
                 try:

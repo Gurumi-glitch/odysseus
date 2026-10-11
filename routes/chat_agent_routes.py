@@ -1,0 +1,49 @@
+"""Control-plane routes of the chat_agent runtime (spec #44)."""
+
+from fastapi import APIRouter, HTTPException, Request
+
+from src.agent_runtime.authority import is_internal_tool_request
+from src.auth_helpers import require_user
+from src.chat_agent import store
+from src.owner_identity import auth_disabled
+
+
+def require_interactive_user(request: Request) -> str:
+    """Only a signed-in person may change the runtime's control plane.
+
+    ``require_user`` already refuses bearer tokens (delegated credentials);
+    internal-tool loopback impersonates the owner, so it is refused here.
+    """
+    if auth_disabled():
+        raise HTTPException(403, "The chat runtime switch needs authentication enabled.")
+    if is_internal_tool_request(request):
+        raise HTTPException(403, "Tool requests cannot change the chat runtime.")
+    user = require_user(request)
+    if not user:
+        raise HTTPException(403, "The chat runtime switch needs a signed-in user.")
+    return user
+
+
+def _settings(user: str) -> dict:
+    available = not auth_disabled()
+    runtime = store.chat_runtime(user) if available else store.RUNTIME_LEGACY
+    return {"chat_runtime": runtime, "available": available}
+
+
+def setup_chat_agent_routes() -> APIRouter:
+    router = APIRouter(prefix="/api/chat_agent", tags=["chat_agent"])
+
+    @router.get("/settings")
+    async def get_settings(request: Request) -> dict:
+        return _settings(require_user(request))
+
+    @router.put("/settings")
+    async def put_settings(request: Request, body: dict) -> dict:
+        user = require_interactive_user(request)
+        value = body.get("chat_runtime")
+        if value not in store.CHAT_RUNTIME_VALUES:
+            raise HTTPException(400, "chat_runtime must be 'legacy' or 'new'.")
+        store.set_chat_runtime(user, value)
+        return _settings(user)
+
+    return router
