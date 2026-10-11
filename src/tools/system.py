@@ -723,7 +723,7 @@ _APP_API_BLOCKLIST_PREFIXES = (
     "/api/tokens",         # api token mgmt (bare /api/tokens list+create must also block)
     "/api/admin",          # admin one-shots (wipe etc.)
     "/api/shell",          # host shell execution must stay behind named command tooling
-    "/api/backup/restore", # destructive restore
+    "/api/import",         # backup import merges global settings, features and disabled tools
 )
 
 # (method, prefix) pairs to refuse specifically. Used for endpoints
@@ -740,6 +740,12 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/cookbook/packages/install"),
     ("POST",   "/api/cookbook/rebuild-engine"),
     ("POST",   "/api/cookbook/kill-pid"),
+    ("POST",   "/api/cookbook/install-system-deps"),
+    ("POST",   "/api/cookbook/setup"),
+    ("POST",   "/api/cookbook/ssh-key"),
+    ("POST",   "/api/cookbook/test-ssh"),
+    # Scoped external-agent aliases of the serve routes below.
+    ("POST",   "/api/codex/cookbook"),
     # Use the named tools (download_model / serve_model) — they handle
     # host-name resolution, per-host env_prefix, AND register the task
     # in cookbook state so it shows in the UI + list_downloads. Hitting
@@ -765,6 +771,24 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/calendar/events"),
     ("PUT",    "/api/calendar/events"),
     ("DELETE", "/api/calendar/events"),
+    ("POST",   "/api/codex/calendar/events"),
+    ("DELETE", "/api/codex/calendar/events"),
+    # The model must not rewrite the owner's prefs, tool enablement or chat
+    # history, or start and control chat runs.
+    ("PUT",    "/api/prefs"),
+    ("POST",   "/api/tools"),
+    ("PATCH",  "/api/mcp/servers"),
+    ("POST",   "/api/session/"),
+    ("PATCH",  "/api/session/"),
+    ("DELETE", "/api/session/"),
+    ("DELETE", "/api/sessions/"),
+    ("POST",   "/api/sessions/bulk-delete"),
+    ("POST",   "/api/inject_context"),
+    ("POST",   "/api/chat"),  # also covers /api/chat_stream and /api/chat/* run control
+    # Provider and MCP sign-in flows store credentials, like /api/auth.
+    ("POST",   "/api/chatgpt-subscription/device"),
+    ("POST",   "/api/copilot/device"),
+    ("POST",   "/api/mcp/oauth"),
 )
 
 
@@ -849,6 +873,13 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "path is required (e.g. '/api/cookbook/gpus')", "exit_code": 1}
     if not path.startswith("/"):
         path = "/" + path
+    try:
+        url = httpx.URL(f"{base}{path}")
+    except httpx.InvalidURL as e:
+        return {"error": f"Invalid path {path!r}: {e}", "exit_code": 1}
+    # httpx resolves dot segments and uvicorn percent-decodes before routing,
+    # so check the decoded path the server routes, not the string we were given.
+    path = url.path.removeprefix(httpx.URL(base).path.rstrip("/"))
     if any(path.startswith(p) for p in _APP_API_BLOCKLIST_PREFIXES):
         return {"error": f"Path blocked for safety: {path}. Sensitive endpoints are off-limits via app_api.", "exit_code": 1}
 
@@ -876,7 +907,9 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't hit /api/notes via app_api — use the `manage_notes` tool. It accepts natural-language due_date ('11pm today', 'tomorrow at 9am'), fires reminders from the due_date itself (no separate calendar event), and uses the caller's timezone. The raw endpoint requires ISO-UTC + a separate calendar event, both of which the agent tends to get wrong.", "exit_code": 1}
         if "/api/calendar/events" in path:
             return {"error": "Don't hit /api/calendar/events via app_api — use the `manage_calendar` tool. It handles tz-aware natural-language datetimes and reminder_minutes correctly. If the user wants a note + reminder, prefer `manage_notes` with due_date — it bundles both.", "exit_code": 1}
-        return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
+        if "/api/cookbook/state" in path:
+            return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
+        return {"error": f"{method} {path} is blocked for safety — sensitive endpoints are off-limits via app_api.", "exit_code": 1}
 
     body = args.get("body")
     query = args.get("query") or None
@@ -888,7 +921,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.request(
-                method, f"{base}{path}",
+                method, url,
                 json=body if body is not None and method in ("POST", "PUT", "PATCH") else None,
                 params=query,
                 headers=headers,

@@ -174,6 +174,13 @@ KNOWN_CONTEXT_WINDOWS = {
     'pixtral': 128000,
 
     # --- xAI ---
+    # Newer ids must out-match the generic 'grok-4' key (docs.x.ai/developers/models).
+    'grok-4.7': 500000,
+    'grok-4.6': 500000,
+    'grok-4.5': 500000,
+    'grok-4.3': 1000000,
+    'grok-4.20': 1000000,
+    'grok-build': 256000,
     'grok-4': 131072,
     'grok-3': 131072,
     'grok-2': 131072,
