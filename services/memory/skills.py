@@ -19,11 +19,13 @@ loads while a user migrates them to disk.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from src.path_confinement import confine
@@ -95,9 +97,29 @@ def content_digest(skill: Dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+@functools.lru_cache(maxsize=4)
+def _shipped_builtin_digests(root: str) -> frozenset:
+    """Digests of the tracked built-in skills; the tree ships with the app and
+    does not change while it runs."""
+    digests = set()
+    for path in Path(root).rglob("SKILL.md") if os.path.isdir(root) else ():
+        try:
+            digests.add(content_digest(Skill.from_markdown(path.read_text(encoding="utf-8")).to_dict()))
+        except Exception as e:
+            logger.warning("Unreadable built-in skill %s: %s", path, e)
+    return frozenset(digests)
+
+
+def _is_builtin(skill: Dict) -> bool:
+    # Decided by content shipped in BUILTIN_SKILLS_DIR, never by the writable
+    # `source` field: manage_skills lets the agent set source="builtin".
+    from src import constants
+    return content_digest(skill) in _shipped_builtin_digests(constants.BUILTIN_SKILLS_DIR)
+
+
 def is_usable(skill: Dict) -> bool:
     """The one usability predicate for the index, injection, slash and /invoke (#44)."""
-    if skill.get("source") == "builtin":
+    if _is_builtin(skill):
         return True
     if skill.get("status") != "published":
         return False
