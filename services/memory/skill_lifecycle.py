@@ -9,6 +9,8 @@ def automatic_audit_candidates(skills, limit=8, now=None):
     for skill in skills:
         if not skill.get("name") or skill.get("source") == "builtin" or skill.get("status") == "binned":
             continue
+        if skill.get("user_approved"):
+            continue
         verdict = skill.get("audit_verdict")
         if verdict in {"pass", "skipped"}:
             continue

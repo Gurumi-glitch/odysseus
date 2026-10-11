@@ -57,8 +57,11 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     # Accept legacy `skill_id` as an alias for `name`.
     name = (args.get("name") or args.get("skill_id") or "").strip()
 
+    # User-only skills are started with /name by the user and never shown to the model (#44).
+    user_only = {s["name"] for s in sm.load(owner=owner) if s.get("disable_model_invocation")}
+
     if action in ("list", "index"):
-        all_skills = sm.load(owner=owner)
+        all_skills = [s for s in sm.load(owner=owner) if s["name"] not in user_only]
         if not all_skills:
             return {"results": "No skills yet. Create one with action='add'."}
         published = [s for s in all_skills if s.get("status") == "published"]
@@ -77,6 +80,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "view":
         if not name:
             return {"error": "name is required for view", "exit_code": 1}
+        if name in user_only:
+            return {"error": f"Skill {name!r} not found", "exit_code": 1}
         if args.get("path"):
             return {"error": "view reads SKILL.md only; use view_ref with name and path to read a supporting file.", "exit_code": 1}
         md = sm.read_skill_md(name, owner=owner)
@@ -87,6 +92,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "view_ref":
         if not name:
             return {"error": "name is required for view_ref", "exit_code": 1}
+        if name in user_only:
+            return {"error": f"Skill {name!r} not found", "exit_code": 1}
         ref = (args.get("path") or "").strip()
         if not ref:
             return {"error": "path is required for view_ref", "exit_code": 1}
