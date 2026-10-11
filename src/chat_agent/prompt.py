@@ -39,9 +39,26 @@ def assemble(preface: List[Dict[str, Any]], messages: List[Dict[str, Any]]) -> L
     turn_context.append(datetime_message)
     return [
         {"role": "system", "content": system_text},
-        *({"role": m["role"], "content": m.get("content") or ""} for m in history),
+        *(replayed for m in history for replayed in _replay(m)),
         {"role": "user", "content": _with_context(current.get("content"), turn_context)},
     ]
+
+
+def _replay(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """A runtime turn replays from its agent_v2 rounds (ADR 0007); other rows as text.
+
+    Each round's ``results`` are its tool-result envelopes. Adapters decide which
+    reasoning blocks they send (same provider and model only, ADR 0004).
+    """
+    agent_v2 = (message.get("metadata") or {}).get("agent_v2")
+    rounds = agent_v2.get("rounds") if isinstance(agent_v2, dict) else None
+    if not rounds:
+        return [{"role": message["role"], "content": message.get("content") or ""}]
+    replayed: List[Dict[str, Any]] = []
+    for turn_round in rounds:
+        replayed.append({"role": "assistant", "blocks": turn_round["blocks"]})
+        replayed.extend({"role": "tool", **result} for result in turn_round.get("results") or ())
+    return replayed
 
 
 def _with_context(content: Any, context: List[Dict[str, Any]]) -> Any:

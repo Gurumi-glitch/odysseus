@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.models import ChatMessage
 from src.chat_agent.routing import CHAT_AGENT
@@ -20,14 +20,23 @@ class TurnRecord:
     provider: str
     model: str
     turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    round_texts: List[str] = field(default_factory=list)
+    # Each round: {"blocks": [...]} plus "usage" when the provider reported it
+    # (compaction reads it, #67). Block shapes: src/chat_agent/providers/__init__.py.
+    rounds: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def round_texts(self) -> List[str]:
+        return [
+            "".join(block["text"] for block in r["blocks"] if block["type"] == "text")
+            for r in self.rounds
+        ]
 
     def agent_v2(self) -> dict:
         return {
             "turn_id": self.turn_id,
             "provider": self.provider,
             "model": self.model,
-            "rounds": [{"blocks": [{"type": "text", "text": text}]} for text in self.round_texts],
+            "rounds": list(self.rounds),
         }
 
     def metadata(self) -> dict:

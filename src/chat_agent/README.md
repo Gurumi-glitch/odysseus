@@ -28,9 +28,11 @@ upstream's `src/agent_runtime/` and never edits the legacy loop
 | `routing.py` | `ComposerToggles` snapshot; `choose_runtime(TurnFacts)` → `legacy` or `chat_agent`. | #48 |
 | `prompt.py` | Calls the route's context builder with `prefetch=False, agent_mode=False` (no URL/web/YouTube prefetch, no legacy skills index) and assembles: one system message (route system messages, then the behaviour section) → history → current user message carrying the turn context (memory, RAG, date/time). | #48 (minimal) |
 | `loop.py` | `ChatAgentTurn` + `run_chat_agent_turn`: emits `turn_mode`, `delta`, `message_saved`, `event: error`, `[DONE]`. A crash ends the turn with a visible error; it never falls back to legacy. | #48 (one round, no tools) |
-| `providers/chat_completions.py` | Chat Completions dialect. Imports legacy transport/headers/URL helpers from `src.llm_core`; never the legacy message sanitizer. | #48 (text deltas only) |
-| `transcript.py` | `TurnRecord` → assistant row with `metadata.agent_v2` (`turn_id`, `provider`, `model`, `rounds[].blocks[]`) plus projections `content`, `round_texts`, `model`, `runtime: "chat_agent"`. Nobody mode writes the request-local incognito transcript. | #48 (write at turn end) |
-| `permissions.py`, `classifier.py`, `tools.py`, `result_events.py`, `asks.py`, `providers/xai_responses.py` | Not yet built. | #50–#68 |
+| `providers/__init__.py` | Canonical conversation and block shapes both adapters serialize (`text`, `tool_call`, `reasoning` tagged with provider+model, tool-result envelope `{call_id, ok, content, error}`); `provider_key(url)` (`"xai"` for x.ai hosts, else `_detect_provider`); round events `TextDelta`, `RoundEnd(blocks, usage)`, `ProviderError`. | #51 |
+| `providers/xai_responses.py` | xAI Responses: `store:false`, `prompt_cache_key` = chat id, `include: reasoning.encrypted_content`; each output item kept on its block as `item` and replayed unchanged; reasoning only to the same model; a 400 on replayed reasoning retries once without it; usage incl. cached tokens. | #51 |
+| `providers/chat_completions.py` | Chat Completions dialect. Imports legacy transport/headers/URL helpers from `src.llm_core`; never the legacy message sanitizer. Streams `reasoning_details` / `reasoning_content` into a reasoning block and passes them back unchanged to the same model. | #48, #51 (no tool-call parsing yet) |
+| `transcript.py` | `TurnRecord` → assistant row with `metadata.agent_v2` (`turn_id`, `provider`, `model`, `rounds[]` = `{blocks, usage?, results?}`) plus projections `content`, `round_texts`, `model`, `runtime: "chat_agent"`. Nobody mode writes the request-local incognito transcript. | #48 (write at turn end) |
+| `permissions.py`, `classifier.py`, `tools.py`, `result_events.py`, `asks.py` | Not yet built. | #50–#68 |
 
 Control-plane route: `routes/chat_agent_routes.py`
 (`GET/PUT /api/chat_agent/settings`). `require_interactive_user` refuses
@@ -55,6 +57,9 @@ legacy predicate `agent_loop._agent_route_tool_mode` runs on text tools.
   `tests/chat_agent/test_chat_agent_legacy_pins.py`.
 - Persisted paths come from `src/constants.py` (`CHAT_AGENT_DIR`); directories
   are created on first write.
+- `prompt._replay` turns a history row with `agent_v2.rounds` into
+  `assistant{blocks}` + `tool{...}` entries (round `results` are the tool-result
+  envelopes); rows without it replay as text.
 - Tests live in `tests/chat_agent/` with unique basenames. The primary seam is
   the chat route with a scripted HTTP transport: patch
   `providers.chat_completions._get_http_client` with an `httpx.MockTransport`
