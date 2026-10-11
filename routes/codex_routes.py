@@ -287,7 +287,13 @@ def setup_codex_routes(
             from_addr=from_addr,
             account_id=account_id,
             has_attachments=has_attachments,
+            # Called as a plain function, so every Query() default must be
+            # passed explicitly — a FieldInfo default is truthy.
+            date_from=None,
+            date_to=None,
+            cached_only=0,
             cache_bust=None,
+            refresh=0,
             owner=owner,
         )
 
