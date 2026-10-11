@@ -2992,6 +2992,7 @@ def setup_chat_routes(
             chat_agent_run = agent_runs.start(session, run_chat_agent_turn(ChatAgentTurn(
                 session_id=session,
                 sess=sess,
+                owner=owner,
                 toggles=composer_toggles,
                 auto_escalated=auto_escalated,
                 temperature=(

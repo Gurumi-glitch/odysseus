@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core.atomic_io import atomic_write_text
+from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import require_user
 from src.chat_agent import store
@@ -46,4 +48,43 @@ def setup_chat_agent_routes() -> APIRouter:
         store.set_chat_runtime(user, value)
         return _settings(user)
 
+    @router.get("/instructions")
+    async def get_instructions(request: Request) -> dict:
+        if auth_disabled():
+            return {"available": False}
+        return _instructions(require_user(request))
+
+    @router.put("/instructions")
+    async def put_instructions(request: Request, body: dict) -> dict:
+        user = require_interactive_user(request)
+        content = body.get("content")
+        if content is not None:
+            if not isinstance(content, str):
+                raise HTTPException(400, "content must be text.")
+            if len(content) > constants.INSTRUCTION_FILE_MAX_CHARS:
+                raise HTTPException(
+                    400,
+                    f"Instructions are limited to {constants.INSTRUCTION_FILE_MAX_CHARS} characters.",
+                )
+            atomic_write_text(store.user_instructions_path(user), content)
+        if "enabled" in body:
+            store.set_instructions_enabled(user, bool(body["enabled"]))
+        return _instructions(user)
+
     return router
+
+
+def _instructions(user: str) -> dict:
+    path = store.user_instructions_path(user)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+    except FileNotFoundError:
+        content = ""
+    return {
+        "available": True,
+        "enabled": store.instructions_enabled(user),
+        "content": content,
+        "path": path,
+        "max_chars": constants.INSTRUCTION_FILE_MAX_CHARS,
+    }

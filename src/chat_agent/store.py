@@ -1,8 +1,10 @@
 """Per-user store of the chat_agent runtime: one JSON file per user.
 
 The file lives at ``CHAT_AGENT_DIR/<percent-encoded casefolded user>.json``.
-This ticket stores only the runtime switch (``chat_runtime``); permission
-rules, session rules and the rename/delete hooks join it in later tickets.
+It holds the runtime switch (``chat_runtime``) and the user-level
+instructions toggle (``instructions_enabled``). The user's instruction files
+live in ``INSTRUCTIONS_DIR/<same encoded name>/``. User rename and delete move
+or remove both (``rename_owner`` / ``delete_owner``).
 """
 
 from __future__ import annotations
@@ -10,10 +12,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from urllib.parse import quote
 
 from core.atomic_io import atomic_write_json
 from src import constants
+# Relies on: confine(allow_root=False) raises ValueError for the root itself
+# and for anything that resolves outside it (symlinks followed).
+from src.path_confinement import confine
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +28,20 @@ RUNTIME_NEW = "new"
 CHAT_RUNTIME_VALUES = frozenset({RUNTIME_LEGACY, RUNTIME_NEW})
 
 
-def store_path(owner: str) -> str:
-    """Return the owner's store file, confined to ``CHAT_AGENT_DIR``."""
+# The Settings Instructions panel edits this file; CLAUDE.md beside it loads too.
+USER_INSTRUCTIONS_FILENAME = "AGENTS.md"
+
+
+def _owner_name(owner: str) -> str:
     name = quote(str(owner or "").strip().casefold(), safe="")
     if not name:
         raise ValueError("chat_agent store needs an owner")
+    return name
+
+
+def store_path(owner: str) -> str:
+    """Return the owner's store file, confined to ``CHAT_AGENT_DIR``."""
+    name = _owner_name(owner)
     root = os.path.realpath(constants.CHAT_AGENT_DIR)
     path = os.path.realpath(os.path.join(root, name + ".json"))
     if os.path.dirname(path) != root:
@@ -60,3 +75,46 @@ def set_chat_runtime(owner: str, value: str) -> None:
     data = load(owner)
     data["chat_runtime"] = value
     atomic_write_json(store_path(owner), data, indent=2)
+
+
+def instructions_enabled(owner: str) -> bool:
+    return load(owner).get("instructions_enabled", True) is not False
+
+
+def set_instructions_enabled(owner: str, enabled: bool) -> None:
+    data = load(owner)
+    data["instructions_enabled"] = bool(enabled)
+    atomic_write_json(store_path(owner), data, indent=2)
+
+
+def instructions_dir(owner: str) -> str:
+    """Return the owner's instruction folder, confined to ``INSTRUCTIONS_DIR``."""
+    return confine(constants.INSTRUCTIONS_DIR, _owner_name(owner), allow_root=False)
+
+
+def user_instructions_path(owner: str) -> str:
+    return os.path.join(instructions_dir(owner), USER_INSTRUCTIONS_FILENAME)
+
+
+def rename_owner(old: str, new: str) -> None:
+    # Whatever already sits under the new name belongs to no live account
+    # (auth refuses taken names), so it is dropped, never inherited.
+    for path_for in (store_path, instructions_dir):
+        source, target = path_for(old), path_for(new)
+        if source == target:
+            continue
+        _remove(target)
+        if os.path.lexists(source):
+            os.rename(source, target)
+
+
+def delete_owner(owner: str) -> None:
+    _remove(store_path(owner))
+    _remove(instructions_dir(owner))
+
+
+def _remove(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    elif os.path.lexists(path):
+        os.remove(path)

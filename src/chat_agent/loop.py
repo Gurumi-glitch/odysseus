@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 class ChatAgentTurn:
     session_id: str
     sess: Any
+    # The signed-in user the route resolved (routing refuses turns without one).
+    owner: str
     toggles: ComposerToggles
     auto_escalated: bool
     temperature: float
@@ -45,7 +47,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     endpoint = chat_completions.Endpoint(sess.endpoint_url, sess.model, sess.headers)
     record = transcript.TurnRecord(provider=_detect_provider(endpoint.url), model=endpoint.model)
     try:
-        messages = await prompt.build_messages(turn.build_context)
+        messages = await prompt.build_messages(
+            turn.build_context, owner=turn.owner, toggles=turn.toggles,
+        )
         text = ""
         async for event in chat_completions.stream_round(
             endpoint, messages, temperature=turn.temperature, max_tokens=turn.max_tokens,

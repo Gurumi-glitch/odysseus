@@ -68,6 +68,7 @@ class _Harness:
         self.provider_chunks = ["Hel", "lo!"]
         self.monkeypatch = monkeypatch
         monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
+        monkeypatch.setattr(constants, "INSTRUCTIONS_DIR", str(tmp_path / "instructions"))
         monkeypatch.setenv("AUTH_ENABLED", "true")
 
         harness = self
