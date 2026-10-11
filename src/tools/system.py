@@ -740,6 +740,8 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/cookbook/packages/install"),
     ("POST",   "/api/cookbook/rebuild-engine"),
     ("POST",   "/api/cookbook/kill-pid"),
+    ("POST",   "/api/cookbook/install-system-deps"),
+    ("POST",   "/api/cookbook/setup"),
     # Use the named tools (download_model / serve_model) — they handle
     # host-name resolution, per-host env_prefix, AND register the task
     # in cookbook state so it shows in the UI + list_downloads. Hitting
@@ -765,12 +767,21 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/calendar/events"),
     ("PUT",    "/api/calendar/events"),
     ("DELETE", "/api/calendar/events"),
-    # The model must not rewrite the owner's prefs or chat history, or start
-    # and control chat runs.
+    # The model must not rewrite the owner's prefs, tool enablement or chat
+    # history, or start and control chat runs.
     ("PUT",    "/api/prefs"),
+    ("POST",   "/api/tools"),
+    ("PATCH",  "/api/mcp/servers"),
     ("POST",   "/api/session/"),
-    ("POST",   "/api/chat_stream"),
-    ("POST",   "/api/chat/"),
+    ("PATCH",  "/api/session/"),
+    ("DELETE", "/api/session/"),
+    ("DELETE", "/api/sessions/"),
+    ("POST",   "/api/sessions/bulk-delete"),
+    ("POST",   "/api/inject_context"),
+    ("POST",   "/api/chat"),  # also covers /api/chat_stream and /api/chat/* run control
+    # Provider sign-in device flows store credentials, like /api/auth.
+    ("POST",   "/api/chatgpt-subscription/device"),
+    ("POST",   "/api/copilot/device"),
 )
 
 
@@ -891,7 +902,7 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't hit /api/calendar/events via app_api — use the `manage_calendar` tool. It handles tz-aware natural-language datetimes and reminder_minutes correctly. If the user wants a note + reminder, prefer `manage_notes` with due_date — it bundles both.", "exit_code": 1}
         if "/api/cookbook/state" in path:
             return {"error": f"{method} {path} is blocked — it overwrites the whole cookbook state file. Use list_serve_presets / serve_preset / serve_model instead.", "exit_code": 1}
-        return {"error": f"{method} {path} is blocked for safety — it rewrites the owner's prefs, chat history or a running chat.", "exit_code": 1}
+        return {"error": f"{method} {path} is blocked for safety — sensitive endpoints are off-limits via app_api.", "exit_code": 1}
 
     body = args.get("body")
     query = args.get("query") or None

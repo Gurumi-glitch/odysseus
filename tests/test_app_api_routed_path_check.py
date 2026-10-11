@@ -60,6 +60,19 @@ async def _call(method, path):
         pytest.param("POST", "/api/session/s1/delete-messages", id="session-delete-messages"),
         pytest.param("POST", "/api/chat_stream", id="chat-stream"),
         pytest.param("POST", "/api/chat/stop/s1", id="chat-run-control"),
+        pytest.param("POST", "/api/chat", id="chat-non-streaming"),
+        pytest.param("POST", "/api/inject_context/s1", id="session-context-inject"),
+        pytest.param("PATCH", "/api/session/s1", id="session-patch"),
+        pytest.param("DELETE", "/api/session/s1", id="session-delete"),
+        pytest.param("DELETE", "/api/sessions/all", id="sessions-delete-all"),
+        pytest.param("POST", "/api/sessions/bulk-delete", id="sessions-bulk-delete"),
+        pytest.param("POST", "/api/tools", id="tool-enablement"),
+        pytest.param("PATCH", "/api/mcp/servers/m1/tools", id="mcp-tool-enablement"),
+        pytest.param("PATCH", "/api/mcp/servers/m1", id="mcp-server-toggle"),
+        pytest.param("POST", "/api/cookbook/install-system-deps", id="host-package-install"),
+        pytest.param("POST", "/api/cookbook/setup", id="host-remote-setup"),
+        pytest.param("POST", "/api/copilot/device/start", id="provider-sign-in"),
+        pytest.param("POST", "/api/chatgpt-subscription/device/poll", id="provider-sign-in-alias"),
     ],
 )
 async def test_app_api_refuses_blocked_route(loopback, method, path):
@@ -75,6 +88,8 @@ async def test_app_api_refuses_blocked_route(loopback, method, path):
     [
         pytest.param("GET", "/api/prefs/some-key", id="prefs-read"),
         pytest.param("GET", "/api/session/s1/context", id="session-read"),
+        pytest.param("POST", "/api/session", id="session-create"),
+        pytest.param("GET", "/api/mcp/servers/m1/tools", id="mcp-tools-read"),
         pytest.param("GET", "/api/cookbook/gpus", id="plain-read"),
         pytest.param("GET", "/api/documents/foo%20bar", id="escaped-read"),
     ],
