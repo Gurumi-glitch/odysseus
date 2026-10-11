@@ -742,6 +742,10 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/cookbook/kill-pid"),
     ("POST",   "/api/cookbook/install-system-deps"),
     ("POST",   "/api/cookbook/setup"),
+    ("POST",   "/api/cookbook/ssh-key"),
+    ("POST",   "/api/cookbook/test-ssh"),
+    # Scoped external-agent aliases of the serve routes below.
+    ("POST",   "/api/codex/cookbook"),
     # Use the named tools (download_model / serve_model) — they handle
     # host-name resolution, per-host env_prefix, AND register the task
     # in cookbook state so it shows in the UI + list_downloads. Hitting
@@ -767,6 +771,8 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/calendar/events"),
     ("PUT",    "/api/calendar/events"),
     ("DELETE", "/api/calendar/events"),
+    ("POST",   "/api/codex/calendar/events"),
+    ("DELETE", "/api/codex/calendar/events"),
     # The model must not rewrite the owner's prefs, tool enablement or chat
     # history, or start and control chat runs.
     ("PUT",    "/api/prefs"),
@@ -779,9 +785,10 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("POST",   "/api/sessions/bulk-delete"),
     ("POST",   "/api/inject_context"),
     ("POST",   "/api/chat"),  # also covers /api/chat_stream and /api/chat/* run control
-    # Provider sign-in device flows store credentials, like /api/auth.
+    # Provider and MCP sign-in flows store credentials, like /api/auth.
     ("POST",   "/api/chatgpt-subscription/device"),
     ("POST",   "/api/copilot/device"),
+    ("POST",   "/api/mcp/oauth"),
 )
 
 
