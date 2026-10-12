@@ -142,6 +142,8 @@ class ChatAgentTurn:
     auto_mode: bool = False
     # The user's message as sent, for auto mode's classifier.
     message: str = ""
+    # The route's resolved thinking switch ("on"/"off", None = model default).
+    thinking_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -197,7 +199,7 @@ def _stream_round(
         )
     return chat_completions.stream_round(
         endpoint, conversation, temperature=turn.temperature, max_tokens=turn.max_tokens,
-        tools=tool_schemas,
+        tools=tool_schemas, thinking_mode=turn.thinking_mode,
     )
 
 

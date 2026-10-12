@@ -3068,6 +3068,7 @@ def setup_chat_routes(
                     else LLMConfig.DEFAULT_TEMPERATURE
                 ),
                 max_tokens=getattr(sess, "max_tokens_override", None) or 0,
+                thinking_mode=thinking_mode,
                 build_context=functools.partial(
                     build_chat_context,
                     sess, request, chat_handler, chat_processor,
