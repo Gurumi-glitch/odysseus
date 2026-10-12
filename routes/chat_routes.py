@@ -4770,6 +4770,8 @@ def setup_chat_routes(
                                     yield chunk
                                 elif data.get("type") in (
                                     "tool_start", "tool_output", "agent_step",
+                                    # Readers exist in chat.js; the legacy loop emits them (spec #44).
+                                    "tool_progress", "compacted", "generated_image",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "editor_progress", "ui_control", "email_open",
                                     "rounds_exhausted", "budget_exceeded",

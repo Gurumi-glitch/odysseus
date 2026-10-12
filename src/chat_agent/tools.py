@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 # Relies on: _apply_tool_surface_to_schemas returns [] for "none" and
@@ -323,8 +323,12 @@ def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bo
     return ToolOutcome(call["call_id"], tool, command, STATUS_FAILED, EXIT_FAILED, reason)
 
 
-async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcome:
-    """Run one admitted call through the legacy executor."""
+async def execute(
+    call_id: str, block: Any, scope: ExecutionScope,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+) -> ToolOutcome:
+    """Run one admitted call through the legacy executor; long-running tools
+    report ``{elapsed_s, tail}`` payloads through ``progress_cb``."""
     # Same owner strings as the legacy path: tools get the AuthManager key as
     # is (stores key rows by it), and only the authority is casefolded, as
     # create_request_authority does. Casefolding the tool owner would merge
@@ -343,6 +347,7 @@ async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcom
         owner=scope.owner,
         workspace=scope.workspace,
         tool_policy=None,
+        progress_cb=progress_cb,
         security_context=NO_TOOL_SECURITY_CONTEXT,
         exact_approval=None,
         client_runtime_context=scope.client_runtime_context,

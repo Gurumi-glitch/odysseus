@@ -10,8 +10,10 @@ round with no tools). Steering arrives in #63.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import time
 from contextlib import aclosing
 from dataclasses import asdict, dataclass
 from typing import (
@@ -22,13 +24,17 @@ from typing import (
 # Relies on: _configured_model_tool_surface returns the per-model tool surface
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
 from src.agent_loop import _configured_model_tool_surface
+# Relies on: _compute_final_metrics builds the legacy metrics dict (tokens,
+# speed, context %, estimated cost) from these inputs alone; _usage_bucket and
+# _usage_bucket_summary build and sum per-round usage attribution.
+from src.agent_loop import _compute_final_metrics, _usage_bucket, _usage_bucket_summary
 from src.agent_tools import MAX_AGENT_ROUNDS
 # Relies on: agent_runs.should_finish(session_id) is True only while that
 # session's registered run is running and Finish was requested for it; a run
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, permissions, prompt, repeat_guard, session_rules, tools, transcript, turn_context,
+    asks, permissions, prompt, repeat_guard, result_events, session_rules, tools, transcript, turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
@@ -50,6 +56,7 @@ from src import settings
 # index into the non-system messages where the kept half starts.
 from src.context_compactor import maybe_compact
 from src.llm_core import LLMConfig
+from src.model_context import estimate_tokens
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -308,6 +315,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         return contexts[-1]
 
     streamed: List[str] = []
+    usage = _TurnUsage(time.monotonic(), turn.candidates[0])
 
     def hold_ask(call: Dict[str, Any], tool: str, command: str, card: dict) -> None:
         # The card is on the row before anyone can answer it, so a restart
@@ -374,24 +382,32 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         while True:
             end = None
             streamed.clear()
+            yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
             async for event in _round_with_fallback(turn, endpoint, conversation, round_tools):
                 if isinstance(event, Fallback):
                     endpoint, conversation = event.candidate.endpoint, event.conversation
+                    usage.route = event.candidate
                     record.provider, record.model = provider_key(endpoint.url), endpoint.model
                     yield _event(event.event)
                 elif isinstance(event, ProviderError):
                     _finish_failed_turn(writer)
+                    yield _event({"type": "metrics", "data": usage.metrics(
+                        record, conversation, contexts[-1].context_length,
+                    )})
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
                     return
                 if isinstance(event, TextDelta):
+                    usage.mark_output()
                     streamed.append(event.text)
                     yield _event({"delta": event.text})
                 elif isinstance(event, RoundEnd):
+                    usage.mark_output()
                     end = event
             streamed.clear()
             round_record = _round_record(end)
             record.rounds.append(round_record)
+            usage.add_round(len(record.rounds), end, conversation)
             writer.checkpoint()
             calls = [b for b in end.blocks if b["type"] == "tool_call"]
             if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
@@ -451,17 +467,28 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     if ask.reply is None:
                         record.stop_reason = transcript.STOP_ASK_EXPIRED
                     decision = _permission_decision(turn, rule, ask.reply)
+                adapted = None
                 if decision.outcome == permissions.ALLOW:
                     tool, command = (call["name"], call["arguments"]) if searching else (block.tool_type, block.content)
                     yield _event({
-                        "type": "tool_start", "tool": tool, "command": command,
-                        "full_command": command, "round": len(record.rounds),
+                        "type": "tool_start", "tool": tool,
+                        "command": command if searching else result_events.command_display(block),
+                        "full_command": command.strip(), "round": len(record.rounds),
                         "call_id": call["call_id"],
                     })
                     if searching:
                         outcome = tools.run_search(call, catalog)
                     else:
-                        outcome = await tools.execute(call["call_id"], block, scope)
+                        async for item in _execute_with_progress(call["call_id"], block, scope, len(record.rounds)):
+                            if isinstance(item, tools.ToolOutcome):
+                                outcome = item
+                            else:
+                                yield item
+                        adapted = result_events.adapt(
+                            outcome, block, round_number=len(record.rounds), model=endpoint.model,
+                            prior_tool_events=record.tool_events,
+                        )
+                        outcome.model_text = adapted.model_text
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
@@ -476,8 +503,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         call, block, decision.reason,
                         denied=decision.outcome != permissions.INVALID,
                     )
-                yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
-                tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
+                if adapted is None:
+                    yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
+                    tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
+                else:
+                    for ui_event in adapted.events:
+                        if ui_event["type"] == "web_sources":
+                            # The reply's sources box on reload (legacy keeps the last search's).
+                            record.context["web_sources"] = ui_event["data"]
+                        yield _event(ui_event)
+                    tool_event = adapted.tool_event
                 if ask is not None:
                     tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
                 record.pending_ask = None
@@ -524,7 +559,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # The last round's text with its titles linked, once (spec #44, Stream events).
         yield _event({"type": "final_response", "content": record.round_texts[-1]})
         message_id = writer.finish()
-        _after_turn(turn, record, contexts[-1], message_id, tool_calls_used)
+        metrics = usage.metrics(record, conversation, contexts[-1].context_length)
+        _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
         # Stop: keep the completed blocks and the text streamed so far; partial
         # reasoning is dropped and unfinished calls get cancelled results.
@@ -542,6 +578,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         yield _error_event("The chat agent runtime failed on this turn. See the server log.")
         yield "data: [DONE]\n\n"
         return
+    yield _event({"type": "metrics", "data": metrics})
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
     yield "data: [DONE]\n\n"
@@ -566,12 +603,13 @@ def _context_projections(ctx: Any) -> Dict[str, Any]:
 
 def _after_turn(
     turn: ChatAgentTurn, record: transcript.TurnRecord, ctx: Any, message_id: Optional[str], tool_calls: int,
+    metrics: Dict[str, Any],
 ) -> None:
     """Post-response tasks and the SFT trace, once per completed turn."""
     content = record.content()
     if turn.after_turn is not None:
         turn.after_turn(
-            full_response=content, last_metrics=None, uprefs=ctx.uprefs,
+            full_response=content, last_metrics=metrics, uprefs=ctx.uprefs,
             character_name=ctx.preset.character_name,
             agent_rounds=len(record.rounds), agent_tool_calls=tool_calls,
         )
@@ -583,6 +621,96 @@ def _after_turn(
             owner=turn.owner, session_id=turn.session_id, sess=turn.sess,
             assistant_content=content, metadata=record.metadata(), message_id=message_id,
         )
+
+
+async def _execute_with_progress(
+    call_id: str, block: Any, scope: tools.ExecutionScope, round_number: int,
+) -> AsyncIterator[Union[str, tools.ToolOutcome]]:
+    """Run the call, yielding its ``tool_progress`` events (long bash/python,
+    web_search) as they arrive, then its outcome."""
+    progress: asyncio.Queue = asyncio.Queue()
+    task = asyncio.create_task(tools.execute(call_id, block, scope, progress_cb=progress.put))
+    task.add_done_callback(lambda _done: progress.put_nowait(None))
+    try:
+        while (payload := await progress.get()) is not None:
+            yield _event({"type": "tool_progress", "tool": block.tool_type, "round": round_number, **payload})
+        yield task.result()
+    finally:
+        # Stop or a client disconnect must not leave the tool (and any
+        # subprocess it spawned) running with nothing awaiting it.
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+class _TurnUsage:
+    """Cumulative usage of the turn, as the legacy final metrics report it."""
+
+    def __init__(self, started: float, route: Candidate) -> None:
+        self.started = started
+        self.first_output: Optional[float] = None
+        self.requested = route
+        self.route = route
+        self.buckets: List[Dict[str, Any]] = []
+
+    def mark_output(self) -> None:
+        if self.first_output is None:
+            self.first_output = time.monotonic()
+
+    def add_round(self, number: int, end: RoundEnd, request: List[Dict[str, Any]]) -> None:
+        if end.usage is not None:
+            tokens, source = (end.usage.input_tokens, end.usage.output_tokens), "real"
+        else:
+            text = "".join(block.get("text", "") for block in end.blocks if block["type"] == "text")
+            tokens, source = (estimate_tokens(request), len(text) // 4), "estimated"
+        self.buckets.append(_usage_bucket(
+            round_num=number, model=self.route.endpoint.model,
+            endpoint_id=self.route.route.get("endpoint_id"),
+            endpoint_label=self.route.route.get("endpoint_label"),
+            endpoint_cost_tracked=self.route.route.get("endpoint_cost_tracked"),
+            input_tokens=tokens[0], output_tokens=tokens[1], usage_source=source,
+        ))
+
+    def metrics(
+        self, record: transcript.TurnRecord, conversation: List[Dict[str, Any]], context_length: int,
+    ) -> Dict[str, Any]:
+        elapsed = time.monotonic() - self.started
+        real = [r["usage"] for r in record.rounds if "usage" in r]
+        endpoint = self.route.endpoint
+        metrics = _compute_final_metrics(
+            conversation, record.content(), elapsed,
+            (self.first_output - self.started) if self.first_output else 0,
+            context_length,
+            sum(u["input_tokens"] for u in real), sum(u["output_tokens"] for u in real), bool(real),
+            record.tool_events, record.round_texts, model=endpoint.model,
+            round_models=[b["model"] for b in self.buckets],
+            round_endpoint_ids=[b["endpoint_id"] for b in self.buckets],
+            round_endpoint_labels=[b["endpoint_label"] for b in self.buckets],
+            last_round_input_tokens=real[-1]["input_tokens"] if real else 0,
+            endpoint_url=endpoint.url,
+        )
+        metrics.update({
+            "requested_model": self.requested.endpoint.model,
+            "endpoint_id": self.route.route.get("endpoint_id"),
+            "endpoint_label": self.route.route.get("endpoint_label"),
+            "requested_endpoint_id": self.requested.route.get("endpoint_id"),
+            "requested_endpoint_label": self.requested.route.get("endpoint_label"),
+        })
+        if isinstance(self.route.route.get("endpoint_cost_tracked"), bool):
+            metrics["endpoint_cost_tracked"] = self.route.route["endpoint_cost_tracked"]
+        summary = _usage_bucket_summary(self.buckets)
+        if summary:
+            # As legacy: the totals are the buckets' and context % is the last
+            # request's prompt.
+            metrics.update(summary)
+            if elapsed > 0:
+                metrics["tokens_per_second"] = round(summary["output_tokens"] / elapsed, 2)
+            if context_length:
+                metrics["context_percent"] = min(
+                    round(self.buckets[-1]["input_tokens"] / context_length * 100, 1), 100.0,
+                )
+        return metrics
 
 
 def _offered(upfront, catalog, conversation, surface):
