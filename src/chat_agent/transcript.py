@@ -101,6 +101,9 @@ class TurnRecord:
     # The tool event of a call waiting on an ask: its card and no exit code
     # yet. Checkpointed so a restart can expire the ask (spec #44, Transcript).
     pending_ask: Optional[Dict[str, Any]] = None
+    # The turn-end metrics, saved flat as save_assistant_response does: the
+    # history renderer's footer reads them from the row's metadata.
+    metrics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def round_texts(self) -> List[str]:
@@ -124,6 +127,7 @@ class TurnRecord:
 
     def metadata(self) -> dict:
         metadata = {
+            **self.metrics,
             "runtime": CHAT_AGENT,
             "agent_v2": self.agent_v2(),
             "round_texts": list(self.round_texts),

@@ -436,6 +436,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 # are answered here, never converted for the legacy executor.
                 own_tool = call["name"] in (tools.TOOL_SEARCH, tools.LOAD_SKILL) and call["name"] in offered
                 block = None if own_tool else function_call_to_tool_block(call["name"], call["arguments"])
+                # Every call the model made opens its card before the gate
+                # decides, so a refusal or an ask lands on a started card.
+                tool, command = (block.tool_type, block.content) if block is not None else (
+                    call["name"], call["arguments"])
+                yield _event({
+                    "type": "tool_start", "tool": tool,
+                    "command": command if block is None else result_events.command_display(block),
+                    "full_command": command.strip(), "round": len(record.rounds),
+                    "call_id": call["call_id"],
+                })
                 reminder = None
                 # The last card this call raised, stored on its tool event.
                 ask = None
@@ -493,13 +503,6 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         yield _event(auto.event())
                 adapted = None
                 if decision.outcome == permissions.ALLOW:
-                    tool, command = (call["name"], call["arguments"]) if own_tool else (block.tool_type, block.content)
-                    yield _event({
-                        "type": "tool_start", "tool": tool,
-                        "command": command if own_tool else result_events.command_display(block),
-                        "full_command": command.strip(), "round": len(record.rounds),
-                        "call_id": call["call_id"],
-                    })
                     if own_tool and call["name"] == tools.LOAD_SKILL:
                         outcome = tools.run_load_skill(call, skills, turn.owner, catalog)
                     elif own_tool:
@@ -602,8 +605,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             record.add_steers(unused)
         # The last round's text with its titles linked, once (spec #44, Stream events).
         yield _event({"type": "final_response", "content": record.round_texts[-1]})
+        metrics = record.metrics = usage.metrics(record, conversation, contexts[-1].context_length)
         message_id = writer.finish()
-        metrics = usage.metrics(record, conversation, contexts[-1].context_length)
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
         # Stop: keep the completed blocks and the text streamed so far; partial
