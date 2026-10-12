@@ -171,6 +171,9 @@ DEFAULT_SETTINGS = {
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,
+    # New runtime's skill index: every usable skill's name is listed; their
+    # descriptions share this many characters (#44, Skills).
+    "skill_index_max_chars": 8000,
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,

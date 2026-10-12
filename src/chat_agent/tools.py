@@ -38,6 +38,13 @@ from src.chat_agent.permissions import task_prompt
 # reject image parts.
 from src.agent_loop import _allow_visual_tool_evidence_for_model
 from src.prompt_security import untrusted_context_message
+# Relies on: _load_for_user(owner) returns a copy of that user's prefs, {} when
+# there are none (so a missing toggle means on, as legacy reads it).
+from routes.prefs_routes import _load_for_user
+# Relies on: is_usable(skill) is the one usability predicate (ADR 0008) over a
+# dict from SkillsManager.load(owner); it ignores disable_model_invocation,
+# which callers check themselves (slash keeps user-only skills).
+from services.memory.skills import is_usable
 # get_mcp_manager: the process-wide MCP manager, None before startup.
 from src.tool_utils import get_mcp_manager
 
@@ -82,6 +89,25 @@ TOOL_SEARCH_SCHEMA = {
     },
 }
 _SELECT_PREFIX = "select:"
+# The runtime's other own tool: view + view_ref of a usable skill (#33, #66).
+LOAD_SKILL = "load_skill"
+LOAD_SKILL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": LOAD_SKILL,
+        "description": (
+            "Load a skill from the skill index: returns its SKILL.md, and the "
+            "deferred tools it needs become callable from your next step. Pass "
+            "'path' to read a supporting file under the skill's folder instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+}
+USER_ONLY_REASON = "Only the user can start this with `/{name}`; suggest that, don't reproduce its steps."
 # MCP servers whose tools never enter the catalog: built-in email is upfront
 # under its bare names; raw Playwright always loses to private_browser.
 # The internal Python servers (memory, RAG, image generation) are already
@@ -191,7 +217,7 @@ def search(catalog: Sequence[Dict[str, Any]], query: str) -> List[Dict[str, Any]
 
 
 def loaded_names(conversation: Iterable[Dict[str, Any]]) -> List[str]:
-    """Tools that tool_search loaded in the replayed turns, in load order.
+    """Tools that tool_search or load_skill loaded in the replayed turns, in load order.
     Compaction drops those rounds, so their tools unload with them."""
     names: Dict[str, None] = {}
     for message in conversation:
@@ -202,15 +228,90 @@ def loaded_names(conversation: Iterable[Dict[str, Any]]) -> List[str]:
 
 def offered_schemas(
     upfront: List[Dict[str, Any]], catalog: Sequence[Dict[str, Any]], loaded: Iterable[str], surface: str,
+    *, skills: bool = False,
 ) -> List[Dict[str, Any]]:
-    """The round's tool list: upfront, tool_search, then loaded tools in load
-    order, so within a chat the list only grows and the prompt cache holds."""
+    """The round's tool list: upfront, tool_search, load_skill (when skills are
+    on), then loaded tools in load order, so within a chat the list only grows
+    and the prompt cache holds."""
     if not upfront:
         return []
     by_name = {schema_name(schema): schema for schema in catalog}
     extra = [TOOL_SEARCH_SCHEMA] if catalog else []
-    extra += [by_name[name] for name in loaded if name in by_name]
+    extra += [LOAD_SKILL_SCHEMA] if skills else []
+    extra += [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
     return upfront + _apply_tool_surface_to_schemas(extra, surface)
+
+
+def skills_enabled(owner: str, sess: Any, incognito: bool) -> bool:
+    """The Skill injection toggles as legacy reads them (Settings, then the
+    chat's own); Nobody mode has no skills (#44, Skills)."""
+    return (
+        not incognito
+        and bool(_load_for_user(owner).get("skills_enabled", True))
+        and getattr(sess, "skill_injection_enabled", True) is not False
+    )
+
+
+def _usable_skill(skills: Any, owner: str, name: str) -> Optional[Dict[str, Any]]:
+    # Relies on: load(owner) returns only this owner's skills plus ownerless
+    # built-ins, the same visibility read_skill_md applies.
+    skill = next((s for s in skills.load(owner=owner) if s.get("name") == name), None)
+    return skill if skill is not None and is_usable(skill) else None
+
+
+def _required_tools(skill: Dict[str, Any], catalog: Sequence[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The skill's requires_toolsets that are deferred and offered this turn;
+    upfront ones are already there and denied ones stay out."""
+    deferred = {schema_name(schema) for schema in catalog}
+    return tuple(dict.fromkeys(t for t in skill.get("requires_toolsets") or () if t in deferred))
+
+
+def invoked_skill_tools(skills: Any, owner: str, name: str, catalog: Sequence[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The deferred tools a /name invocation loads for its turn; user-only
+    skills count, since the user started them."""
+    if skills is None or not name:
+        return ()
+    skill = _usable_skill(skills, owner, name)
+    return _required_tools(skill, catalog) if skill is not None else ()
+
+
+def run_load_skill(call: Dict[str, Any], skills: Any, owner: str, catalog: Sequence[Dict[str, Any]]) -> "ToolOutcome":
+    """Answer one load_skill call; the loop adds the skill's tools next round."""
+    try:
+        arguments = json.loads(call["arguments"] or "{}")
+    except (TypeError, ValueError):
+        arguments = None
+    name = arguments.get("name") if isinstance(arguments, dict) else None
+    path = arguments.get("path") if isinstance(arguments, dict) else None
+    if not isinstance(name, str) or not name.strip() or (path is not None and not isinstance(path, str)):
+        return ToolOutcome(call["call_id"], LOAD_SKILL, str(call["arguments"]), STATUS_FAILED,
+                           EXIT_FAILED, f"{LOAD_SKILL}: pass a 'name' string and optionally a 'path' string.")
+    name, path = name.strip(), (path or "").strip()
+    command = f"{name} {path}".strip()
+    skill = _usable_skill(skills, owner, name)
+    if skill is None:
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                           f"Skill '{name}' is not available. Use a name from the skill index.")
+    if skill.get("disable_model_invocation"):
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DENIED, EXIT_DENIED,
+                           USER_ONLY_REASON.format(name=name))
+    if path:
+        # Relies on: read_skill_reference confines path to the skill's folder
+        # and returns None for traversal, the folder itself or a missing file.
+        text = skills.read_skill_reference(name, path, owner=owner)
+        if text is None:
+            return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                               f"Reference '{path}' not found under '{name}'.")
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DONE, EXIT_DONE, text)
+    text = skills.read_skill_md(name, owner=owner)
+    if text is None:
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                           f"Skill '{name}' is not available. Use a name from the skill index.")
+    skills.record_use(name, owner=owner)
+    loaded = _required_tools(skill, catalog)
+    if loaded:
+        text += f"\n\n[Loaded {', '.join(loaded)}; callable from your next step.]"
+    return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DONE, EXIT_DONE, text, loaded=loaded)
 
 
 def run_search(call: Dict[str, Any], catalog: Sequence[Dict[str, Any]]) -> "ToolOutcome":
@@ -261,7 +362,7 @@ class ToolOutcome:
     model_text: str
     desc: str = ""
     result: Dict[str, Any] = field(default_factory=dict)
-    # Tools a tool_search call loaded; replayed turns carry them (loaded_names).
+    # Tools a tool_search or load_skill call loaded; replayed turns carry them (loaded_names).
     loaded: Tuple[str, ...] = ()
 
     @property

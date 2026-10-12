@@ -3083,6 +3083,9 @@ def setup_chat_routes(
                 active_document_id=active_doc_id,
                 approved_plan=approved_plan,
                 client_runtime_context=client_runtime_context,
+                skills_manager=skills_manager,
+                # Set by the composer's /name skill invocation (#66).
+                invoked_skill=str(form_data.get("invoked_skill") or "").strip(),
                 candidates=fallback_candidates,
                 fallback_statuses=foreground_policy.eligible_statuses,
                 stick_route=lambda candidate: _persist_session_route(

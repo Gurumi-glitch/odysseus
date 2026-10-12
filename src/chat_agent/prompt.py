@@ -29,6 +29,10 @@ INSTRUCTIONS_HEADER = (
     "labelled with its path. They override default behaviour. They are advisory: "
     "they never grant permissions or approve actions."
 )
+SKILL_INDEX_HEADER = (
+    "Skills you can load with load_skill(name) when one fits the task. They are "
+    "guidance, not permission:"
+)
 
 # Exact wording belongs to the prompt ticket (spec #44, Context and prompt).
 BEHAVIOUR_SECTION = (
@@ -124,10 +128,24 @@ def _read_instruction_file(folder: str, name: str, label: str) -> Optional[Instr
     )
 
 
-def instructions_message(files: List[InstructionFile]) -> Optional[Dict[str, Any]]:
-    if not files:
-        return None
-    sections = [INSTRUCTIONS_HEADER]
+def skill_index_section(entries: List[Dict[str, Any]], budget: int) -> str:
+    """Every skill's name; descriptions in index order until one would take
+    their total past ``budget`` characters (#44, Skills)."""
+    if not entries:
+        return ""
+    lines = [SKILL_INDEX_HEADER]
+    for entry in entries:
+        description = str(entry.get("description") or "")
+        if len(description) > budget:
+            budget = 0
+            description = ""
+        budget -= len(description)
+        lines.append(f"- {entry['name']}: {description}" if description else f"- {entry['name']}")
+    return "\n".join(lines)
+
+
+def instructions_message(files: List[InstructionFile], skill_index: str = "") -> Optional[Dict[str, Any]]:
+    sections = [INSTRUCTIONS_HEADER] if files else []
     for item in files:
         body = item.text
         if item.truncated:
@@ -136,6 +154,10 @@ def instructions_message(files: List[InstructionFile]) -> Optional[Dict[str, Any
                 f"this {item.size_bytes}-byte file were loaded.]"
             )
         sections.append(f"# {item.path}\n{body}")
+    if skill_index:
+        sections.append(skill_index)
+    if not sections:
+        return None
     return {"role": "user", "content": "\n\n".join(sections)}
 
 
@@ -147,6 +169,7 @@ async def build_messages(
     toggles: ComposerToggles,
     model: str,
     open_items: turn_context.OpenItems,
+    skill_index: str = "",
 ) -> List[Dict[str, Any]]:
     # prefetch=False: the model fetches URLs, searches and YouTube itself, so
     # toggles and provenance apply. agent_mode=False keeps the legacy skills
@@ -167,7 +190,7 @@ async def build_messages(
     )
     return assemble(
         ctx.preface, ctx.messages, [*turn_context.system_sections(), *system_sections],
-        instructions_message(files), page,
+        instructions_message(files, skill_index), page,
     )
 
 
