@@ -3,7 +3,9 @@
 Each test states the one assumption the runtime relies on, so an upstream
 change to a private helper fails here instead of misrouting a turn.
 Session.add_message stamping ``_db_id`` is pinned by
-tests/test_session_manager_persist_guard.py.
+tests/test_session_manager_persist_guard.py; resolve_endpoint_by_id with
+require_exact_model=True (auto mode's classifier model) by
+tests/test_resolve_endpoint_fallbacks.py.
 """
 
 import json
@@ -299,3 +301,11 @@ def test_linkify_helpers_link_titles_from_successful_tool_events():
     ]
     text = linkify("Lunch plans\nDentist visit\nFailed note", events)
     assert text == "[Lunch plans](#email-77)\n[Dentist visit](#event-ev-1)\nFailed note"
+
+
+def test_allowed_models_from_privileges_is_none_when_unrestricted():
+    from routes.chat_helpers import _allowed_models_from_privileges
+
+    assert _allowed_models_from_privileges({}) is None
+    assert _allowed_models_from_privileges({"allowed_models": ["a"]}) == frozenset({"a"})
+    assert _allowed_models_from_privileges({"block_all_models": True}) == frozenset()

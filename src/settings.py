@@ -174,6 +174,10 @@ DEFAULT_SETTINGS = {
     # New runtime's skill index: every usable skill's name is listed; their
     # descriptions share this many characters (#44, Skills).
     "skill_index_max_chars": 8000,
+    # Auto mode's classifier model (#68); empty means the chat's own model.
+    # A model the user may not use falls back to the chat's model.
+    "classifier_endpoint_id": "",
+    "classifier_model": "",
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,
