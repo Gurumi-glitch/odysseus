@@ -101,14 +101,26 @@ async def test_background_job_started_in_one_turn_is_managed_in_the_next(workspa
 
 
 @pytest.mark.asyncio
-async def test_notes_family_is_scoped_to_the_casefolded_owner(db):
+async def test_notes_family_is_scoped_to_the_owner(db):
     await _call("manage_notes", {"action": "add", "title": "bob's note"}, _scope(owner="bob"))
-    await _call("manage_notes", {"action": "add", "title": "alice's note"}, _scope(owner="Alice"))
+    await _call("manage_notes", {"action": "add", "title": "alice's note"}, _scope(owner="alice"))
 
-    listed = await _call("manage_notes", {"action": "list"}, _scope(owner="Alice"))
+    listed = await _call("manage_notes", {"action": "list"}, _scope(owner="alice"))
 
     assert "alice's note" in listed.model_text
     assert "bob's note" not in listed.model_text
     with db() as session:
         owners = {n.title: n.owner for n in session.query(database.Note)}
     assert owners == {"bob's note": "bob", "alice's note": "alice"}
+
+
+@pytest.mark.asyncio
+async def test_owners_that_casefold_alike_stay_separate_accounts(db):
+    # AuthManager keys usernames by strip().lower(), so these are two accounts.
+    await _call("manage_notes", {"action": "add", "title": "strasse's note"}, _scope(owner="strasse"))
+
+    listed = await _call("manage_notes", {"action": "list"}, _scope(owner="straße"))
+
+    assert "strasse's note" not in listed.model_text
+    with db() as session:
+        assert {n.owner for n in session.query(database.Note)} == {"strasse"}
