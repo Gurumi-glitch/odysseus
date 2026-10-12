@@ -2,10 +2,16 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import routes.chat_helpers as chat_helpers
+import routes.history_routes as history_routes
+from core import database
+from core.models import ChatMessage
 import routes.chat_routes as chat_routes
 import tests.chat_agent.test_skill_user_approval as skill_tests
 from routes.skills_routes import SkillUpdateRequest, setup_skills_routes
@@ -282,3 +288,43 @@ def test_the_model_cannot_edit_who_may_invoke_a_skill(env):
     assert "error" in patched and "error" in edited
     after = skill_tests._skill(sm, name)
     assert after["disable_model_invocation"] is True and after["user_approved"]
+
+
+# --- L4: Resume's merge keeps the first row's tool events ---------------------
+
+
+class _JsonRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_merging_a_resumed_reply_keeps_the_first_rows_tool_events(monkeypatch, tmp_path):
+    # A stopped chat_agent row shows Resume (chatRenderer stopped indicator),
+    # whose reply the browser merges into it.
+    read = {"tool": "mcp__email__read_email", "status": "done"}
+    fetch = {"tool": "web_search", "status": "done"}
+    sess = SimpleNamespace(history=[
+        ChatMessage("user", "check my mail", metadata={"interaction_mode": "agent"}),
+        ChatMessage("assistant", "You have", metadata={"tool_events": [read], "stopped": True}),
+        ChatMessage("user", "Continue from where you left off."),
+        ChatMessage("assistant", "one email.", metadata={"tool_events": [fetch]}),
+    ])
+    monkeypatch.setattr(history_routes, "_verify_session_owner", lambda request, session_id: None)
+    engine = create_engine(f"sqlite:///{tmp_path / 'odysseus.db'}")
+    database.Base.metadata.create_all(engine)
+    monkeypatch.setattr(history_routes, "SessionLocal", sessionmaker(bind=engine))
+    router = history_routes.setup_history_routes(
+        SimpleNamespace(get_session=lambda session_id: sess, save_sessions=lambda: None),
+    )
+    merge = next(r.endpoint for r in router.routes if r.path.endswith("/merge-last-assistant"))
+
+    assert (await merge(_JsonRequest({}), "session-1"))["merged"] is True
+
+    [_, merged] = sess.history
+    assert merged.metadata["tool_events"] == [read, fetch]
+    legs = Provenance().after_history(sess.history)
+    assert (legs.external, legs.private) == (True, True)
