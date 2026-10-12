@@ -845,6 +845,8 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
   const fd = new FormData();
   fd.append('message', msg);
   fd.append('session', sessionId);
+  // A pane has no ask card: asks are denied at once instead of waiting (#61).
+  fd.append('interactive', 'false');
 
   let accumulated = '';
   let _buffer = '';
