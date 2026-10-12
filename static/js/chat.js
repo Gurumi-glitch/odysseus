@@ -1663,6 +1663,38 @@ import { invalidateSettings } from './appConfig.js';
     };
   }
 
+  // A fallback answered and the server moved the session onto it (#55). The
+  // cached session and the last picker choice must follow, or the picker
+  // keeps the failed model and the next send carries it back as
+  // selected_model / selected_endpoint_id.
+  function _stickToFallbackRoute(json, sid) {
+    if (!sid || !json.answered_by) return;
+    const endpointId = json.answered_by_endpoint_id ? String(json.answered_by_endpoint_id) : '';
+    const items = window.modelsModule?.getCachedItems?.() || [];
+    const endpoint = endpointId ? items.find(item => String(item.endpoint_id || '') === endpointId) : null;
+    const s = (sessionModule.getSessions?.() || []).find(x => x.id === sid);
+    if (s) {
+      s.model = json.answered_by;
+      s.endpoint_id = endpointId;
+      s.endpoint_name = json.answered_by_endpoint_label || '';
+      // Unknown URL beats the failed one: the server ignores a model without
+      // a route rather than re-binding the session to the failed endpoint.
+      s.endpoint_url = endpoint ? endpoint.url || '' : '';
+    }
+    const lastPicked = window.__odysseusLastPickedRoute || null;
+    if (lastPicked && lastPicked.session_id === sid) {
+      window.__odysseusLastPickedRoute = {
+        model: json.answered_by,
+        endpoint_url: endpoint ? endpoint.url || '' : '',
+        endpoint_id: endpointId,
+        display: _shortModel(json.answered_by),
+        picked_at: Date.now(),
+        session_id: sid,
+      };
+    }
+    if (sessionModule.updateModelPicker) sessionModule.updateModelPicker();
+  }
+
   function _setComposerAndSend(message) {
     const input = uiModule.el('message');
     if (!input) return false;
@@ -4497,6 +4529,7 @@ import { invalidateSettings } from './appConfig.js';
                   var _selM = _shortModel(json.selected_model || '');
                   var _ansM = _shortModel(json.answered_by || '');
                   uiModule.showToast('Fallback: ' + _selM + ' failed — answered by ' + _ansM, 6000);
+                  _stickToFallbackRoute(json, streamSessionId);
                   var _fallbackHolder = applyModelRouteEventState(json, holder, roundHolder, modelName);
                   if (_fallbackHolder) {
                     var _rEl = _fallbackHolder.querySelector('.role');
@@ -6607,6 +6640,7 @@ import { invalidateSettings } from './appConfig.js';
             // Reflect the fallback immediately, then reload the canonical
             // multi-round record when the detached run completes.
             rich = true;
+            _stickToFallbackRoute(json, sessionId);
             const fallbackHolder = applyModelRouteEventState(json, holder, null, meta && meta.model);
             if (fallbackHolder) {
               _setRoleModelLabel(

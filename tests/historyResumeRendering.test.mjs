@@ -14,6 +14,8 @@ const askCards = renderer
   .replaceAll('export async function', 'async function')
   .replaceAll('export function', 'function');
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
+// The sticky-fallback helper resumeStream calls (#55).
+const stickToFallback = chat.slice(chat.indexOf('  function _stickToFallbackRoute('), chat.indexOf('  function _setComposerAndSend('));
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
@@ -29,7 +31,7 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume, askCards }) => {
+  await page.evaluate(async ({ addMessage, resume, askCards, stickToFallback }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
@@ -55,7 +57,8 @@ async function setup() {
       reloads: 0, currentSession: 's', savedHistory: [], labels: [], toasts: [],
       _setRoleModelLabel: (role, requested, actual) => { window.labels.push({ requested, actual }); role.textContent = requested + ' -> ' + actual; },
       _metricsCostRecordId: () => 'test-run',
-      sessionModule: { getCurrentSessionId: () => window.currentSession, getSessions: () => [{ id: 's', model: 'test' }], markStreaming: noop, clearStreaming: noop, selectSession: () => { window.reloads++; }, loadSessions: () => { window.reloads++; } },
+      sessions: [{ id: 's', model: 'test', endpoint_id: 'primary-ep', endpoint_url: 'http://primary/v1' }], pickerUpdates: 0,
+      sessionModule: { getCurrentSessionId: () => window.currentSession, getSessions: () => window.sessions, updateModelPicker: () => { window.pickerUpdates++; }, markStreaming: noop, clearStreaming: noop, selectSession: () => { window.reloads++; }, loadSessions: () => { window.reloads++; } },
     });
     window.markdownModule = (await import('/static/js/markdown.js')).default;
     markdownModule.renderMermaid = undefined;
@@ -66,6 +69,7 @@ async function setup() {
     window.generatedImageResult = (await import('/static/js/generatedImageResult.js')).generatedImageResult;
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
+    window._stickToFallbackRoute = (0, eval)('(' + stickToFallback + ')');
     const cards = new Function(askCards + '\nreturn { renderAskUserCard, resolveAskUserCard, answerChatAsk };')();
     Object.assign(window, cards);
     window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, ...cards };
@@ -78,7 +82,7 @@ async function setup() {
       if (String(url).includes('/api/chat/ask/')) { window.posts.push({ url: String(url), body: JSON.parse(init.body) }); return new Response(JSON.stringify({ accepted: true })); }
       return new Response(JSON.stringify({ history: window.savedHistory }));
     };
-  }, { addMessage, resume, askCards });
+  }, { addMessage, resume, askCards, stickToFallback });
   return page;
 }
 
@@ -188,6 +192,29 @@ test('resume fallback and provider alias remain visible without a history reload
     assert.equal(result.holders, 1);
     assert.equal(result.text, 'hello');
     assert.match(result.role, /provider\/fallback-alias/);
+  } finally { await page.close(); }
+});
+
+// Fallback is sticky (#55): the server moved the session, and the browser's
+// cached session, last picker choice and picker label follow it.
+test('resume fallback moves the cached session and the last picked route to the answering model', async () => {
+  const page = await setup();
+  try {
+    await startReplay(page);
+    const result = await page.evaluate(async () => {
+      window.__odysseusLastPickedRoute = { model: 'test', endpoint_id: 'primary-ep', endpoint_url: 'http://primary/v1', picked_at: Date.now(), session_id: 's' };
+      send({ type: 'fallback', selected_model: 'test', selected_endpoint_id: 'primary-ep', answered_by: 'fallback-model', answered_by_endpoint_id: 'backup-ep', answered_by_endpoint_label: 'Backup', reason: '503' });
+      send({ delta: 'hello' });
+      send('[DONE]');
+      await running;
+      const picked = window.__odysseusLastPickedRoute;
+      return { session: sessions[0], picked: { model: picked.model, endpoint_id: picked.endpoint_id, session_id: picked.session_id }, pickerUpdates };
+    });
+    assert.equal(result.session.model, 'fallback-model');
+    assert.equal(result.session.endpoint_id, 'backup-ep');
+    assert.equal(result.session.endpoint_url, '');
+    assert.deepEqual(result.picked, { model: 'fallback-model', endpoint_id: 'backup-ep', session_id: 's' });
+    assert.ok(result.pickerUpdates >= 1);
   } finally { await page.close(); }
 });
 
