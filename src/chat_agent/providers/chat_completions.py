@@ -8,7 +8,8 @@ The legacy message sanitizer is deliberately not used: it drops
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Dict, List
+import uuid
+from typing import Any, AsyncIterator, Dict, List, Sequence
 
 from src.chat_agent.providers import (
     Endpoint,
@@ -52,10 +53,16 @@ def build_payload(
     *,
     temperature: float,
     max_tokens: int,
+    tools: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
     provider = _detect_provider(endpoint.url)
     messages = _messages(conversation, provider_key(endpoint.url), endpoint.model)
     payload: Dict[str, Any] = {"model": endpoint.model, "messages": messages, "stream": True}
+    if tools:
+        # parallel_tool_calls is never sent: the model may still issue several
+        # calls per round, and the loop runs them one at a time (spec #44).
+        payload["tools"] = list(tools)
+        payload["tool_choice"] = "auto"
     if not _omit_temperature(provider, endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
@@ -110,8 +117,10 @@ async def stream_round(
     *,
     temperature: float,
     max_tokens: int,
+    tools: Sequence[Dict[str, Any]] = (),
 ) -> AsyncIterator[RoundEvent]:
-    payload = build_payload(endpoint, conversation, temperature=temperature, max_tokens=max_tokens)
+    payload = build_payload(endpoint, conversation, temperature=temperature,
+                            max_tokens=max_tokens, tools=tools)
     target_url = _normalize_openai_chat_url(endpoint.url)
     client = _get_http_client()
     async with client.stream(
@@ -131,6 +140,8 @@ async def stream_round(
         text = ""
         details: List[Any] = []
         reasoning_content = ""
+        # Tool calls stream as fragments keyed by index; complete at stream end.
+        calls: Dict[int, Dict[str, str]] = {}
         async for line in response.aiter_lines():
             # SSE allows "data:value" without the space.
             if not line.startswith("data:"):
@@ -154,7 +165,24 @@ async def stream_round(
                 if delta.get("content"):
                     text += delta["content"]
                     yield TextDelta(delta["content"])
-        yield RoundEnd(_blocks(endpoint, text, details, reasoning_content), None)
+                for fragment in delta.get("tool_calls") or ():
+                    _merge_tool_call(calls, fragment)
+        blocks = _blocks(endpoint, text, details, reasoning_content)
+        blocks += [
+            {"type": "tool_call", "call_id": call["call_id"] or f"call_{uuid.uuid4().hex}",
+             "name": call["name"], "arguments": call["arguments"]}
+            for _, call in sorted(calls.items())
+        ]
+        yield RoundEnd(blocks, None)
+
+
+def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any]) -> None:
+    call = calls.setdefault(int(fragment.get("index") or 0), {"call_id": "", "name": "", "arguments": ""})
+    if fragment.get("id"):
+        call["call_id"] = fragment["id"]
+    function = fragment.get("function") or {}
+    call["name"] += function.get("name") or ""
+    call["arguments"] += function.get("arguments") or ""
 
 
 def _blocks(endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str) -> List[Dict[str, Any]]:
