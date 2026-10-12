@@ -24,11 +24,16 @@ def admin(monkeypatch):
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
 
 
-def _decide(name, content, *, allow=(), ask=(), deny=(), session=(), provenance=Provenance()):
+def _decision(name, content, *, allow=(), ask=(), deny=(), session=(), provenance=Provenance(), owner="alice",
+              workspace=None):
     rules = Rules.from_lists({"allow": list(allow), "ask": list(ask), "deny": list(deny)})
-    session = tuple(parse_rule(text) for text in session)
+    session = tuple(parse_rule(text) if isinstance(text, str) else text for text in session)
     return permissions.decide(_layers(rules), name, content, rules=rules, session=session,
-                              provenance=provenance).outcome
+                              provenance=provenance, owner=owner, workspace=workspace)
+
+
+def _decide(name, content, **kwargs):
+    return _decision(name, content, **kwargs).outcome
 
 
 def _email(to, **extra):
@@ -50,7 +55,9 @@ def _email(to, **extra):
     ("bash(npm test)", "bash", "npm test", True),
     ("bash(npm test)", "bash", "npm test --watch", False),
     ("bash", "bash", "anything at all", True),
-    ("python(print:*)", "python", "print(1)", True),
+    # Code is not a command line: a python prefix never allows anything.
+    ("python(print:*)", "python", "print(1)", False),
+    ("python(print(1))", "python", "print(1)", True),
     ("host_shell(docker:*)", "host_shell", json.dumps({"command": "docker ps"}), True),
     # file tools: path glob.
     ("write_file(notes/*.md)", "write_file", "notes/a.md\nhello", True),
@@ -190,11 +197,12 @@ def test_egress_gate(provenance, name, content, expected):
     assert _decide(name, content, provenance=provenance) == expected
 
 
-def test_an_allow_rule_does_not_open_the_egress_gate_but_a_session_rule_does():
+def test_neither_an_allow_rule_nor_a_session_rule_opens_the_egress_gate():
+    # A redirect from an allowed host can carry the data anywhere.
     fetch = json.dumps({"url": "https://example.com/a"})
     assert _decide("web_fetch", fetch, allow=["web_fetch"], provenance=_email_read()) == ASK
-    assert _decide("web_fetch", fetch, session=["web_fetch(domain:example.com)"],
-                   provenance=_email_read()) == ALLOW
+    decision = _decision("web_fetch", fetch, session=["web_fetch(domain:example.com)"], provenance=_email_read())
+    assert (decision.outcome, decision.chat_scope) == (ASK, False)
 
 
 @pytest.mark.parametrize(("name", "content", "label"), [
@@ -206,7 +214,7 @@ def test_an_allow_rule_does_not_open_the_egress_gate_but_a_session_rule_does():
     ("python", "print(1)", "python(print(1))"),
     ("write_file", "notes/a.md\nhello", "write_file(notes/a.md)"),
     ("write_file", "notes/[a].md\nhello", "write_file(notes/[[]a].md)"),
-    ("manage_tasks", json.dumps({"action": "create"}), "manage_tasks(action:create)"),
+    ("manage_notes", json.dumps({"action": "delete", "id": "1"}), "manage_notes(action:delete)"),
     ("mcp__email__send_email", _email("Mom@Example.com"), "send_email(to:mom@example.com)"),
     ("web_fetch", json.dumps({"url": "https://Example.com/a"}), "web_fetch(domain:example.com)"),
     ("mcp__github__create_issue", "{}", "mcp__github__create_issue"),
@@ -220,6 +228,8 @@ def test_allow_for_this_chat_saves_the_rule_for_the_call(name, content, label):
 @pytest.mark.parametrize(("name", "content"), [
     ("send_email", _email("mom@example.com", cc="boss@example.com")),
     ("app_api", json.dumps({"method": "PUT", "path": "/api/prefs/theme"})),
+    # One approved task is not every task this chat creates.
+    ("manage_tasks", json.dumps({"action": "create", "prompt": "news", "output_target": "prefs"})),
 ])
 def test_calls_without_a_specifier_are_allowed_for_this_chat_only_when_identical(name, content):
     rule = permissions.session_rule(name, content)
