@@ -30,15 +30,22 @@ from src.tool_approval_scopes import _grant_key
 
 logger = logging.getLogger(__name__)
 
-STOP_CANCELLED = "cancelled"
-STOP_INTERRUPTED = "interrupted"
-STOP_ERROR = "error"
-
 CANCELLED_REASON = "Cancelled: the turn stopped before this call finished."
 INTERRUPTED_REASON = "Cancelled: the server restarted before this call finished."
 # ask_expired causes (spec #44, Stream events).
 ASK_EXPIRED_CANCEL = "cancel"
 ASK_EXPIRED_RESTART = "restart"
+
+
+# Why a turn ended early (metadata.stop_reason; #65 renders it). A turn that
+# ends because the model stopped calling tools has none.
+STOP_MAX_ROUNDS = "max_rounds"
+STOP_BUDGET = "budget"
+# Stop, Finish and a server restart all interrupt the turn.
+STOP_INTERRUPTED = "interrupted"
+STOP_REPEAT_GUARD = "repeat_guard"
+# A provider error or crash after the row was first checkpointed.
+STOP_ERROR = "error"
 
 
 @dataclass
@@ -52,6 +59,7 @@ class TurnRecord:
     rounds: List[Dict[str, Any]] = field(default_factory=list)
     # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
     tool_events: List[Dict[str, Any]] = field(default_factory=list)
+    stop_reason: Optional[str] = None
     # Context the route resolved for this turn, projected as save_assistant_response
     # does: character_name, web_sources, rag_sources, memories_used.
     context: Dict[str, Any] = field(default_factory=dict)
@@ -84,6 +92,8 @@ class TurnRecord:
         if thinking:
             metadata["thinking"] = thinking
         metadata.update({key: value for key, value in self.context.items() if value})
+        if self.stop_reason:
+            metadata["stop_reason"] = self.stop_reason
         return metadata
 
     def content(self) -> str:
@@ -195,10 +205,13 @@ class TurnWriter:
         if not self.incognito:
             self._write(in_progress=True)
 
-    def finish(self, stop_reason: Optional[str] = None) -> Optional[str]:
-        """Write the final row and return its message id (None in Nobody mode)."""
-        if stop_reason in (STOP_CANCELLED, STOP_ERROR):
-            self.record.close_open_calls(CANCELLED_REASON, ASK_EXPIRED_CANCEL)
+    def finish(self) -> Optional[str]:
+        """Write the final row and return its message id (None in Nobody mode).
+
+        A turn stopped mid-round keeps its completed calls; the rest get
+        cancelled results.
+        """
+        self.record.close_open_calls(CANCELLED_REASON, ASK_EXPIRED_CANCEL)
         if self.incognito:
             # Relies on: build_chat_context reads Nobody-mode history back from
             # this request-local transcript on the next turn.
@@ -206,29 +219,28 @@ class TurnWriter:
             content = self.record.content()
             _append_incognito_message(
                 self.session_id, "assistant", content,
-                _signed(content, self._metadata(False, stop_reason)),
+                _signed(content, self._metadata(in_progress=False)),
             )
             return None
-        self._write(in_progress=False, stop_reason=stop_reason)
+        self._write(in_progress=False)
         return (self.message.metadata or {}).get("_db_id")
 
     @property
     def started(self) -> bool:
         return self.message is not None
 
-    def _metadata(self, in_progress: bool, stop_reason: Optional[str]) -> Dict[str, Any]:
+    def _metadata(self, *, in_progress: bool) -> Dict[str, Any]:
         metadata = self.record.metadata()
         if in_progress:
             metadata["in_progress"] = True
-        if stop_reason:
-            # ``stopped`` is the legacy marker the history renderer shows.
-            metadata["stop_reason"] = stop_reason
+        elif self.record.stop_reason in (STOP_INTERRUPTED, STOP_ERROR):
+            # The legacy marker the history renderer shows as stopped.
             metadata["stopped"] = True
         return metadata
 
-    def _write(self, *, in_progress: bool, stop_reason: Optional[str] = None) -> None:
+    def _write(self, *, in_progress: bool) -> None:
         content = self.record.content()
-        metadata = _signed(content, self._metadata(in_progress, stop_reason))
+        metadata = _signed(content, self._metadata(in_progress=in_progress))
         if self.message is None:
             self.message = ChatMessage("assistant", content, metadata=metadata)
             # Relies on: Session.add_message persists through the session

@@ -15,7 +15,7 @@ from uuid import uuid4
 # Relies on: _apply_tool_surface_to_schemas returns [] for "none" and
 # description-stripped schemas for "compact".
 from src.agent_loop import _apply_tool_surface_to_schemas
-from src.agent_runtime.authority import OperationGrant, RequestAuthority
+from src.agent_runtime.authority import OperationGrant, RequestAuthority, _owner as authority_owner
 # Relies on: seal_backends seals the backends the listed tools may reach from
 # the client runtime context, as create_request_authority does.
 from src.agent_runtime.remote_resources import seal_backends
@@ -138,19 +138,22 @@ def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bo
 
 async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcome:
     """Run one admitted call through the legacy executor."""
-    owner = scope.owner.strip().casefold()
+    # Same owner strings as the legacy path: tools get the AuthManager key as
+    # is (stores key rows by it), and only the authority is casefolded, as
+    # create_request_authority does. Casefolding the tool owner would merge
+    # accounts such as "straße" and "strasse".
     authority = RequestAuthority(
-        uuid4().hex, owner, scope.session_id, scope.workspace or "",
+        uuid4().hex, authority_owner(scope.owner), scope.session_id, scope.workspace or "",
         (OperationGrant(canonical_tool(block.tool_type)),),
     )
     if scope.client_runtime_context is not None:
         authority = replace(authority, backend_resources=seal_backends(
-            (g.tool for g in authority.grants), context=scope.client_runtime_context, owner=owner))
+            (g.tool for g in authority.grants), context=scope.client_runtime_context, owner=authority.owner))
     desc, result = await execute_tool_block(
         block,
         session_id=scope.session_id,
         disabled_tools=set(scope.denied_names),
-        owner=owner,
+        owner=scope.owner,
         workspace=scope.workspace,
         tool_policy=None,
         security_context=NO_TOOL_SECURITY_CONTEXT,
