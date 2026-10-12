@@ -459,16 +459,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         reminder = signal.reminder
                         decision = (permissions.Decision(permissions.ALLOW) if own_tool
                                     else _gate(turn, call, block, layers, offered, rules, provenance, auto))
-                # A call the classifier allowed: it judged this exact call,
-                # as the user does on its own card.
-                auto_allowed = False
                 if decision.outcome == permissions.ASK and decision.auto and auto.active:
                     verdict = await auto.judge(
                         block.tool_type, block.content, chat_endpoint=endpoint,
                         provenance=provenance, tool_events=record.tool_events,
                     )
                     if verdict is not None:
-                        auto_allowed = verdict.allow
                         decision = permissions.Decision(permissions.ALLOW) if verdict.allow else classifier.denial(verdict)
                         if not auto.active:
                             yield _event(auto.event())
@@ -502,9 +498,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         outcome = tools.run_search(call, catalog)
                     else:
                         # Only a task the user approved on its own card gets its prompt's grants.
-                        approved = auto_allowed or (
-                            ask is not None and ask.card["ask_kind"] == asks.PERMISSION
-                            and ask.reply is not None and ask.reply.decision == asks.ONCE)
+                        approved = (ask is not None and ask.card["ask_kind"] == asks.PERMISSION
+                                    and ask.reply is not None and ask.reply.decision == asks.ONCE)
                         call_scope = replace(scope, approved_task=approved)
                         async for item in _execute_with_progress(call["call_id"], block, call_scope, len(record.rounds)):
                             if isinstance(item, tools.ToolOutcome):

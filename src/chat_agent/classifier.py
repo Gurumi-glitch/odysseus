@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -101,13 +102,36 @@ class Verdict:
     category: str
 
 
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _unique_keys(pairs: List[tuple]) -> Dict[str, Any]:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        # json.loads keeps the last value, a reader may take the first.
+        raise _DuplicateKey(keys)
+    return dict(pairs)
+
+
+def _strict_json(text: str) -> Any:
+    """``json.loads`` refusing duplicate keys at any depth (ValueError)."""
+    return json.loads(text, object_pairs_hook=_unique_keys)
+
+
+_CODE_FENCE = "```"
+
+
 def read_verdict(text: str) -> Optional[Verdict]:
-    """The JSON object the classifier answered with; None when it is not one."""
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < start:
-        return None
+    """The one JSON object the classifier answered with, optionally fenced;
+    None for anything else (prose around it, duplicate keys, another
+    decision word), so an unclear answer asks the user."""
+    text = text.strip()
+    if text.startswith(_CODE_FENCE) and text.endswith(_CODE_FENCE) and len(text) > 2 * len(_CODE_FENCE):
+        text = text[len(_CODE_FENCE):-len(_CODE_FENCE)].strip()
+        text = text[len("json"):].strip() if text.startswith("json") else text
     try:
-        answer = json.loads(text[start:end + 1])
+        answer = _strict_json(text)
     except ValueError:
         return None
     if not isinstance(answer, dict) or answer.get("decision") not in (ALLOW, DENY):
@@ -117,6 +141,26 @@ def read_verdict(text: str) -> Optional[Verdict]:
         reason=str(answer.get("reason") or "").strip(),
         category=str(answer.get("category") or "").strip(),
     )
+
+
+def judged_arguments(content: str) -> Any:
+    """The call's arguments as the executor reads them: JSON parsed by
+    ``json.loads`` (the classifier sees the parsed value, never raw text a
+    reader could take differently), any other text as is. A key repeated at
+    any depth raises _DuplicateKey: the executor keeps the last value."""
+    try:
+        return _strict_json(content)
+    except _DuplicateKey:
+        raise
+    except ValueError:
+        return content
+
+
+def _named(target: str, said: str) -> bool:
+    """The whole address or host appears in the user's words, not as part
+    of a longer one ("a@b.co" is not named by "a@b.com")."""
+    pattern = r"(?<![\w.@-])" + re.escape(target.casefold()) + r"(?![\w@-]|\.\w)"
+    return re.search(pattern, said) is not None
 
 
 def _field(row: Any, name: str) -> Any:
@@ -225,10 +269,16 @@ class AutoMode:
     ) -> Optional[Verdict]:
         """The classifier's verdict on this call, counted toward the pause;
         None when the call failed (the user is asked instead)."""
+        try:
+            arguments = judged_arguments(content)
+        except _DuplicateKey:
+            logger.warning("chat_agent: %s arguments repeat a key; asking the user", name)
+            return None
         endpoint = self.endpoint or chat_endpoint
+        facts = self._input(name, arguments, content, provenance, tool_events)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(self._input(name, content, provenance, tool_events), indent=1)},
+            {"role": "user", "content": json.dumps(facts, indent=1)},
         ]
         try:
             text = await asyncio.wait_for(self._call(endpoint, messages), TIMEOUT_SECONDS)
@@ -256,7 +306,7 @@ class AutoMode:
         return True
 
     def _input(
-        self, name: str, content: str, provenance: permissions.Provenance,
+        self, name: str, arguments: Any, content: str, provenance: permissions.Provenance,
         tool_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         said = "\n".join(self.user_messages).casefold()
@@ -270,11 +320,11 @@ class AutoMode:
                 "external_content_from": list(provenance.origins),
                 "private_data_read": provenance.private,
                 "targets": [
-                    {"target": target, "named_in_user_messages": target.casefold() in said}
+                    {"target": target, "named_in_user_messages": _named(target, said)}
                     for target in permissions.call_targets(content)
                 ],
             },
-            "action": {"tool": name, "arguments": content},
+            "action": {"tool": name, "arguments": arguments},
         }
 
     async def _call(self, endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Optional[str]:

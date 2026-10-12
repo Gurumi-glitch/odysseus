@@ -454,7 +454,9 @@ def compacted_history(
     legs = permissions.Provenance().after_history(older)
     summary.metadata = {
         **(summary.metadata or {}),
-        permissions.PROVENANCE_KEY: {"external": legs.external, "private": legs.private},
+        permissions.PROVENANCE_KEY: {
+            "external": legs.external, "private": legs.private, "origins": list(legs.origins),
+        },
     }
     return [summary, *(_without_usage(row) for row in recent)]
 

@@ -604,7 +604,8 @@ def _raw_api_writes(tool: str, content: Any) -> bool:
 
 
 def is_sensitive(name: str, content: Any) -> bool:
-    tool = policy_name(name)
+    # Casefolded: a spelling the sets miss must not skip the ask (fail closed).
+    tool = policy_name(name).casefold()
     if tool in _SENSITIVE_TOOLS:
         return True
     capabilities = capabilities_for_action(tool, content)
@@ -689,7 +690,7 @@ def _task_delivery_protected(fields: Mapping[str, Any]) -> bool:
 def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> bool:
     """Actions auto mode never answers for the user (#68). A task edit, resume
     or run whose stored task cannot be read counts as protected."""
-    tool = policy_name(name)
+    tool = policy_name(name).casefold()
     if tool in _PROTECTED_TOOLS:
         return True
     if tool in _RAW_API_TOOLS:
@@ -755,9 +756,12 @@ class Provenance:
             recorded = metadata.get(PROVENANCE_KEY)
             if isinstance(recorded, dict):
                 # A recorded leg only ever arms the gate, so a forged one costs an ask.
+                origins = recorded.get("origins") if isinstance(recorded.get("origins"), list) else []
                 provenance = Provenance(
                     external=provenance.external or bool(recorded.get("external")),
                     private=provenance.private or bool(recorded.get("private")),
+                    origins=provenance.origins + tuple(
+                        str(o) for o in origins if str(o) not in provenance.origins),
                 )
         return provenance
 
@@ -798,16 +802,13 @@ def decide(
         UNSURE in deny
         or any(_match(rule, name, content, allow=False, workspace=workspace) != MISS for rule in rules.ask)
         or is_protected(name, content, owner=owner)
-    )
-    # Asks "Allow for this chat" never lifts: the above, the egress gate,
-    # and task actions (a task's grants come from its prompt, so each one
-    # needs its own answer).
-    pinned = (
-        user_only
-        or (provenance.external and provenance.private and _egress(name, content))
+        # A task's grants come from its prompt and it runs unattended later,
+        # so each one needs the user's own answer.
         or (policy_name(name) == "manage_tasks"
             and _action_from_content("manage_tasks", content) in _TASK_ACTIONS_THAT_ASK)
     )
+    # Asks "Allow for this chat" never lifts: the above and the egress gate.
+    pinned = user_only or (provenance.external and provenance.private and _egress(name, content))
     asks = pinned or is_sensitive(name, content) or (
         posture(name, content) == ASK
         and not any(rule_covers(rule, name, content, workspace) for rule in rules.allow)
