@@ -6,12 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
+import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_utils as tool_utils
 from core import database
-from src.chat_agent import permissions
+from src.chat_agent import session_rules
 from src.chat_agent.tools import TOOL_SEARCH, TOOL_SEARCH_MAX_SCHEMAS
 from src.mcp_manager import McpManager
+from tests.chat_agent.test_chat_agent_asks_route import answering, send_and_answer
 from tests.chat_agent.test_chat_agent_route import _Request, _data_events, _sse_events, _sse_tool_calls
 from tests.chat_agent.test_chat_agent_tools_route import (  # noqa: F401 (fixtures)
     _tool_events,
@@ -129,34 +131,26 @@ def _search_then_call_issue_lister(harness):
 
 @pytest.mark.asyncio
 async def test_a_custom_mcp_tool_is_callable_after_search(harness, admin, mcp, db, monkeypatch):
-    # Custom MCP tools ask (spec #44 default posture); approving stands in
-    # for the user's answer until real asks arrive (#56).
-    monkeypatch.setattr(permissions, "posture", lambda name, content: permissions.ALLOW)
     # The executor's own copy of the admin check (custom MCP is admin-only).
     monkeypatch.setattr(tool_execution, "owner_is_admin_or_single_user", lambda owner: True)
+    # The ask endpoint answers as whoever the request is signed in as.
+    monkeypatch.setattr(chat_routes, "effective_user", lambda request: request.state.current_user)
+    monkeypatch.setattr(session_rules, "_RULES", {})
     _search_then_call_issue_lister(harness)
 
-    _, body = await harness.send(_Request("agent"))
+    # Custom MCP tools ask by default (spec #44 default posture).
+    body = await send_and_answer(harness, _Request("agent"), answering(harness, ("once",)))
 
     _, second, _ = harness.captured["provider_requests"]
     assert "mcp__github__list_issues" in _tool_names(second)
+    [ask] = _tool_events(_data_events(body), "ask_user")
+    assert ask["data"]["action"]["tool"] == "mcp__github__list_issues"
     assert mcp.calls == [("list_issues", {})]
     outputs = _tool_events(_data_events(body), "tool_output")
     assert [(o["tool"], o["exit_code"]) for o in outputs] == [
         (TOOL_SEARCH, 0), ("mcp__github__list_issues", 0),
     ]
     assert "3 open issues" in outputs[1]["output"]
-
-
-@pytest.mark.asyncio
-async def test_a_loaded_custom_mcp_tool_asks_by_default(harness, admin, mcp, db):
-    _search_then_call_issue_lister(harness)
-
-    _, body = await harness.send(_Request("agent"))
-
-    assert mcp.calls == []
-    _, mcp_output = _tool_events(_data_events(body), "tool_output")
-    assert mcp_output["output"] == permissions.APPROVAL_PENDING_REASON
 
 
 def _history_turn_that_loaded(name):
@@ -207,8 +201,7 @@ class _RoundsThatDisableBeforeTheCall(list):
 
 
 @pytest.mark.asyncio
-async def test_a_per_server_disabled_mcp_tool_is_refused_at_call_time(harness, admin, mcp, db, monkeypatch):
-    monkeypatch.setattr(permissions, "posture", lambda name, content: permissions.ALLOW)
+async def test_a_per_server_disabled_mcp_tool_is_refused_at_call_time(harness, admin, mcp, db):
     harness.provider_rounds = _RoundsThatDisableBeforeTheCall([
         _sse_tool_calls((TOOL_SEARCH, {"query": "select:mcp__github__create_issue"})),
         _sse_tool_calls(("mcp__github__create_issue", {"title": "x"})),

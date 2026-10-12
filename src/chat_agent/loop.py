@@ -2,8 +2,9 @@
 
 The turn runs rounds until a reply has no tool calls or a shared cap is hit.
 Each round's tool calls run one at a time in call order; errors and denials go
-back to the model as tool results. Continue, the repeat guard, steering and
-finish arrive in later tickets (#54, #63).
+back to the model as tool results. The turn also stops at the round and
+tool-call caps, when the repeat guard stops it, and after Finish (one more
+round with no tools). Steering arrives in #63.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
 from src.agent_loop import _configured_model_tool_surface
 from src.agent_tools import MAX_AGENT_ROUNDS
-from src.chat_agent import permissions, prompt, tools, transcript
+# Relies on: agent_runs.should_finish(session_id) is True only while that
+# session's registered run is running and Finish was requested for it; a run
+# that replaces it starts with the flag clear.
+from src import agent_runs
+from src.chat_agent import asks, permissions, prompt, repeat_guard, session_rules, tools, transcript
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
@@ -39,6 +44,22 @@ from src.tool_schemas import function_call_to_tool_block
 logger = logging.getLogger(__name__)
 
 TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
+ASK_EXPIRED_REASON = "Not run: the user did not answer the request in time."
+FINISH_REASON = "Not run: the user asked to finish with the results so far."
+REPEAT_STOP_REASON = (
+    f"Not run: this exact call was repeated {repeat_guard.STOP_STREAK} times in a row, "
+    "so the turn stopped."
+)
+REPEAT_STOP_MESSAGE = (
+    f"The agent repeated the same tool call {repeat_guard.STOP_STREAK} times in a row "
+    "without progress, so this turn stopped."
+)
+_NOT_RUN_REASONS = {
+    transcript.STOP_BUDGET: TOOL_CALL_CAP_REASON,
+    transcript.STOP_INTERRUPTED: FINISH_REASON,
+    transcript.STOP_REPEAT_GUARD: REPEAT_STOP_REASON,
+    transcript.STOP_ASK_EXPIRED: ASK_EXPIRED_REASON,
+}
 
 
 @dataclass(frozen=True)
@@ -151,9 +172,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             denied_names=layers.denied_names,
         )
         tool_calls_used = 0
+        guard = repeat_guard.RepeatGuard()
+        round_tools = tool_schemas
         while True:
             end = None
-            async for event in _stream_round(turn, provider, endpoint, conversation, tool_schemas):
+            async for event in _stream_round(turn, provider, endpoint, conversation, round_tools):
                 if isinstance(event, ProviderError):
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
@@ -165,27 +188,60 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             round_record = _round_record(end)
             record.rounds.append(round_record)
             calls = [b for b in end.blocks if b["type"] == "tool_call"]
-            if not calls:
+            if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
+                # Finish's tool-less round is the turn's last.
                 break
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = []
-            budget_hit = False
             for call in calls:
                 # tool_search is the runtime's own tool: it is answered here,
                 # never converted for the legacy executor.
                 searching = call["name"] == tools.TOOL_SEARCH and call["name"] in offered
                 block = None if searching else function_call_to_tool_block(call["name"], call["arguments"])
-                if caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                reminder = None
+                # The last card this call raised, stored on its tool event.
+                ask = None
+                if record.stop_reason is None and agent_runs.should_finish(turn.session_id):
+                    record.stop_reason = transcript.STOP_INTERRUPTED
+                if record.stop_reason is None and caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                    record.stop_reason = transcript.STOP_BUDGET
+                if record.stop_reason is not None:
                     # Every call still gets a result, so the round replays
                     # as a complete call/result pair.
-                    budget_hit = True
-                    decision = permissions.Decision(permissions.DENY, TOOL_CALL_CAP_REASON)
-                elif searching:
-                    tool_calls_used += 1
-                    decision = permissions.Decision(permissions.ALLOW)
+                    decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                 else:
                     tool_calls_used += 1
-                    decision = _gate(call, block, layers, offered)
+                    signal = guard.observe(call["name"], call["arguments"])
+                    if signal.stop:
+                        ask = _Ask(turn, asks.repeat_guard_card(
+                            turn.session_id, call["name"], call["arguments"], signal.streak,
+                        ))
+                        async for event in ask.events():
+                            yield event
+                        if ask.reply is None:
+                            record.stop_reason = transcript.STOP_ASK_EXPIRED
+                        elif ask.reply.decision != asks.ONCE:
+                            record.stop_reason = transcript.STOP_REPEAT_GUARD
+                    if record.stop_reason is not None:
+                        decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
+                    else:
+                        reminder = signal.reminder
+                        decision = (permissions.Decision(permissions.ALLOW) if searching
+                                    else _gate(call, block, layers, offered))
+                if decision.outcome == permissions.ASK and session_rules.allows(
+                    turn.owner, turn.session_id, block.tool_type, block.content,
+                ):
+                    decision = permissions.Decision(permissions.ALLOW)
+                if decision.outcome == permissions.ASK:
+                    rule = session_rules.rule_for(block.tool_type, block.content)
+                    ask = _Ask(turn, asks.permission_card(
+                        turn.session_id, block.tool_type, block.content, rule.label,
+                    ))
+                    async for event in ask.events():
+                        yield event
+                    if ask.reply is None:
+                        record.stop_reason = transcript.STOP_ASK_EXPIRED
+                    decision = _permission_decision(turn, rule, ask.reply)
                 if decision.outcome == permissions.ALLOW:
                     tool, command = (call["name"], call["arguments"]) if searching else (block.tool_type, block.content)
                     yield _event({
@@ -197,23 +253,53 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         outcome = tools.run_search(call, catalog)
                     else:
                         outcome = await tools.execute(call["call_id"], block, scope)
+                    question = outcome.result.get("ask_user") if outcome.ok else None
+                    if question:
+                        ask = _Ask(turn, asks.question_card(turn.session_id, question))
+                        async for event in ask.events():
+                            yield event
+                        if ask.reply is None:
+                            record.stop_reason = transcript.STOP_ASK_EXPIRED
+                        outcome.model_text = _question_result(ask.reply)
                 else:
                     outcome = tools.refused_outcome(
                         call, block, decision.reason,
                         denied=decision.outcome != permissions.INVALID,
                     )
                 yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
-                record.tool_events.append(outcome.tool_event(len(record.rounds), endpoint.model))
-                results.append(outcome.envelope())
-                conversation.append({"role": "tool", **outcome.envelope()})
+                tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
+                if ask is not None:
+                    tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
+                record.tool_events.append(tool_event)
+                envelope = outcome.envelope()
+                if reminder:
+                    # The reminder is for the model only; the tool card keeps the output.
+                    envelope["content"] += reminder
+                results.append(envelope)
+                conversation.append({"role": "tool", **envelope})
             round_record["results"] = results
             # Tools loaded by this round's tool_search join the next round.
             tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
-            if budget_hit:
+            round_tools = tool_schemas
+            if record.stop_reason == transcript.STOP_ASK_EXPIRED:
+                # Nobody is there to answer; keep the work done so far.
+                break
+            if record.stop_reason == transcript.STOP_BUDGET:
                 yield _event({"type": "budget_exceeded", "kind": "tool_calls",
                               "limit": caps.max_tool_calls, "used": tool_calls_used})
                 break
+            if record.stop_reason == transcript.STOP_REPEAT_GUARD:
+                yield _event({"type": "loop_breaker_triggered", "reason": transcript.STOP_REPEAT_GUARD,
+                              "message": REPEAT_STOP_MESSAGE})
+                break
+            if record.stop_reason is None and agent_runs.should_finish(turn.session_id):
+                record.stop_reason = transcript.STOP_INTERRUPTED
+            if record.stop_reason == transcript.STOP_INTERRUPTED:
+                # Finish: one more round with no tools, so the model answers.
+                round_tools = ()
+                continue
             if len(record.rounds) >= caps.max_rounds:
+                record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
         message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
@@ -234,6 +320,20 @@ def _offered(upfront, catalog, conversation, surface):
     return schemas, frozenset(tools.schema_name(schema) for schema in schemas)
 
 
+class _Ask:
+    """One ask inside the turn: emit its card, wait for the answer, emit the outcome."""
+
+    def __init__(self, turn: ChatAgentTurn, card: dict) -> None:
+        self.turn = turn
+        self.card = card
+        self.reply: Optional[asks.Answer] = None
+
+    async def events(self) -> AsyncIterator[str]:
+        yield _event({"type": "ask_user", "data": self.card})
+        self.reply = await asks.wait(self.turn.session_id, self.turn.owner, self.card)
+        yield _event(asks.resolution_event(self.card, self.reply))
+
+
 def _gate(
     call: Dict[str, Any], block: Any, layers: permissions.DenyLayers, offered: frozenset,
 ) -> permissions.Decision:
@@ -248,6 +348,27 @@ def _gate(
             permissions.INVALID, f"{call['name']}: the arguments are not valid for this tool.",
         )
     return permissions.decide(layers, block.tool_type, block.content)
+
+
+def _permission_decision(
+    turn: ChatAgentTurn, rule: session_rules.SessionRule, reply: Optional[asks.Answer],
+) -> permissions.Decision:
+    if reply is None:
+        return permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
+    if reply.decision == asks.DENY:
+        reason = "Denied by the user."
+        return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
+    if reply.decision == asks.CHAT:
+        session_rules.grant(turn.owner, turn.session_id, rule)
+    return permissions.Decision(permissions.ALLOW)
+
+
+def _question_result(reply: Optional[asks.Answer]) -> str:
+    if reply is None:
+        return "The user did not answer in time."
+    if reply.decision == asks.DENY:
+        return "The user declined to answer."
+    return f"The user answered: {reply.text}"
 
 
 def _tool_output_event(outcome: tools.ToolOutcome, *, attempted: bool) -> dict:

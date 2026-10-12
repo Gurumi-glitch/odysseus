@@ -162,3 +162,31 @@ def test_plan_mode_blocked_mcp_returns_qualified_write_names_second():
     ]}
     _, qualified = manager.plan_mode_blocked_mcp()
     assert qualified == {"mcp__github__create_issue"}
+
+
+@pytest.mark.asyncio
+async def test_finish_flag_belongs_to_the_running_run_and_a_replacement_starts_clear():
+    import asyncio
+
+    from src import agent_runs
+
+    release = asyncio.Event()
+
+    async def waiting_run():
+        await release.wait()
+        yield "data: [DONE]\n\n"
+
+    session = "pin-finish-session"
+    first = agent_runs.start(session, waiting_run())
+    await asyncio.sleep(0)
+    assert not agent_runs.should_finish(session)
+    assert agent_runs.request_finish(session, first.run_id)
+    assert agent_runs.should_finish(session)
+
+    second = agent_runs.start(session, waiting_run())
+    await asyncio.sleep(0)
+    assert not agent_runs.should_finish(session)
+
+    release.set()
+    await second.task
+    assert not agent_runs.should_finish(session)
