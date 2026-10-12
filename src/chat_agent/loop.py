@@ -51,7 +51,7 @@ from src.chat_agent.providers import (
 from src.chat_agent.routing import ComposerToggles
 from src import settings
 from src.llm_core import LLMConfig
-from src.model_context import estimate_tokens
+from src.model_context import estimate_text_tokens, estimate_tokens
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -727,7 +727,7 @@ class _TurnUsage:
             tokens, source = (end.usage.input_tokens, end.usage.output_tokens), "real"
         else:
             text = "".join(block.get("text", "") for block in end.blocks if block["type"] == "text")
-            tokens, source = (estimate_tokens(request), len(text) // 4), "estimated"
+            tokens, source = (estimate_tokens(request), estimate_text_tokens(text)), "estimated"
         self.buckets.append(_usage_bucket(
             round_num=number, model=self.route.endpoint.model,
             endpoint_id=self.route.route.get("endpoint_id"),
