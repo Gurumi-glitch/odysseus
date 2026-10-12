@@ -1,6 +1,7 @@
 """Chat routes — /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
 import asyncio
+import functools
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
+    LLMConfig,
     _normalize_http_status,
     llm_call_async,
     llm_call_async_with_route_fallback,
@@ -33,6 +35,8 @@ from src.agent_loop import (
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
+from src.chat_agent.loop import ChatAgentTurn, run_chat_agent_turn
+from src.chat_agent.routing import CHAT_AGENT, ComposerToggles, TurnFacts, choose_runtime
 from src.model_context import estimate_tokens
 from src.context_compactor import (
     apply_compaction_state,
@@ -2486,6 +2490,15 @@ def setup_chat_routes(
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace") or form_data.get("cwd")
         )
+        composer_toggles = ComposerToggles(
+            mode=chat_mode,
+            allow_bash=allow_bash,
+            allow_web_search=allow_web_search,
+            use_web=use_web,
+            plan_mode=plan_mode,
+            incognito=incognito,
+            workspace=workspace,
+        )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
             chat_mode = "agent"
@@ -2953,6 +2966,68 @@ def setup_chat_routes(
             no_memory = True
             use_rag = "false"
             search_context = None
+
+        # The runtime is picked once here, before compact-preview selection,
+        # context prefetching, deny-set assembly and turn-contract binding.
+        # The legacy promotion above still decides whether this is an agent
+        # turn; its toggle rewrites are ignored (composer_toggles is raw).
+        runtime = choose_runtime(TurnFacts(
+            owner=owner,
+            agent_turn=(
+                chat_mode == "agent"
+                and _request_privileges(request, owner).get("can_use_agent", True)
+            ),
+            compare=compare_mode or str(getattr(sess, "name", "") or "").startswith("[CMP]"),
+            client_surface=bool((client_runtime_context or {}).get("surface")),
+            image_generation=image_generation_session,
+            research=do_research,
+            approval_continuation=tool_approval_continuation,
+            internal_tool_request=is_internal_tool_request(request),
+            endpoint_url=sess.endpoint_url,
+            model=sess.model,
+            headers=sess.headers,
+        ))
+        if runtime == CHAT_AGENT:
+            set_session_mode(session, "agent")
+            chat_agent_run = agent_runs.start(session, run_chat_agent_turn(ChatAgentTurn(
+                session_id=session,
+                sess=sess,
+                owner=owner,
+                toggles=composer_toggles,
+                auto_escalated=auto_escalated,
+                temperature=(
+                    temperature_override
+                    if temperature_override is not None
+                    else LLMConfig.DEFAULT_TEMPERATURE
+                ),
+                max_tokens=getattr(sess, "max_tokens_override", None) or 0,
+                build_context=functools.partial(
+                    build_chat_context,
+                    sess, request, chat_handler, chat_processor,
+                    message=message,
+                    session_id=session,
+                    preset_id=preset_id,
+                    att_ids=att_ids,
+                    use_rag=use_rag,
+                    time_filter=time_filter,
+                    incognito=incognito,
+                    no_memory=no_memory,
+                    webhook_manager=webhook_manager,
+                    use_enhanced_message=True,
+                    interaction_mode="agent",
+                    auto_escalated=auto_escalated,
+                ),
+            )), runtime=CHAT_AGENT)
+            return StreamingResponse(
+                agent_runs.subscribe(session, chat_agent_run),
+                media_type="text/event-stream",
+                headers={
+                    "X-Odysseus-Run-Id": chat_agent_run.run_id,
+                    "X-Odysseus-Runtime": chat_agent_run.runtime,
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         pre_context_tool_policy = build_effective_tool_policy(
             last_user_message=message,
         )
@@ -4914,6 +4989,7 @@ def setup_chat_routes(
             media_type="text/event-stream",
             headers={
                 "X-Odysseus-Run-Id": _detached_run.run_id,
+                "X-Odysseus-Runtime": _detached_run.runtime,
                 "Cache-Control": "no-cache, no-transform",
                 "X-Accel-Buffering": "no",
             },
@@ -4934,6 +5010,7 @@ def setup_chat_routes(
             media_type="text/event-stream",
             headers={
                 "X-Odysseus-Run-Id": _active_run.run_id,
+                "X-Odysseus-Runtime": _active_run.runtime,
                 "Cache-Control": "no-cache, no-transform",
                 "X-Accel-Buffering": "no",
             },

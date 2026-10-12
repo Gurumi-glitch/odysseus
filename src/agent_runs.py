@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event", "runtime")
 
-    def __init__(self) -> None:
+    def __init__(self, runtime: str = "legacy") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
@@ -37,6 +37,9 @@ class _Run:
         self.run_id: str = uuid.uuid4().hex
         self.finish_requested: bool = False
         self.finish_event = asyncio.Event()
+        # Which chat runtime drives this run; sent as X-Odysseus-Runtime so the
+        # browser routes sends, steers and answers to it (spec #44).
+        self.runtime: str = runtime
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -184,7 +187,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id, run)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(session_id: str, agen: AsyncGenerator[str, None], runtime: str = "legacy") -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
@@ -203,7 +206,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    run = _Run(runtime)
     _RUNS[session_id] = run
     run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
     return run
