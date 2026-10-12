@@ -6,6 +6,7 @@ import json
 import pytest
 
 import routes.chat_helpers as chat_helpers
+from src.chat_agent.permissions import Provenance
 from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
     _events,
     admin,
@@ -74,3 +75,13 @@ async def test_the_classifier_reads_nobody_mode_user_messages(
     [judged] = _classifier_requests(harness)
     facts = json.loads(judged["messages"][1]["content"])
     assert "Earlier: list my workspace files." in facts["user_messages"]
+
+
+# --- H2: mail scans return attacker-written senders and subjects -------------
+
+
+@pytest.mark.parametrize("scan", ["scan_spam", "scan_email_unsubscribes"])
+def test_a_mail_scan_is_both_egress_legs(scan):
+    after = Provenance().after(scan)
+    assert (after.external, after.private) == (True, True)
+    assert after.origins == (scan,)

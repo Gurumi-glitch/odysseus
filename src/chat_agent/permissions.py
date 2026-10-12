@@ -710,8 +710,11 @@ def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> boo
 # --- Egress gate (ADR 0002) ---------------------------------------------------
 
 # The runtime's own source table (#38). Email reads are both legs: a message
-# body is attacker-writable content and the user's private data.
-_EMAIL_READS = frozenset({"list_emails", "read_email", "search_emails"})
+# body is attacker-writable content and the user's private data. The scans
+# return senders and subjects, which are both too.
+_EMAIL_READS = frozenset({
+    "list_emails", "read_email", "search_emails", "scan_spam", "scan_email_unsubscribes",
+})
 _EXTERNAL_SOURCES = (
     WEB_ACCESS_TOOL_NAMES | _EMAIL_READS
     | {"pdf_extract", "trigger_research", "manage_research", "manage_bg_jobs"}
