@@ -91,7 +91,8 @@ def test_frontend_uses_one_renderer_for_live_and_restored_cards():
     chat = (ROOT / "static" / "js" / "chat.js").read_text(encoding="utf-8")
     renderer = (ROOT / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
 
-    assert "chatRenderer.renderAskUserCard(json.data || {})" in chat
+    # The live card is routed by the run's runtime header (spec #44, Asks).
+    assert "chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime') })" in chat
     assert "export function renderAskUserCard" in renderer
     assert "renderAskUserCard(pendingAskUser" in renderer
     assert "function _answerAskUserCards(root, text)" in renderer
