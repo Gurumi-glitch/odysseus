@@ -3924,8 +3924,10 @@ export function addMessage(role, content, modelName, metadata) {
         : '[Message interrupted]';
       stoppedIndicator.appendChild(stoppedLabel);
       // Continue button only makes sense when there's partial content to
-      // resume from \u2014 skip it for fully-cancelled (empty) turns.
-      if (!metadata.cancelled) {
+      // resume from \u2014 skip it for fully-cancelled (empty) turns. A
+      // chat_agent row never gets it: this Resume is the legacy merge
+      // (merge-last-assistant), which the new runtime never does (spec #44).
+      if (!metadata.cancelled && metadata.runtime !== CHAT_AGENT_RUNTIME) {
         const continueBtn = document.createElement('button');
         continueBtn.className = 'continue-btn resume-btn';
         continueBtn.title = 'Resume response';
