@@ -236,15 +236,16 @@ class AutoMode:
         self.incognito = incognito
 
     @classmethod
-    def for_turn(cls, turn: Any) -> "AutoMode":
-        """Read before the context builder saves this turn's user row, so the
-        current message is counted once (from ``turn.message``)."""
+    def for_turn(cls, turn: Any, history: Iterable[Any]) -> "AutoMode":
+        """``history``: the rows the turn replays, read before the context
+        builder saves this turn's user row, so the current message is counted
+        once (from ``turn.message``)."""
         if not turn.auto_mode:
             return cls(state=OFF)
         # The model cannot set it; a turn nobody can answer runs without it.
         if not turn.interactive or not turn.privileges.get("can_use_auto_mode", True):
             return cls(state=UNAVAILABLE)
-        history = list(getattr(turn.sess, "history", None) or ())
+        history = list(history)
         mode = cls(
             state=ACTIVE, owner=turn.owner, session_id=turn.session_id,
             endpoint=classifier_endpoint(turn.owner, turn.privileges),

@@ -175,6 +175,17 @@ def read_caps() -> Caps:
     )
 
 
+def _replayed_history(turn: ChatAgentTurn) -> List[Any]:
+    """The rows the context builder replays this turn; the gate and the
+    classifier must read the same ones."""
+    if turn.toggles.incognito:
+        # Relies on: build_chat_context replays Nobody-mode history from this
+        # request-local transcript, never from sess.history.
+        from routes.chat_helpers import _incognito_messages
+        return _incognito_messages(turn.session_id)
+    return list(getattr(turn.sess, "history", None) or ())
+
+
 def _stream_round(
     turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
     tool_schemas: Sequence[Dict[str, Any]],
@@ -313,13 +324,14 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 yield _event({"type": "compacted", "context_length": window})
         caps = read_caps()
         rules = permissions.Rules.from_lists(store.user_rules(turn.owner))
+        history = _replayed_history(turn)
         # The open email preview is both external content and a private read (ADR 0002).
         provenance = permissions.Provenance(
             external=turn.active_email_open, private=turn.active_email_open,
             origins=("active email preview",) if turn.active_email_open else (),
-        ).after_history(getattr(turn.sess, "history", None) or ())
+        ).after_history(history)
         # Before the context builder saves this turn's user row.
-        auto = classifier.AutoMode.for_turn(turn)
+        auto = classifier.AutoMode.for_turn(turn, history)
         if auto.state != classifier.OFF:
             yield _event(auto.event())
         layers = permissions.build_deny_layers(
