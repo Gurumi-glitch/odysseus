@@ -66,9 +66,12 @@ def sign_chat_session_grant(
 # read back as authority: ``tool_events`` carries the approval cards, the
 # context marker is projected onto a turn once a grant is found, and the
 # chat_agent turn record (``agent_v2`` and its state keys) replays as trusted
-# assistant and tool turns (ADR 0007).
+# assistant and tool turns (ADR 0007). ``interaction_mode`` marks a user row as
+# typed into the chat box, which the auto-mode classifier reads as the user's
+# own words; only routes.chat_helpers writes it.
 _SERVER_OWNED_METADATA_KEYS = (
     "tool_events",
+    "interaction_mode",
     CHAT_SESSION_APPROVAL_CONTEXT_MARKER,
     "agent_v2",
     "runtime",
