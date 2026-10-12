@@ -3017,6 +3017,10 @@ def setup_chat_routes(
                     interaction_mode="agent",
                     auto_escalated=auto_escalated,
                 ),
+                privileges=_request_privileges(request, owner),
+                delegated_credential=is_delegated_credential(request),
+                active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
+                client_runtime_context=client_runtime_context,
             )), runtime=CHAT_AGENT)
             return StreamingResponse(
                 agent_runs.subscribe(session, chat_agent_run),
