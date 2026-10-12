@@ -325,13 +325,9 @@ class SessionManager:
             db.close()
 
     def update_message(self, session_id: str, message: ChatMessage) -> bool:
-        """Rewrite one persisted message in place: its DB row and cached entry.
-
-        The row is the one ``message.metadata["_db_id"]`` names. A writer that
-        checkpoints one message several times (the chat_agent turn record)
-        uses this instead of appending a new row each time. Returns False when
-        the row is gone (deleted or truncated meanwhile).
-        """
+        """Rewrite the row ``message.metadata["_db_id"]`` names, and its cached
+        entry, so a writer that checkpoints one message several times (the
+        chat_agent turn record) keeps one row. False when the row is gone."""
         metadata = message.metadata or {}
         msg_id = metadata.get("_db_id")
         if not msg_id:
