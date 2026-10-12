@@ -5047,12 +5047,15 @@ def setup_chat_routes(
             raise HTTPException(403, "Only you, in an interactive session, can answer an ask.")
         _verify_session_owner(request, session_id)
         decision = str(body.get("decision") or "")
-        if decision not in {chat_asks.ONCE, chat_asks.CHAT, chat_asks.DENY, chat_asks.ANSWER}:
+        if decision not in chat_asks.ALL_DECISIONS:
             raise HTTPException(400, "decision must be once, chat, deny or answer.")
         text = body.get("text") or ""
         if not isinstance(text, str):
             raise HTTPException(400, "text must be a string.")
-        if not chat_asks.answer(session_id, str(body.get("ask_id") or ""), decision, text):
+        answered = chat_asks.answer(
+            session_id, effective_user(request), str(body.get("ask_id") or ""), decision, text,
+        )
+        if not answered:
             raise HTTPException(409, "No open ask matches this answer.")
         return {"accepted": True}
 

@@ -146,19 +146,25 @@ def _has_active_chat_stream() -> bool:
     tasks must still wait for those runs; otherwise helpers like email
     auto-translate compete with the user's active chat on the same local model.
     """
-    try:
-        from routes import chat_routes as _chat_routes
-        active_streams = getattr(_chat_routes, "_active_streams", {}) or {}
-        if active_streams:
-            return True
-    except Exception:
-        pass
+    # A run waiting on a chat_agent ask does no model work; skipping it keeps
+    # one open question from stalling background work for everyone (#56).
     try:
         from src import agent_runs
         runs = getattr(agent_runs, "_RUNS", {}) or {}
-        return any(getattr(run, "status", None) == "running" for run in runs.values())
     except Exception:
-        return False
+        runs = {}
+    awaiting = {sid for sid, run in runs.items() if getattr(run, "awaiting_user", False)}
+    try:
+        from routes import chat_routes as _chat_routes
+        active_streams = getattr(_chat_routes, "_active_streams", {}) or {}
+        if any(sid not in awaiting for sid in list(active_streams)):
+            return True
+    except Exception:
+        pass
+    return any(
+        getattr(run, "status", None) == "running" and sid not in awaiting
+        for sid, run in list(runs.items())
+    )
 
 
 @asynccontextmanager

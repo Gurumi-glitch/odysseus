@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Tuple
 
 from src import agent_runs
 
@@ -32,9 +32,12 @@ DECISIONS: Dict[str, frozenset] = {
     QUESTION: frozenset({ANSWER, DENY}),
     REPEAT_GUARD: frozenset({ONCE, DENY}),
 }
+ALL_DECISIONS = frozenset().union(*DECISIONS.values())
 
 BY_USER = "user"
 EXPIRED_TIMEOUT = "timeout"
+# Stored as the card's ``resolved`` value when nobody answered.
+RESOLVED_EXPIRED = "expired"
 
 
 @dataclass(frozen=True)
@@ -47,17 +50,16 @@ class Answer:
 @dataclass
 class _Pending:
     kind: str
+    owner: str
     future: asyncio.Future
 
 
 _PENDING: Dict[Tuple[str, str, str], _Pending] = {}
-# "Allow for this chat", interim and in memory until the runtime store holds
-# session rules (#62): (owner, session id) -> canonical tool names.
-_SESSION_GRANTS: Dict[Tuple[str, str], Set[str]] = {}
 
 
-def new_ask_id() -> str:
-    return uuid.uuid4().hex
+def owner_key(owner: str) -> str:
+    # strip().lower() is how AuthManager keys usernames (same as store.py).
+    return str(owner or "").strip().lower()
 
 
 def _run_id(session_id: str) -> str:
@@ -65,13 +67,13 @@ def _run_id(session_id: str) -> str:
     return run.run_id if run else ""
 
 
-async def wait(session_id: str, ask_id: str, kind: str) -> Optional[Answer]:
-    """Wait for the user's answer; None when the ask timed out."""
+async def wait(session_id: str, owner: str, card: dict) -> Optional[Answer]:
+    """Wait for the user's answer to this card; None when the ask timed out."""
     # The run draining this turn is the session's active run: starting
     # another run cancels this one, so no ask outlives its run.
     run = agent_runs.get_active_run(session_id)
-    key = (session_id, run.run_id if run else "", ask_id)
-    pending = _Pending(kind, asyncio.get_running_loop().create_future())
+    key = (session_id, run.run_id if run else "", card["ask_id"])
+    pending = _Pending(card["ask_kind"], owner_key(owner), asyncio.get_running_loop().create_future())
     _PENDING[key] = pending
     if run is not None:
         run.awaiting_user = True
@@ -85,11 +87,11 @@ async def wait(session_id: str, ask_id: str, kind: str) -> Optional[Answer]:
             run.awaiting_user = False
 
 
-def answer(session_id: str, ask_id: str, decision: str, text: str = "") -> bool:
-    """Resolve an open ask of the session's live run. False when there is none
-    or the decision does not fit its kind."""
+def answer(session_id: str, owner: str, ask_id: str, decision: str, text: str = "") -> bool:
+    """Resolve an open ask of the session's live run, asked of this owner.
+    False when there is none or the decision does not fit its kind."""
     pending = _PENDING.get((session_id, _run_id(session_id), ask_id))
-    if pending is None or pending.future.done():
+    if pending is None or pending.future.done() or pending.owner != owner_key(owner):
         return False
     if decision not in DECISIONS[pending.kind]:
         return False
@@ -97,45 +99,54 @@ def answer(session_id: str, ask_id: str, decision: str, text: str = "") -> bool:
     return True
 
 
-def grant_for_chat(owner: str, session_id: str, tool: str) -> None:
-    _SESSION_GRANTS.setdefault((owner, session_id), set()).add(tool)
-
-
-def granted_for_chat(owner: str, session_id: str, tool: str) -> bool:
-    return tool in _SESSION_GRANTS.get((owner, session_id), ())
-
-
-def permission_card(ask_id: str, session_id: str, tool: str, content: str) -> dict:
+def _approval_card(kind: str, session_id: str, question: str, description: str,
+                   options: list, action: dict) -> dict:
     """The legacy approval card (tool_approvals.PendingToolApproval.public_payload)
     with this runtime's decisions and the ask's own kind."""
+    ask_id = uuid.uuid4().hex
     return {
-        "kind": "tool_approval",
-        "approval_id": ask_id,
-        "ask_id": ask_id,
-        "ask_kind": PERMISSION,
-        "session_id": session_id,
-        "question": "Allow this action?",
-        "description": "The agent wants to run this action and needs your approval.",
-        "options": [
-            {"label": "Allow once", "value": ONCE,
-             "description": "Run this action now; ask again next time."},
-            {"label": "Allow for this chat", "value": CHAT,
-             "description": "Run it and stop asking for this tool in this chat."},
-            {"label": "Deny", "value": DENY, "description": "Do not run this action."},
-        ],
-        "action": {"tool": tool, "content": content},
+        "kind": "tool_approval", "approval_id": ask_id, "ask_id": ask_id, "ask_kind": kind,
+        "session_id": session_id, "question": question, "description": description,
+        "options": options, "action": action,
     }
 
 
-def question_card(ask_id: str, session_id: str, question: dict) -> dict:
+def permission_card(session_id: str, tool: str, content: str, rule: str) -> dict:
+    return _approval_card(
+        PERMISSION, session_id, "Allow this action?",
+        "The agent wants to run this action and needs your approval.",
+        [
+            {"label": "Allow once", "value": ONCE,
+             "description": "Run this action now; ask again next time."},
+            {"label": "Allow for this chat", "value": CHAT,
+             "description": f"Run it and allow {rule} for the rest of this chat."},
+            {"label": "Deny", "value": DENY, "description": "Do not run this action."},
+        ],
+        {"tool": tool, "content": content},
+    )
+
+
+def repeat_guard_card(session_id: str, tool: str, content: str, streak: int) -> dict:
+    return _approval_card(
+        REPEAT_GUARD, session_id, "The agent keeps repeating the same call. Continue?",
+        f"This exact call was made {streak} times in a row.",
+        [
+            {"label": "Continue", "value": ONCE, "description": "Run the call and let the agent go on."},
+            {"label": "Stop", "value": DENY, "description": "Stop this turn here."},
+        ],
+        {"tool": tool, "content": content},
+    )
+
+
+def question_card(session_id: str, question: dict) -> dict:
     """The ask_user tool's card as today, with the ask's id and kind."""
-    return {**question, "ask_id": ask_id, "ask_kind": QUESTION, "session_id": session_id}
+    return {**question, "ask_id": uuid.uuid4().hex, "ask_kind": QUESTION, "session_id": session_id}
 
 
-def resolution_event(ask_id: str, reply: Optional[Answer]) -> dict:
+def resolution_event(card: dict, reply: Optional[Answer]) -> dict:
     if reply is None:
-        return {"type": "ask_expired", "ask_id": ask_id, "cause": EXPIRED_TIMEOUT}
-    event = {"type": "ask_resolved", "ask_id": ask_id, "decision": reply.decision, "by": reply.by}
+        return {"type": "ask_expired", "ask_id": card["ask_id"], "cause": EXPIRED_TIMEOUT}
+    event = {"type": "ask_resolved", "ask_id": card["ask_id"], "decision": reply.decision, "by": reply.by}
     if reply.text:
         event["reason"] = reply.text
     return event
@@ -143,4 +154,4 @@ def resolution_event(ask_id: str, reply: Optional[Answer]) -> dict:
 
 def resolved_card(card: dict, reply: Optional[Answer]) -> dict:
     """The card as stored on its tool event, so history renders it read-only."""
-    return {**card, "resolved": reply.decision if reply else "expired"}
+    return {**card, "resolved": reply.decision if reply else RESOLVED_EXPIRED}

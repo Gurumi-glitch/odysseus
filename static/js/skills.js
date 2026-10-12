@@ -19,11 +19,9 @@ import {
   auditNumber,
   filterSkillsByQuickFilter,
   necessityKind,
-  skillIsApproved,
-  skillNeedsReview,
   skillSavedTurnsValue,
   skillsSummaryMetrics,
-} from './skillsMetrics.js?v=20260908autonomousskills1';
+} from './skillsMetrics.js?v=20261012skillstate1';
 
 const API = window.location.origin;
 let skills = [];
@@ -239,12 +237,12 @@ function _renderSkillsSummary() {
     return;
   }
   el.classList.remove('hidden');
-  const m = skillsSummaryMetrics(userSkills, _skillApprovalThreshold);
+  const m = skillsSummaryMetrics(userSkills);
   const chips = [
     _summaryChip('all', 'All', skills.length, 'Show all skills'),
     _summaryChip('builtin', 'Built-in', skills.length - userSkills.length, 'Shipped procedures'),
-    _summaryChip('approved', 'Approved', m.approved, 'Skills approved for use'),
-    _summaryChip('draft', 'Draft', userSkills.length - m.approved, 'Unapproved and archived skills; automatic review handles eligible drafts'),
+    _summaryChip('approved', 'Approved', m.approved, 'Published skills the model and you can use'),
+    _summaryChip('draft', 'Draft', userSkills.length - m.approved, 'Drafts, skills awaiting audit, and the bin'),
   ];
   el.innerHTML = chips.join('');
 }
@@ -322,9 +320,11 @@ function _renderSkillTagChips() {
   _skillTagFilter = null;
 }
 
+// One state per card, computed by the backend (GET /api/skills `state`, #49).
 function _statusPill(sk) {
-  const s = sk.status || (sk._legacy ? 'legacy' : 'draft');
-  if (s === 'published') return '<span class="memory-cat-badge skill-status-pill skill-status-published" data-status="published" title="Published" aria-label="Published"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></span>';
+  const s = sk.state || 'draft';
+  if (s === 'published') return '<span class="memory-cat-badge skill-status-pill skill-status-published" data-status="published" title="Published: usable by you and the model" aria-label="Published"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></span>';
+  if (s === 'awaiting_audit') return '<span class="memory-cat-badge skill-status-pill skill-status-awaiting" data-status="awaiting_audit" title="Published by the agent or teacher; usable once the audit passes, or publish it yourself">awaiting audit</span>';
   if (s === 'draft')     return '<span class="memory-cat-badge skill-status-pill" data-status="draft" style="background:color-mix(in srgb, var(--fg) 14%, transparent)">draft</span>';
   if (s === 'binned')   return '<span class="memory-cat-badge skill-status-pill skill-status-bin" data-status="binned" title="Moved to bin after audit">bin</span>';
   return `<span class="memory-cat-badge skill-status-pill" data-status="${esc(s)}" style="opacity:0.6">${esc(s)}</span>`;
@@ -426,20 +426,19 @@ function _duplicateMeta(list) {
   return meta;
 }
 
+// The audit badge only reports the verdict; the status pill alone says whether
+// the skill is usable (a user publish overrides the audit, #49).
 function _auditModelPills(sk) {
   if (sk.source === 'builtin') return '';
-  const worker = sk.audit_worker_model || '';
-  const teacher = sk.audit_teacher_model || '';
   const verdict = String(sk.audit_verdict || '').toLowerCase();
   if (!verdict) return '<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-pending" title="Queued for automatic skill check">queued</span>';
-  if (skillNeedsReview(sk, _skillApprovalThreshold)) {
-    const model = worker ? ` Last check: ${worker}.` : '';
-    const reason = sk.audit_summary ? ` ${sk.audit_summary}` : '';
-    return `<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-${esc(verdict)}" title="Draft: the previous check did not approve it. Eligible drafts are reviewed automatically.${esc(model + reason)}">draft</span>`;
-  }
-  return teacher
-    ? `<span class="memory-cat-badge skill-model-pill skill-model-teacher" title="Improved automatically by ${esc(teacher)}">improved</span>`
-    : '';
+  const model = sk.audit_by_teacher
+    ? ` Teacher ${sk.audit_teacher_model || ''} rewrote it before the check passed.`
+    : (sk.audit_worker_model ? ` Checked by ${sk.audit_worker_model}.` : '');
+  const reason = sk.audit_summary ? ` ${sk.audit_summary}` : '';
+  const when = sk.audited_at ? ` Audited ${new Date(sk.audited_at * 1000).toLocaleString()}.` : '';
+  const label = verdict.replace(/_/g, ' ');
+  return `<span class="memory-cat-badge skill-model-pill skill-model-student skill-audit-${esc(verdict)}" title="Audit: ${esc(label)}.${esc(reason + model + when)}">${esc(label)}</span>`;
 }
 
 function _necessityPill(sk) {
@@ -507,8 +506,15 @@ function _turnSavingsHtml(sk) {
 }
 
 function _skillStatsHtml(sk) {
-  const approved = skillIsApproved(sk, _skillApprovalThreshold) ? _statusPill(sk) : '';
-  return `${_auditMarks(sk)}${approved}`;
+  // user_approval_at without user_approved: the content changed after the
+  // user's publish, so the approval lapsed until they publish again.
+  const approvedOn = sk.user_approval_at ? new Date(sk.user_approval_at * 1000).toLocaleString() : '';
+  const approval = sk.user_approved
+    ? `<span class="memory-cat-badge skill-approval-pill skill-approval-user" title="You published this content on ${esc(approvedOn)}; it is usable without the audit">approved by you</span>`
+    : (sk.user_approval_at
+      ? `<span class="memory-cat-badge skill-approval-pill skill-approval-lapsed" title="Edited since you published it on ${esc(approvedOn)}; publish again to approve the new content">approval lapsed</span>`
+      : '');
+  return `${_auditMarks(sk)}${approval}${_statusPill(sk)}`;
 }
 
 function _skillUsageHtml(sk) {
@@ -767,15 +773,15 @@ function _getFilteredSkills() {
   if (_skillsQuickFilter === 'draft' || _skillsQuickFilter === 'all' || !_skillsQuickFilter) {
     // All and Draft retain archived candidates for inspection and recovery.
   } else if (_showBinnedOnly || _skillsQuickFilter === 'binned') {
-    filtered = filtered.filter(sk => (sk.status || 'draft') === 'binned');
+    filtered = filtered.filter(sk => sk.state === 'binned');
   } else {
-    filtered = filtered.filter(sk => (sk.status || 'draft') !== 'binned');
+    filtered = filtered.filter(sk => sk.state !== 'binned');
   }
   if (_showDraftsOnly) {
-    filtered = filtered.filter(sk => (sk.status || 'draft') === 'draft');
+    filtered = filtered.filter(sk => sk.state === 'draft');
   }
   if (_showPublishedOnly) {
-    filtered = filtered.filter(sk => (sk.status || 'draft') === 'published');
+    filtered = filtered.filter(sk => sk.state === 'published');
   }
   if (_confMax != null) {
     // "≤ X%" — surface the lower-confidence skills that may need review.
@@ -784,7 +790,7 @@ function _getFilteredSkills() {
   if (_skillTagFilter) {
     filtered = filtered.filter(sk => (sk.tags || []).some(t => String(t || '').trim().toLowerCase() === _skillTagFilter));
   }
-  filtered = filterSkillsByQuickFilter(filtered, _skillsQuickFilter, _skillApprovalThreshold);
+  filtered = filterSkillsByQuickFilter(filtered, _skillsQuickFilter);
   return _groupDuplicateSkills(_sortSkills(filtered));
 }
 
@@ -890,13 +896,12 @@ function renderSkillsList() {
       delete sk._duplicateKeepName;
       delete sk._duplicateNames;
     }
-    const isPublished = (sk.status === 'published');
+    const isPublished = (sk.state === 'published');
 
     const card = document.createElement('div');
-    const auditNeedsReview = skillNeedsReview(sk, _skillApprovalThreshold);
-    card.className = 'doclib-card skill-card' + (auditNeedsReview ? ' skill-audit-draft' : '');
+    card.className = 'doclib-card skill-card';
     card.dataset.skillName = name;
-    card.dataset.skillStatus = sk.status || 'draft';
+    card.dataset.skillStatus = sk.state || 'draft';
 
     const checked = _selectedNames.has(name) ? 'checked' : '';
     const cbHtml = _selectMode
@@ -919,11 +924,11 @@ function renderSkillsList() {
       </div>
       <div class="skill-card-right">
         ${sk.source === 'builtin' ? '' : _sourcePill(sk)}
+        ${sk.disable_model_invocation ? '<span class="memory-cat-badge skill-tag-pill skill-user-only-pill" title="User-only: you start it with /' + esc(name) + '; the model never sees it">user-only</span>' : ''}
         ${_necessityPill(sk)}
         ${_duplicatePriorityPill(sk)}
         ${_auditModelPills(sk)}
         <span class="skill-stats">${_skillStatsHtml(sk)}</span>
-        ${sk.status === 'binned' ? _statusPill(sk) : ''}
         <span class="skill-chevron-up" title="Collapse"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></span>
         <button class="skill-kebab-btn" title="Actions" aria-label="Actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
       </div>
@@ -982,18 +987,49 @@ function renderSkillsList() {
     editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Edit';
     editBtn.addEventListener('click', (e) => { e.stopPropagation(); _toggleSkillEdit(card, name); });
 
+    // Publish is offered on draft and awaiting-audit cards alike: a publish from
+    // this page approves the content and makes the skill usable without the audit.
     const pubBtn = document.createElement('button');
     pubBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
     if (isPublished) {
       pubBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12l5 5L20 7"/></svg>Unpublish';
-      pubBtn.title = 'Move back to draft';
+      pubBtn.title = 'Move back to draft and withdraw your approval';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'draft'); });
     } else {
       pubBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>Publish';
-      pubBtn.title = 'Publish — appears in the skills index';
+      pubBtn.title = 'Publish: usable now by you and the model, no audit needed';
       pubBtn.style.color = 'var(--color-success, #4caf50)';
       pubBtn.addEventListener('click', (e) => { e.stopPropagation(); _setSkillStatus(name, 'published'); });
     }
+
+    const userOnly = document.createElement('label');
+    userOnly.className = 'admin-switch-inline skill-user-only-toggle';
+    userOnly.title = 'User-only: you start it with /' + name + '; the model never sees it';
+    userOnly.innerHTML = '<span class="admin-switch"><input type="checkbox"' + (sk.disable_model_invocation ? ' checked' : '') + ' /><span class="admin-slider"></span></span><span>User-only</span>';
+    userOnly.addEventListener('click', (e) => e.stopPropagation());
+    userOnly.querySelector('input').addEventListener('change', async (e) => {
+      const input = e.currentTarget;
+      input.disabled = true;
+      try {
+        const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ disable_model_invocation: input.checked }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        await loadSkills();
+        uiModule.showToast(input.checked ? 'Only you can start this skill' : 'The model can invoke this skill again');
+      } catch (err) {
+        input.checked = !input.checked;
+        input.disabled = false;
+        uiModule.showError('Update failed: ' + err.message);
+      }
+    });
+    const leftGroup = document.createElement('div');
+    leftGroup.className = 'doclib-action-btn-row';
+    leftGroup.appendChild(pubBtn);
+    leftGroup.appendChild(userOnly);
 
     // Test/audit this one skill — same action that's in the kebab, surfaced in
     // the footer too so it's not buried under the "⋯" menu.
@@ -1033,7 +1069,7 @@ function renderSkillsList() {
     btnRow.appendChild(delBtn);
     rightGroup.appendChild(btnRow);
 
-    actions.appendChild(pubBtn);
+    actions.appendChild(leftGroup);
     actions.appendChild(rightGroup);
     preview.appendChild(actions);
     card.appendChild(preview);
@@ -1343,13 +1379,16 @@ async function _deleteSkill(name, card = null) {
 
 async function _setSkillStatus(name, status) {
   try {
-    await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
+    const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status }),
     });
+    // 403: only the interactive Skills page may approve (tokens and tool loopback cannot).
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     await loadSkills();
-    uiModule.showToast(status === 'published' ? 'Skill approved' : 'Skill moved to draft');
+    uiModule.showToast(status === 'published' ? 'Skill published' : 'Skill moved to draft');
   } catch (e) { uiModule.showError('Update failed: ' + e.message); }
 }
 
@@ -1821,19 +1860,11 @@ function _applySkillStateToHeader(card, state, fallbackVerdict) {
   const current = skills.find(s => (s.name || s.id) === name) || {};
   const merged = { ...current, ...(state || {}) };
   if (verdict && !merged.audit_verdict) merged.audit_verdict = verdict;
+  // The audit payload carries no `state`; the pill keeps the one from the last
+  // list load and loadSkills() at the end of the run corrects it.
   const statsEl = card.querySelector('.skill-stats');
   if (statsEl && (state || verdict)) {
     statsEl.innerHTML = _skillStatsHtml(merged);
-  }
-  if (state?.status) {
-    card.dataset.skillStatus = state.status;
-    const oldPill = card.querySelector('.skill-status-pill');
-    if (oldPill) {
-      const wrap = document.createElement('span');
-      wrap.innerHTML = _statusPill(state);
-      const next = wrap.firstElementChild;
-      if (next) oldPill.replaceWith(next);
-    }
   }
   const right = card.querySelector('.skill-card-right');
   if (right && state) {
@@ -1986,7 +2017,7 @@ function _updateBulkBar() {
   // Approve is only meaningful when at least one selected skill is still a draft.
   const anyDraft = [..._selectedNames].some(n => {
     const sk = skills.find(s => (s.name || s.id) === n);
-    return sk && (sk.status || 'draft') !== 'published';
+    return sk && sk.state !== 'published';
   });
   if (pubBtn) pubBtn.disabled = !anyDraft;
 }
@@ -2099,9 +2130,10 @@ async function _bulkDeleteNonPassing() {
 async function _bulkApprove() {
   if (!_selectedNames.size) return;
   let published = 0;
+  const failed = [];
   for (const name of _selectedNames) {
     const sk = skills.find(s => (s.name || s.id) === name);
-    if (sk && sk.status === 'published') continue;
+    if (sk && sk.state === 'published') continue;
     try {
       const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
         method: 'PUT',
@@ -2109,11 +2141,13 @@ async function _bulkApprove() {
         body: JSON.stringify({ status: 'published' }),
       });
       if (res.ok) published++;
-    } catch {}
+      else failed.push(`${name}: ${(await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`}`);
+    } catch (e) { failed.push(`${name}: ${e.message}`); }
   }
   _exitSelectMode();
   await loadSkills();
   uiModule.showToast(`Published ${published}`);
+  if (failed.length) uiModule.showError('Not published: ' + failed.join('; '));
 }
 
 async function _bulkAudit() {
