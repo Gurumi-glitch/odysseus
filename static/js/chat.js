@@ -848,6 +848,9 @@ import { invalidateSettings } from './appConfig.js';
     } catch (_) {}
   }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
+  // The next send's form field `source`: 'continue' after a capped chat_agent
+  // turn, so its user row records metadata.source (spec #44 Transcript).
+  let _pendingTurnSource = '';
   function _createChatSendPerf() {
     const started = (performance && performance.now) ? performance.now() : Date.now();
     let last = started;
@@ -2673,6 +2676,10 @@ import { invalidateSettings } from './appConfig.js';
 	      if (window.__odysseusPendingInvokedSkill) {
 	        fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);
 	        window.__odysseusPendingInvokedSkill = '';
+	      }
+	      if (_pendingTurnSource) {
+	        fd.append('source', _pendingTurnSource);
+	        _pendingTurnSource = '';
 	      }
 	      if (el('web-toggle').checked) {
 	        if (!isAgentMode) {
@@ -4592,6 +4599,8 @@ import { invalidateSettings } from './appConfig.js';
                     if (streamRuntime !== 'chat_agent') {
                       _hideUserBubble = true;
                       _pendingContinue = _holder;
+                    } else {
+                      _pendingTurnSource = 'continue';
                     }
                     const msgInput = uiModule.el('message');
                     if (msgInput) {

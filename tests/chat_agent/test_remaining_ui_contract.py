@@ -30,3 +30,10 @@ def test_slash_invoked_skill_rides_the_next_send_once():
     assert "fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);" in chat
     assert chat.count("window.__odysseusPendingInvokedSkill = '';") == 1
     assert 'invoked_skill=str(form_data.get("invoked_skill") or "").strip()' in _source("routes/chat_routes.py")
+
+
+def test_continue_after_a_capped_chat_agent_turn_names_its_source():
+    chat = _source("static/js/chat.js")
+    assert "_pendingTurnSource = 'continue';" in chat
+    assert "fd.append('source', _pendingTurnSource);" in chat
+    assert 'source="continue" if form_data.get("source") == "continue" else None' in _source("routes/chat_routes.py")
