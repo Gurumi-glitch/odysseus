@@ -1,25 +1,35 @@
 """Entry point of the chat_agent runtime: run one agent turn as SSE events.
 
-The turn runs rounds until a reply has no tool calls. Each round's tool calls
-run one at a time in call order; errors and denials go back to the model as
-tool results. Caps, the repeat guard, steering and finish arrive in later
-tickets (#54, #63).
+The turn runs rounds until a reply has no tool calls or a shared cap is hit.
+Each round's tool calls run one at a time in call order; errors and denials go
+back to the model as tool results. Continue, the repeat guard, steering and
+finish arrive in later tickets (#54, #63).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, Mapping, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 # Relies on: _configured_model_tool_surface returns the per-model tool surface
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
 from src.agent_loop import _configured_model_tool_surface
+from src.agent_tools import MAX_AGENT_ROUNDS
 from src.chat_agent import permissions, prompt, tools, transcript
-from src.chat_agent.providers import chat_completions
+from src.chat_agent.providers import (
+    XAI,
+    Endpoint,
+    ProviderError,
+    RoundEnd,
+    RoundEvent,
+    TextDelta,
+    chat_completions,
+    provider_key,
+    xai_responses,
+)
 from src.chat_agent.routing import ComposerToggles
-from src.llm_core import _detect_provider
 from src.settings import get_setting
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
@@ -27,6 +37,8 @@ from src.settings import get_setting
 from src.tool_schemas import function_call_to_tool_block
 
 logger = logging.getLogger(__name__)
+
+TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
 
 
 @dataclass(frozen=True)
@@ -46,6 +58,14 @@ class ChatAgentTurn:
     client_runtime_context: Optional[Dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class Caps:
+    """The shared per-message caps ("max steps", "max tool calls"; 0 = unlimited)."""
+
+    max_rounds: int
+    max_tool_calls: int
+
+
 def _event(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
@@ -54,12 +74,50 @@ def _error_event(message: str, status: Optional[int] = None) -> str:
     return f"event: error\ndata: {json.dumps({'error': message, 'status': status})}\n\n"
 
 
+def _setting_int(key: str, default: int) -> int:
+    # settings.json can be hand-edited past the admin endpoint's validation.
+    try:
+        return int(get_setting(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def read_caps() -> Caps:
+    return Caps(
+        max_rounds=max(1, _setting_int("agent_max_rounds", MAX_AGENT_ROUNDS)),
+        max_tool_calls=max(0, _setting_int("agent_max_tool_calls", 0)),
+    )
+
+
+def _stream_round(
+    turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+    tool_schemas: Sequence[Dict[str, Any]],
+) -> AsyncIterator[RoundEvent]:
+    if provider == XAI:
+        return xai_responses.stream_round(
+            endpoint, conversation, cache_key=turn.session_id,
+            temperature=turn.temperature, max_tokens=turn.max_tokens, tools=tool_schemas,
+        )
+    return chat_completions.stream_round(
+        endpoint, conversation, temperature=turn.temperature, max_tokens=turn.max_tokens,
+        tools=tool_schemas,
+    )
+
+
+def _round_record(end: RoundEnd) -> Dict[str, Any]:
+    if end.usage is None:
+        return {"blocks": end.blocks}
+    return {"blocks": end.blocks, "usage": asdict(end.usage)}
+
+
 async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield _event({"type": "turn_mode", "mode": "agent", "auto_escalated": turn.auto_escalated})
     sess = turn.sess
-    endpoint = chat_completions.Endpoint(sess.endpoint_url, sess.model, sess.headers)
-    record = transcript.TurnRecord(provider=_detect_provider(endpoint.url), model=endpoint.model)
+    endpoint = Endpoint(sess.endpoint_url, sess.model, sess.headers)
+    provider = provider_key(endpoint.url)
+    record = transcript.TurnRecord(provider=provider, model=endpoint.model)
     try:
+        caps = read_caps()
         layers = permissions.build_deny_layers(
             owner=turn.owner,
             toggles=turn.toggles,
@@ -73,7 +131,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         )
         tool_schemas = tools.upfront_schemas(layers.denied_names, surface)
         unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
-        messages = await prompt.build_messages(
+        conversation = await prompt.build_messages(
             turn.build_context, [tools.unavailable_line(unavailable)] if tool_schemas else [],
         )
         scope = tools.ExecutionScope(
@@ -83,40 +141,57 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             client_runtime_context=turn.client_runtime_context,
             denied_names=layers.denied_names,
         )
+        tool_calls_used = 0
         while True:
-            round_ = transcript.Round()
-            record.rounds.append(round_)
-            async for event in chat_completions.stream_round(
-                endpoint, messages, temperature=turn.temperature,
-                max_tokens=turn.max_tokens, tools=tool_schemas,
-            ):
-                if isinstance(event, chat_completions.ProviderError):
+            end = None
+            async for event in _stream_round(turn, provider, endpoint, conversation, tool_schemas):
+                if isinstance(event, ProviderError):
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
                     return
-                if isinstance(event, chat_completions.ToolCall):
-                    round_.calls.append(event)
-                    continue
-                round_.text += event.text
-                yield _event({"delta": event.text})
-            if not round_.calls:
+                if isinstance(event, TextDelta):
+                    yield _event({"delta": event.text})
+                elif isinstance(event, RoundEnd):
+                    end = event
+            round_record = _round_record(end)
+            record.rounds.append(round_record)
+            calls = [b for b in end.blocks if b["type"] == "tool_call"]
+            if not calls:
                 break
-            messages.append(chat_completions.assistant_message(round_.text, round_.calls))
-            for call in round_.calls:
-                block = function_call_to_tool_block(call.name, call.arguments)
-                decision = _gate(call, block, layers)
+            conversation.append({"role": "assistant", "blocks": end.blocks})
+            results = []
+            budget_hit = False
+            for call in calls:
+                block = function_call_to_tool_block(call["name"], call["arguments"])
+                if caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                    # Every call still gets a result, so the round replays
+                    # as a complete call/result pair.
+                    budget_hit = True
+                    decision = permissions.Decision(permissions.DENY, TOOL_CALL_CAP_REASON)
+                else:
+                    tool_calls_used += 1
+                    decision = _gate(call, block, layers)
                 if decision.outcome == permissions.ALLOW:
                     yield _event({
                         "type": "tool_start", "tool": block.tool_type, "command": block.content,
                         "full_command": block.content, "round": len(record.rounds),
-                        "call_id": call.call_id,
+                        "call_id": call["call_id"],
                     })
-                    outcome = await tools.execute(call.call_id, block, scope)
+                    outcome = await tools.execute(call["call_id"], block, scope)
                 else:
-                    outcome = tools.refused_outcome(call, block, decision)
+                    outcome = tools.refused_outcome(call, block, decision.reason)
                 yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
-                round_.outcomes.append(outcome)
-                messages.append(chat_completions.tool_message(call.call_id, outcome.model_content()))
+                record.tool_events.append(outcome.tool_event(len(record.rounds), endpoint.model))
+                results.append(outcome.envelope())
+                conversation.append({"role": "tool", **outcome.envelope()})
+            round_record["results"] = results
+            if budget_hit:
+                yield _event({"type": "budget_exceeded", "kind": "tool_calls",
+                              "limit": caps.max_tool_calls, "used": tool_calls_used})
+                break
+            if len(record.rounds) >= caps.max_rounds:
+                yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
+                break
         message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
     except Exception:
         # A crash ends the turn visibly; it never falls back to legacy, which
@@ -130,10 +205,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield "data: [DONE]\n\n"
 
 
-def _gate(call, block, layers) -> permissions.Decision:
+def _gate(call: Dict[str, Any], block: Any, layers: permissions.DenyLayers) -> permissions.Decision:
     if block is None:
         return permissions.Decision(
-            permissions.INVALID, f"{call.name}: the arguments are not valid for this tool.",
+            permissions.INVALID, f"{call['name']}: the arguments are not valid for this tool.",
         )
     return permissions.decide(layers, block.tool_type, block.content)
 

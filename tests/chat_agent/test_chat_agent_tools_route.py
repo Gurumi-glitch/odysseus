@@ -91,9 +91,10 @@ async def test_add_note_runs_with_no_ask_and_saves_a_done_tool_event(harness, db
     [event] = row.metadata["tool_events"]
     assert (event["status"], event["exit_code"], event["round"]) == ("done", 0, 1)
     assert row.metadata["round_texts"] == ["", "Added your note."]
-    blocks = row.metadata["agent_v2"]["rounds"][0]["blocks"]
-    assert [b["type"] for b in blocks] == ["tool_call", "tool_result"]
-    assert blocks[1]["ok"] is True
+    first_round = row.metadata["agent_v2"]["rounds"][0]
+    assert [b["type"] for b in first_round["blocks"]] == ["tool_call"]
+    [result] = first_round["results"]
+    assert (result["call_id"], result["ok"], result["error"]) == ("call_0", True, None)
 
 
 @pytest.mark.asyncio

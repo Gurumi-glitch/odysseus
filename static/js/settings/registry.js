@@ -62,7 +62,7 @@ export const SETTINGS_PANELS = Object.freeze([
     id: 'ai',
     label: 'AI Defaults',
     group: 'models',
-    keywords: ['ai', 'defaults', 'model', 'vision', 'image', 'tts', 'stt'],
+    keywords: ['ai', 'defaults', 'model', 'vision', 'image', 'tts', 'stt', 'agent', 'runtime'],
   }),
   definePanel({
     id: 'search',

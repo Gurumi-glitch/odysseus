@@ -8,7 +8,6 @@ binds resources and decides nothing (#34): the permission gate already did.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
@@ -110,19 +109,30 @@ class ToolOutcome:
     def ok(self) -> bool:
         return self.status == STATUS_DONE
 
-    def model_content(self) -> str:
-        if self.ok:
-            return self.model_text
-        return json.dumps({"error": self.model_text, "status": self.status})
+    def envelope(self) -> Dict[str, Any]:
+        """The shared tool-result shape (src/chat_agent/providers/__init__.py)."""
+        return {"call_id": self.call_id, "ok": self.ok, "content": self.model_text,
+                "error": None if self.ok else self.status}
+
+    def tool_event(self, round_number: int, model: str) -> Dict[str, Any]:
+        """The legacy ``tool_events`` projection, plus ``status`` and ``call_id``."""
+        event = {
+            "round": round_number, "model": model, "tool": self.tool, "desc": self.desc,
+            "command": self.command, "output": self.model_text, "exit_code": self.exit_code,
+            "status": self.status, "call_id": self.call_id,
+        }
+        if not self.ok:
+            event["error"] = True
+        return event
 
 
-def refused_outcome(call: Any, block: Any, decision: Any) -> ToolOutcome:
+def refused_outcome(call: Dict[str, Any], block: Any, reason: str) -> ToolOutcome:
     """A call the gate did not run: unusable arguments fail, the rest are denied."""
     if block is None:
-        return ToolOutcome(call.call_id, call.name, call.arguments, STATUS_FAILED,
-                           EXIT_FAILED, decision.reason)
-    return ToolOutcome(call.call_id, block.tool_type, block.content, STATUS_DENIED,
-                       EXIT_DENIED, decision.reason)
+        return ToolOutcome(call["call_id"], call["name"], call["arguments"], STATUS_FAILED,
+                           EXIT_FAILED, reason)
+    return ToolOutcome(call["call_id"], block.tool_type, block.content, STATUS_DENIED,
+                       EXIT_DENIED, reason)
 
 
 async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcome:

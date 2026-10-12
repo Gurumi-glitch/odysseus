@@ -1,0 +1,24 @@
+data: {"type": "response.created", "sequence_number": 0, "response": {"id": "resp_r2", "object": "response", "status": "in_progress", "model": "grok-4.7", "output": [], "store": false}}
+
+data: {"type": "response.output_item.added", "sequence_number": 1, "output_index": 0, "item": {"id": "rs_4e5f6a7b", "type": "reasoning", "summary": [], "status": "in_progress"}}
+
+data: {"type": "response.output_item.done", "sequence_number": 2, "output_index": 0, "item": {"id": "rs_4e5f6a7b", "type": "reasoning", "summary": [], "encrypted_content": "gAAAAABo8Xq2-ENCRYPTED-REASONING-ROUND-2==", "status": "completed"}}
+
+data: {"type": "response.output_item.added", "sequence_number": 3, "output_index": 1, "item": {"type": "message", "id": "msg_c0ffee", "role": "assistant", "status": "in_progress", "content": []}}
+
+data: {"type": "response.content_part.added", "sequence_number": 4, "item_id": "msg_c0ffee", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": "", "logprobs": [], "annotations": []}}
+
+data: {"type": "response.output_text.delta", "sequence_number": 5, "item_id": "msg_c0ffee", "output_index": 1, "content_index": 0, "delta": "Added the note "}
+
+data: {"type": "response.output_text.delta", "sequence_number": 6, "item_id": "msg_c0ffee", "output_index": 1, "content_index": 0, "delta": "\"Dinner\"."}
+
+data: {"type": "response.output_text.done", "sequence_number": 7, "item_id": "msg_c0ffee", "output_index": 1, "content_index": 0, "text": "Added the note \"Dinner\"."}
+
+data: {"type": "response.content_part.done", "sequence_number": 8, "item_id": "msg_c0ffee", "output_index": 1, "content_index": 0, "part": {"type": "output_text", "text": "Added the note \"Dinner\".", "logprobs": [], "annotations": []}}
+
+data: {"type": "response.output_item.done", "sequence_number": 9, "output_index": 1, "item": {"type": "message", "id": "msg_c0ffee", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Added the note \"Dinner\".", "logprobs": [], "annotations": []}]}}
+
+data: {"type": "response.completed", "sequence_number": 10, "response": {"id": "resp_r2", "object": "response", "status": "completed", "model": "grok-4.7", "output": [{"id": "rs_4e5f6a7b", "type": "reasoning", "summary": [], "encrypted_content": "gAAAAABo8Xq2-ENCRYPTED-REASONING-ROUND-2==", "status": "completed"}, {"type": "message", "id": "msg_c0ffee", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Added the note \"Dinner\".", "logprobs": [], "annotations": []}]}], "store": false, "usage": {"input_tokens": 1990, "input_tokens_details": {"cached_tokens": 1792}, "output_tokens": 40, "output_tokens_details": {"reasoning_tokens": 22}, "total_tokens": 2030}}}
+
+data: [DONE]
+

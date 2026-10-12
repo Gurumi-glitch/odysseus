@@ -9,8 +9,18 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, List, Sequence
+
+from src.chat_agent.providers import (
+    Endpoint,
+    ProviderError,
+    RoundEnd,
+    RoundEvent,
+    TextDelta,
+    provider_key,
+    replays_reasoning,
+    tool_output_text,
+)
 
 # Each helper below is module-level in llm_core and relied on as:
 #   _detect_provider: endpoint URL -> provider key ("openrouter", "openai", ...);
@@ -32,64 +42,26 @@ from src.llm_core import (
     _uses_max_completion_tokens,
 )
 
-
-@dataclass(frozen=True)
-class Endpoint:
-    url: str
-    model: str
-    headers: Optional[Dict[str, str]]
-
-
-@dataclass(frozen=True)
-class TextDelta:
-    text: str
-
-
-@dataclass(frozen=True)
-class ProviderError:
-    status: Optional[int]
-    message: str
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    call_id: str
-    name: str
-    arguments: str
-
-    def to_message(self) -> Dict[str, Any]:
-        return {"id": self.call_id, "type": "function",
-                "function": {"name": self.name, "arguments": self.arguments}}
-
-
-RoundEvent = Union[TextDelta, ToolCall, ProviderError]
-
-
-def assistant_message(text: str, calls: List[ToolCall]) -> Dict[str, Any]:
-    message: Dict[str, Any] = {"role": "assistant", "content": text or None}
-    if calls:
-        message["tool_calls"] = [call.to_message() for call in calls]
-    return message
-
-
-def tool_message(call_id: str, content: str) -> Dict[str, Any]:
-    return {"role": "tool", "tool_call_id": call_id, "content": content}
+# The fields reasoning comes back on and must go back on, unchanged: OpenRouter
+# reasoning_details (in order) and the reasoning_content of DeepSeek-style servers.
+_REASONING_FIELDS = ("reasoning_details", "reasoning_content")
 
 
 def build_payload(
     endpoint: Endpoint,
-    messages: List[Dict[str, Any]],
+    conversation: List[Dict[str, Any]],
     *,
     temperature: float,
     max_tokens: int,
-    tools: Optional[List[Dict[str, Any]]] = None,
+    tools: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
     provider = _detect_provider(endpoint.url)
+    messages = _messages(conversation, provider_key(endpoint.url), endpoint.model)
     payload: Dict[str, Any] = {"model": endpoint.model, "messages": messages, "stream": True}
     if tools:
         # parallel_tool_calls is never sent: the model may still issue several
         # calls per round, and the loop runs them one at a time (spec #44).
-        payload["tools"] = tools
+        payload["tools"] = list(tools)
         payload["tool_choice"] = "auto"
     if not _omit_temperature(provider, endpoint.model):
         payload["temperature"] = temperature
@@ -97,6 +69,36 @@ def build_payload(
         key = "max_completion_tokens" if _uses_max_completion_tokens(endpoint.model) else "max_tokens"
         payload[key] = max_tokens
     return payload
+
+
+def _messages(conversation: List[Dict[str, Any]], provider: str, model: str) -> List[Dict[str, Any]]:
+    messages = []
+    for message in conversation:
+        if message["role"] == "tool":
+            messages.append({
+                "role": "tool", "tool_call_id": message["call_id"], "content": tool_output_text(message),
+            })
+        elif "blocks" in message:
+            messages.append(_assistant_message(message["blocks"], provider, model))
+        else:
+            messages.append({"role": message["role"], "content": message.get("content") or ""})
+    return messages
+
+
+def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) -> Dict[str, Any]:
+    text = "".join(block["text"] for block in blocks if block["type"] == "text")
+    tool_calls = [
+        {"id": block["call_id"], "type": "function",
+         "function": {"name": block["name"], "arguments": block["arguments"]}}
+        for block in blocks if block["type"] == "tool_call"
+    ]
+    message: Dict[str, Any] = {"role": "assistant", "content": text or (None if tool_calls else "")}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    for block in blocks:
+        if block["type"] == "reasoning" and replays_reasoning(block, provider, model):
+            message.update({field: block[field] for field in _REASONING_FIELDS if field in block})
+    return message
 
 
 def _request_headers(endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -111,25 +113,21 @@ def _request_headers(endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Dict
 
 async def stream_round(
     endpoint: Endpoint,
-    messages: List[Dict[str, Any]],
+    conversation: List[Dict[str, Any]],
     *,
     temperature: float,
     max_tokens: int,
-    tools: Optional[List[Dict[str, Any]]] = None,
+    tools: Sequence[Dict[str, Any]] = (),
 ) -> AsyncIterator[RoundEvent]:
-    """Stream one round: text deltas as they arrive, then its tool calls."""
-    payload = build_payload(endpoint, messages, temperature=temperature,
+    payload = build_payload(endpoint, conversation, temperature=temperature,
                             max_tokens=max_tokens, tools=tools)
-    # Tool calls arrive as fragments keyed by index; they are complete only
-    # when the stream ends.
-    partial_calls: Dict[int, Dict[str, str]] = {}
     target_url = _normalize_openai_chat_url(endpoint.url)
     client = _get_http_client()
     async with client.stream(
         "POST",
         target_url,
         json=payload,
-        headers=_request_headers(endpoint, messages),
+        headers=_request_headers(endpoint, payload["messages"]),
         timeout=_stream_timeout(LLMConfig.STREAM_TIMEOUT),
     ) as response:
         if response.status_code != 200:
@@ -139,6 +137,11 @@ async def stream_round(
                 _format_upstream_error(response.status_code, body, endpoint.url),
             )
             return
+        text = ""
+        details: List[Any] = []
+        reasoning_content = ""
+        # Tool calls stream as fragments keyed by index; complete at stream end.
+        calls: Dict[int, Dict[str, str]] = {}
         async for line in response.aiter_lines():
             # SSE allows "data:value" without the space.
             if not line.startswith("data:"):
@@ -155,22 +158,44 @@ async def stream_round(
                 return
             for choice in chunk.get("choices") or ():
                 delta = choice.get("delta") or {}
+                # OpenRouter: "the complete reasoning sequence is built by
+                # concatenating all chunks in order".
+                details.extend(delta.get("reasoning_details") or ())
+                reasoning_content += delta.get("reasoning_content") or ""
                 if delta.get("content"):
+                    text += delta["content"]
                     yield TextDelta(delta["content"])
                 for fragment in delta.get("tool_calls") or ():
-                    _merge_tool_call_fragment(partial_calls, fragment)
-    for index in sorted(partial_calls):
-        call = partial_calls[index]
-        yield ToolCall(call["id"] or f"call_{uuid.uuid4().hex}", call["name"], call["arguments"])
+                    _merge_tool_call(calls, fragment)
+        blocks = _blocks(endpoint, text, details, reasoning_content)
+        blocks += [
+            {"type": "tool_call", "call_id": call["call_id"] or f"call_{uuid.uuid4().hex}",
+             "name": call["name"], "arguments": call["arguments"]}
+            for _, call in sorted(calls.items())
+        ]
+        yield RoundEnd(blocks, None)
 
 
-def _merge_tool_call_fragment(partial_calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any]) -> None:
-    call = partial_calls.setdefault(int(fragment.get("index") or 0),
-                                    {"id": "", "name": "", "arguments": ""})
+def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any]) -> None:
+    call = calls.setdefault(int(fragment.get("index") or 0), {"call_id": "", "name": "", "arguments": ""})
     if fragment.get("id"):
-        call["id"] = fragment["id"]
+        call["call_id"] = fragment["id"]
     function = fragment.get("function") or {}
-    if function.get("name"):
-        call["name"] += function["name"]
-    if function.get("arguments"):
-        call["arguments"] += function["arguments"]
+    call["name"] += function.get("name") or ""
+    call["arguments"] += function.get("arguments") or ""
+
+
+def _blocks(endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    reasoning = {
+        field: value
+        for field, value in (("reasoning_details", details), ("reasoning_content", reasoning_content))
+        if value
+    }
+    if reasoning:
+        blocks.append({
+            "type": "reasoning", "provider": provider_key(endpoint.url), "model": endpoint.model, **reasoning,
+        })
+    if text:
+        blocks.append({"type": "text", "text": text})
+    return blocks
