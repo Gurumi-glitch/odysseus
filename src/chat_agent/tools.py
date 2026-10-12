@@ -230,10 +230,12 @@ def offered_schemas(
     if not upfront:
         return []
     by_name = {schema_name(schema): schema for schema in catalog}
-    extra = [TOOL_SEARCH_SCHEMA] if catalog else []
-    extra += [LOAD_SKILL_SCHEMA] if skills else []
-    extra += [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
-    return upfront + _apply_tool_surface_to_schemas(extra, surface)
+    own = [TOOL_SEARCH_SCHEMA] if catalog else []
+    own += [LOAD_SKILL_SCHEMA] if skills else []
+    # The model searched for these to learn how to call them, so they keep
+    # their full descriptions on the compact surface too (spec #44).
+    searched = [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
+    return upfront + _apply_tool_surface_to_schemas(own, surface) + searched
 
 
 def skills_enabled(owner: str, sess: Any, incognito: bool) -> bool:

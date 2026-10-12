@@ -9,6 +9,7 @@ import routes.history.history_routes as history_routes
 from core import database
 from core.models import ChatMessage
 from src.chat_agent import store
+from src.chat_agent import tools as chat_agent_tools
 from src.chat_agent.loop import Candidate, _TurnUsage
 from src.chat_agent.providers import Endpoint, RoundEnd
 from src.chat_agent.providers.chat_completions import build_payload as chat_completions_payload
@@ -93,6 +94,21 @@ async def test_a_turn_cancelled_during_an_ask_keeps_its_metrics_on_the_row(harne
     [row] = harness.saved
     assert TURN_END_METRIC_KEYS <= row.metadata.keys()
     assert row.metadata["input_tokens"] > 0
+
+
+# --- P8: a searched schema keeps its full description on the compact surface --
+
+
+def test_loaded_schemas_keep_full_descriptions_on_the_compact_surface():
+    upfront = [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
+    searched = {"type": "function", "function": {
+        "name": "mcp__x__y", "description": "Does y.",
+        "parameters": {"type": "object", "properties": {"q": {"type": "string", "description": "query"}}},
+    }}
+
+    offered = chat_agent_tools.offered_schemas(upfront, [searched], ["mcp__x__y"], "compact")
+
+    assert offered[-1] == searched
 
 
 # --- P3: a merged chat_agent row renders and replays from its content --------
