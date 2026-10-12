@@ -14,6 +14,7 @@ import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
 import { getShowPersonaName } from './presets.js?v=20260908personaname1';
+import Storage from './storage.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -1169,12 +1170,21 @@ export function applyModelColor(roleEl, modelName) {
       } else if (info && info.ctx) {
         html += '<div><span class="ctx-label">Context</span> <span id="_ctx-val">' + _fmtCtx(info.ctx) + ' tokens</span></div>';
       }
-      // Fetch real context from server async
-      if (!_realCtx && window.sessionModule) {
+      // Fetch real context + the instruction files the new runtime loads, async.
+      // The server caches context length per (endpoint, model), so fetching on
+      // every open is cheap; the file list changes with the composer workspace.
+      // Nobody mode (incognito toggle) loads no instruction files at all.
+      const _nobody = !!(document.getElementById('incognito-toggle') || {}).checked;
+      if (window.sessionModule) {
         const _sid = window.sessionModule.getCurrentSessionId();
         if (_sid) {
-          fetch('/api/session/' + _sid + '/context_info').then(r => r.ok ? r.json() : null).then(d => {
-            if (d && d.context_length) {
+          // Same workspace chat.js posts with each turn, so the list matches
+          // what the next turn will load.
+          const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
+          const _qs = _ws ? '?cwd=' + encodeURIComponent(_ws) : '';
+          fetch('/api/session/' + _sid + '/context_info' + _qs).then(r => r.ok ? r.json() : null).then(d => {
+            if (!d) return;
+            if (!_realCtx && d.context_length) {
               if (!window._realContextLengths) window._realContextLengths = {};
               window._realContextLengths[modelName] = d.context_length;
               const el = document.getElementById('_ctx-val');
@@ -1185,6 +1195,15 @@ export function applyModelColor(roleEl, modelName) {
                 }
               }
             }
+            const _files = (!_nobody && Array.isArray(d.instructions)) ? d.instructions : [];
+            if (!_files.length) return;
+            let fh = '<div style="margin-top:4px;"><span class="ctx-label">Instructions</span>';
+            for (const f of _files) {
+              fh += '<div style="overflow-wrap:anywhere;">' + uiModule.esc(f.path);
+              if (f.truncated) fh += ' <span style="opacity:0.35">(truncated)</span>';
+              fh += '</div>';
+            }
+            popup.insertAdjacentHTML('beforeend', fh + '</div>');
           }).catch(() => {});
         }
       }
