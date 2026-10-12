@@ -51,6 +51,11 @@ UNAVAILABLE = "unavailable"
 DENIED_BY = "auto_mode"
 DENIAL_PREFIX = "Denied by auto mode: "
 
+# Characters (as JSON) of earlier user messages, and again of earlier
+# actions, the classifier sees; older entries drop first. About 6k tokens
+# each, so a long chat still fits a small classifier model's window.
+HISTORY_BUDGET_CHARS = 24_000
+
 # The legacy non-streaming call bound: a verdict slower than this raises the ask.
 TIMEOUT_SECONDS = LLMConfig.DEFAULT_TIMEOUT
 # A judgment, not prose: the same input should get the same verdict.
@@ -198,6 +203,18 @@ def _changing_payloads(tool_events: Iterable[Mapping[str, Any]]) -> List[Dict[st
     return payloads
 
 
+def _most_recent(entries: List[Any], budget: int) -> List[Any]:
+    """The newest entries whose JSON fits the budget together."""
+    kept: List[Any] = []
+    used = 0
+    for entry in reversed(entries):
+        used += len(json.dumps(entry)) + len(", ")
+        if used > budget:
+            break
+        kept.append(entry)
+    return kept[::-1]
+
+
 def classifier_endpoint(owner: str, privileges: Mapping[str, Any]) -> Optional[Endpoint]:
     """The model Settings picked for the classifier, when this user may use it;
     None means the chat's own model judges."""
@@ -317,10 +334,12 @@ class AutoMode:
         tool_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         said = "\n".join(self.user_messages).casefold()
+        *earlier, current = self.user_messages
         return {
-            "user_messages": self.user_messages,
+            "user_messages": [*_most_recent(earlier, HISTORY_BUDGET_CHARS), current],
             "instruction_files": [{"path": f.path, "text": f.text} for f in self.instruction_files],
-            "earlier_actions": _changing_payloads([*self.history_events, *tool_events]),
+            "earlier_actions": _most_recent(
+                _changing_payloads([*self.history_events, *tool_events]), HISTORY_BUDGET_CHARS),
             "provenance": {
                 "external_content_in_context": provenance.external,
                 "external_content_from": list(provenance.origins),

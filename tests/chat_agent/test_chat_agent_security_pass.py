@@ -8,7 +8,7 @@ import pytest
 import routes.chat_helpers as chat_helpers
 import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
-from src.chat_agent import permissions, store
+from src.chat_agent import classifier, permissions, store
 from src.chat_agent.permissions import ALLOW, ASK, Provenance, Rules
 from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
     _events,
@@ -201,3 +201,26 @@ def test_writing_an_instruction_file_is_the_users_own_answer(admin, instructed_w
     )
     assert permissions.is_protected(name, content, owner="alice", workspace=instructed_workspace) is protected
     assert (decision.outcome, decision.auto) == ((ASK, False) if protected else (ALLOW, False))
+
+
+# --- L1: the classifier's input stays bounded however long the chat is -------
+
+
+def test_the_classifier_sees_the_most_recent_history_within_its_budget():
+    budget = classifier.HISTORY_BUDGET_CHARS
+    entry = "x" * (budget // 10)
+    current = "y" * (2 * budget)
+    events = [{"tool": "write_file", "command": f"{i}\n{entry}"} for i in range(30)]
+    mode = classifier.AutoMode(
+        state=classifier.ACTIVE, user_messages=[f"{i} {entry}" for i in range(30)] + [current],
+        history_events=events,
+    )
+    judged = "z" * (2 * budget)
+
+    facts = mode._input("write_file", judged, judged, Provenance(), [])
+
+    said, actions = facts["user_messages"], facts["earlier_actions"]
+    assert said[-1] == current and facts["action"]["arguments"] == judged
+    assert said[-2].startswith("29 ") and actions[-1]["arguments"].startswith("29\n")
+    assert not said[0].startswith("0 ") and not actions[0]["arguments"].startswith("0\n")
+    assert len(json.dumps(said[:-1])) <= budget and len(json.dumps(actions)) <= budget
