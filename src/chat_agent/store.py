@@ -38,10 +38,14 @@ SESSION_RULE_FIELDS = 3
 USER_INSTRUCTIONS_FILENAME = "AGENTS.md"
 
 
-def _owner_name(owner: str) -> str:
+def owner_key(owner: str) -> str:
     # strip().lower() is how AuthManager keys usernames; casefold() would merge
-    # distinct accounts such as "straße" and "strasse" into one folder.
-    name = quote(str(owner or "").strip().lower(), safe="")
+    # distinct accounts such as "straße" and "strasse" into one.
+    return str(owner or "").strip().lower()
+
+
+def _owner_name(owner: str) -> str:
+    name = quote(owner_key(owner), safe="")
     if not name:
         raise ValueError("chat_agent store needs an owner")
     return name
