@@ -224,7 +224,7 @@ class AutoMode:
     def __init__(
         self, *, state: str, owner: str = "", session_id: str = "", endpoint: Optional[Endpoint] = None,
         user_messages: List[str] = (), history_events: List[Dict[str, Any]] = (),
-        workspace: Optional[str] = None, incognito: bool = False,
+        instruction_files: List[prompt.InstructionFile] = (),
     ) -> None:
         self.state = state
         self.owner = owner
@@ -232,8 +232,7 @@ class AutoMode:
         self.endpoint = endpoint
         self.user_messages = list(user_messages)
         self.history_events = list(history_events)
-        self.workspace = workspace
-        self.incognito = incognito
+        self.instruction_files = list(instruction_files)
 
     @classmethod
     def for_turn(cls, turn: Any, history: Iterable[Any]) -> "AutoMode":
@@ -251,7 +250,9 @@ class AutoMode:
             endpoint=classifier_endpoint(turn.owner, turn.privileges),
             user_messages=[*real_user_messages(history), turn.message],
             history_events=_tool_events(history),
-            workspace=turn.toggles.workspace, incognito=turn.toggles.incognito,
+            # Read once: the agent can write these files mid-turn (security pass).
+            instruction_files=[] if turn.toggles.incognito else prompt.instruction_files(
+                turn.owner, turn.toggles.workspace),
         )
         if paused_in(turn.owner, turn.session_id):
             mode.state = PAUSED
@@ -316,10 +317,9 @@ class AutoMode:
         tool_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         said = "\n".join(self.user_messages).casefold()
-        files = [] if self.incognito else prompt.instruction_files(self.owner, self.workspace)
         return {
             "user_messages": self.user_messages,
-            "instruction_files": [{"path": f.path, "text": f.text} for f in files],
+            "instruction_files": [{"path": f.path, "text": f.text} for f in self.instruction_files],
             "earlier_actions": _changing_payloads([*self.history_events, *tool_events]),
             "provenance": {
                 "external_content_in_context": provenance.external,

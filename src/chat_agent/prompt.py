@@ -23,7 +23,6 @@ from src.chat_agent.routing import ComposerToggles
 
 logger = logging.getLogger(__name__)
 
-INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md")
 INSTRUCTIONS_HEADER = (
     "Instructions from the user's instruction files follow, broadest first, each "
     "labelled with its path. They override default behaviour. They are advisory: "
@@ -68,7 +67,7 @@ def instruction_files(owner: str, workspace: Optional[str]) -> List[InstructionF
     folders += [(folder, folder) for folder in _workspace_folders(workspace)]
     files = []
     for folder, label in folders:
-        for name in INSTRUCTION_FILENAMES:
+        for name in constants.INSTRUCTION_FILENAMES:
             loaded = _read_instruction_file(folder, name, os.path.join(label, name))
             if loaded:
                 files.append(loaded)
