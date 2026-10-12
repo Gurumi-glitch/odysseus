@@ -57,6 +57,10 @@ def mcp(monkeypatch):
     manager._connections = {"github": {"status": "connected", "name": "GitHub"}}
     session = _GithubSession()
     manager._sessions = {"github": session}
+    # What connect_server records for a stdio server, so the executor can
+    # bind the call to this exact connection.
+    manager._resource_endpoints["github"] = ("stdio:github", "config-1")
+    manager._register_resource_connection("github", session)
     monkeypatch.setattr(tool_utils, "_mcp_manager", manager)
     return session
 
@@ -128,6 +132,8 @@ async def test_a_custom_mcp_tool_is_callable_after_search(harness, admin, mcp, d
     # Custom MCP tools ask (spec #44 default posture); approving stands in
     # for the user's answer until real asks arrive (#56).
     monkeypatch.setattr(permissions, "posture", lambda name, content: permissions.ALLOW)
+    # The executor's own copy of the admin check (custom MCP is admin-only).
+    monkeypatch.setattr(tool_execution, "owner_is_admin_or_single_user", lambda owner: True)
     _search_then_call_issue_lister(harness)
 
     _, body = await harness.send(_Request("agent"))
