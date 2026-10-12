@@ -9,13 +9,38 @@ tests/test_session_manager_persist_guard.py.
 import pytest
 
 from src.agent_loop import _agent_route_tool_mode
-from src.chat_agent.providers.chat_completions import Endpoint, build_payload
+from src.chat_agent.providers import Endpoint
+from src.chat_agent.providers.chat_completions import build_payload
+from src.endpoint_resolver import normalize_base
 from src.llm_core import (
     _detect_provider,
     _format_upstream_error,
+    _host_match,
     _normalize_openai_chat_url,
     _provider_headers,
 )
+
+
+@pytest.mark.parametrize(
+    ("url", "xai"),
+    [
+        ("https://api.x.ai/v1", True),
+        ("https://x.ai", True),
+        ("https://max.ai/v1", False),
+        ("https://proxy.example/x.ai/v1", False),
+    ],
+)
+def test_host_match_compares_hostnames_not_substrings(url, xai):
+    assert _host_match(url, "x.ai") is xai
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://api.x.ai/v1", "https://api.x.ai/v1/", "https://api.x.ai/v1/chat/completions",
+     "https://api.x.ai/v1/responses"],
+)
+def test_normalize_base_strips_dialect_suffixes_to_the_api_base(url):
+    assert normalize_base(url) == "https://api.x.ai/v1"
 
 
 @pytest.mark.parametrize(

@@ -8,13 +8,22 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
+from dataclasses import asdict, dataclass
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from src.chat_agent import prompt, transcript
-from src.chat_agent.providers import chat_completions
+from src.chat_agent.providers import (
+    XAI,
+    Endpoint,
+    ProviderError,
+    RoundEnd,
+    RoundEvent,
+    TextDelta,
+    chat_completions,
+    provider_key,
+    xai_responses,
+)
 from src.chat_agent.routing import ComposerToggles
-from src.llm_core import _detect_provider
 
 logger = logging.getLogger(__name__)
 
@@ -41,26 +50,44 @@ def _error_event(message: str, status: Optional[int] = None) -> str:
     return f"event: error\ndata: {json.dumps({'error': message, 'status': status})}\n\n"
 
 
+def _stream_round(
+    turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+) -> AsyncIterator[RoundEvent]:
+    if provider == XAI:
+        return xai_responses.stream_round(
+            endpoint, conversation, cache_key=turn.session_id,
+            temperature=turn.temperature, max_tokens=turn.max_tokens,
+        )
+    return chat_completions.stream_round(
+        endpoint, conversation, temperature=turn.temperature, max_tokens=turn.max_tokens,
+    )
+
+
+def _round_record(end: RoundEnd) -> Dict[str, Any]:
+    if end.usage is None:
+        return {"blocks": end.blocks}
+    return {"blocks": end.blocks, "usage": asdict(end.usage)}
+
+
 async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield _event({"type": "turn_mode", "mode": "agent", "auto_escalated": turn.auto_escalated})
     sess = turn.sess
-    endpoint = chat_completions.Endpoint(sess.endpoint_url, sess.model, sess.headers)
-    record = transcript.TurnRecord(provider=_detect_provider(endpoint.url), model=endpoint.model)
+    endpoint = Endpoint(sess.endpoint_url, sess.model, sess.headers)
+    provider = provider_key(endpoint.url)
+    record = transcript.TurnRecord(provider=provider, model=endpoint.model)
     try:
-        messages = await prompt.build_messages(
+        conversation = await prompt.build_messages(
             turn.build_context, owner=turn.owner, toggles=turn.toggles,
         )
-        text = ""
-        async for event in chat_completions.stream_round(
-            endpoint, messages, temperature=turn.temperature, max_tokens=turn.max_tokens,
-        ):
-            if isinstance(event, chat_completions.ProviderError):
+        async for event in _stream_round(turn, provider, endpoint, conversation):
+            if isinstance(event, ProviderError):
                 yield _error_event(event.message, event.status)
                 yield "data: [DONE]\n\n"
                 return
-            text += event.text
-            yield _event({"delta": event.text})
-        record.round_texts.append(text)
+            if isinstance(event, TextDelta):
+                yield _event({"delta": event.text})
+            elif isinstance(event, RoundEnd):
+                record.rounds.append(_round_record(event))
         message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
     except Exception:
         # A crash ends the turn visibly; it never falls back to legacy, which
