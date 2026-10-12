@@ -942,9 +942,14 @@ def decide(
         or (policy_name(name) == "manage_tasks"
             and _action_from_content("manage_tasks", content) in _TASK_ACTIONS_THAT_ASK)
     )
-    # Asks "Allow for this chat" never lifts: the above and the egress gate.
-    pinned = user_only or (provenance.external and provenance.private and _egress(name, content))
-    asks = pinned or is_sensitive(name, content) or (
+    # Asks "Allow for this chat" never lifts: the above, sensitive actions
+    # ("always ask", spec #44) and the egress gate.
+    pinned = (
+        user_only
+        or is_sensitive(name, content)
+        or (provenance.external and provenance.private and _egress(name, content))
+    )
+    asks = pinned or (
         posture(name, content) == ASK
         and not any(rule_covers(rule, name, content, workspace) for rule in rules.allow)
     )
