@@ -16,7 +16,7 @@ import routes.chat_routes as chat_routes
 import src.constants as constants
 import src.foreground_model_routing as foreground_model_routing
 import src.settings as settings
-from src.chat_agent import store
+from src.chat_agent import store, transcript
 from src.chat_agent.providers import chat_completions, xai_responses
 from src.tool_capabilities import capabilities_for_action
 
@@ -116,7 +116,12 @@ class _Harness:
             add_message=add_message,
             # The writer mutates the saved message in place, so saved[] stays current.
             update_message=lambda message: True,
+            # What the turn-start compaction check estimates when no usage was reported.
+            get_context_messages=lambda: [m.to_dict() for m in self.session.history],
         )
+        # A window no scripted history comes near: the turn never compacts
+        # unless a test says so (and never probes a real endpoint for it).
+        monkeypatch.setattr(transcript, "get_context_length", lambda url, model: 128_000)
         session_manager = SimpleNamespace(
             get_session=lambda session_id: self.session,
             save_sessions=lambda: None,

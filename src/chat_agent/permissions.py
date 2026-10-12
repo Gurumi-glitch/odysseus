@@ -718,6 +718,11 @@ _EXTERNAL_SOURCES = (
 _PRIVATE_SOURCES = _EMAIL_READS | {"search_chats", "vault_get", "vault_search"}
 
 
+# Row metadata where a compaction summary keeps the provenance of the rows it
+# summarized: their tool events are gone, the content they brought is not (#67).
+PROVENANCE_KEY = "egress_provenance"
+
+
 @dataclass(frozen=True)
 class Provenance:
     """What the chat's context holds: external content, a private-data read."""
@@ -739,13 +744,21 @@ class Provenance:
 
     def after_history(self, rows: Iterable[Any]) -> "Provenance":
         """Earlier turns' tool results stay in the replayed context, so their
-        calls (tool events on either runtime's rows) count too."""
+        calls (tool events on either runtime's rows) count too, and so does
+        what a compaction summary row recorded of the rows it replaced."""
         provenance = self
         for row in rows:
-            metadata = getattr(row, "metadata", None) if not isinstance(row, dict) else row.get("metadata")
-            for event in (metadata or {}).get("tool_events") or ():
+            metadata = (getattr(row, "metadata", None) if not isinstance(row, dict) else row.get("metadata")) or {}
+            for event in metadata.get("tool_events") or ():
                 if isinstance(event, dict) and event.get("tool"):
                     provenance = provenance.after(str(event["tool"]))
+            recorded = metadata.get(PROVENANCE_KEY)
+            if isinstance(recorded, dict):
+                # A recorded leg only ever arms the gate, so a forged one costs an ask.
+                provenance = Provenance(
+                    external=provenance.external or bool(recorded.get("external")),
+                    private=provenance.private or bool(recorded.get("private")),
+                )
         return provenance
 
 

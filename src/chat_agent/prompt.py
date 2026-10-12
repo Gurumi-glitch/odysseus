@@ -15,7 +15,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from src import constants
 from src.chat_agent import store, transcript, turn_context
@@ -170,11 +170,15 @@ async def build_messages(
     model: str,
     open_items: turn_context.OpenItems,
     skill_index: str = "",
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], int]:
+    """The request, and the index where its replayed history starts (after
+    the system message and the instructions block)."""
     # prefetch=False: the model fetches URLs, searches and YouTube itself, so
     # toggles and provenance apply. agent_mode=False keeps the legacy skills
-    # index out; this runtime builds its own.
-    ctx = await build_context(prefetch=False, agent_mode=False)
+    # index out; this runtime builds its own. defer_context_shaping=True: no
+    # legacy compaction or trimming of agent_v2 history; the transcript
+    # module compacts at turn boundaries (#67).
+    ctx = await build_context(prefetch=False, agent_mode=False, defer_context_shaping=True)
     turn_context.bind_process_state(open_items.document, model)
     files = [] if toggles.incognito else instruction_files(owner, toggles.workspace)
     preface_ids = {id(message) for message in ctx.preface}
@@ -188,10 +192,11 @@ async def build_messages(
         uploaded_files=ctx.uploaded_files,
         attachment_meta=ctx.preprocessed.attachment_meta or [],
     )
-    return assemble(
-        ctx.preface, ctx.messages, [*turn_context.system_sections(), *system_sections],
-        instructions_message(files, skill_index), page,
+    instructions = instructions_message(files, skill_index)
+    conversation = assemble(
+        ctx.preface, ctx.messages, [*turn_context.system_sections(), *system_sections], instructions, page,
     )
+    return conversation, 1 + (instructions is not None)
 
 
 def assemble(

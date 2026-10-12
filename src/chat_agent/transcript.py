@@ -18,7 +18,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from hashlib import sha256
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from core.models import ChatMessage
 # Relies on: each takes the answer text and tool events shaped like legacy
@@ -32,9 +32,28 @@ from src.agent_loop import (
     _linkify_note_titles_from_tool_events,
 )
 from src.attachment_refs import persistable_message_content
-from src.chat_agent import tools
+from src.chat_agent import permissions, tools
 from src.chat_agent.asks import RESOLVED_EXPIRED
+from src.chat_agent.providers import Endpoint, tool_output_text
 from src.chat_agent.routing import CHAT_AGENT
+# Relies on: SELF_SUMMARY_SYSTEM_PROMPT holds the {count} and {n}
+# placeholders; normalize_compaction_summary strips a leading "Conversation
+# Summary" title; auto_compact_threshold_percent is the configured threshold
+# clamped to 50..95 (default 85); SUMMARY_MAX_TOKENS bounds the summary.
+from src.context_compactor import (
+    SELF_SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_MAX_TOKENS,
+    auto_compact_threshold_percent,
+    normalize_compaction_summary,
+)
+# Relies on: resolve_endpoint("utility", owner=) returns the configured
+# utility (else default chat) model's (url, model, headers), or Nones.
+from src.endpoint_resolver import resolve_endpoint
+# Relies on: llm_call_async returns the reply text or raises.
+from src.llm_core import llm_call_async
+# Relies on: estimate_tokens counts each dict's content (string or text parts)
+# and ignores other keys; get_context_length is the model's window (cached).
+from src.model_context import estimate_tokens, get_context_length
 # Relies on: _grant_key returns the persistent application key (the same bytes
 # across restarts) or None when it is unavailable.
 from src.tool_approval_scopes import _grant_key
@@ -343,3 +362,165 @@ def sweep_interrupted_turns() -> int:
     if swept:
         logger.info("chat_agent: marked %d interrupted turn(s) left from the last run", swept)
     return swept
+
+
+# --- Compaction (ticket #67) ---------------------------------------------------
+#
+# Triggered by the size of the next request: the newest usage a provider
+# reported (input, cached tokens included, plus the reply it produced) plus
+# whatever was saved after it. The cut falls only before a user message, so a
+# turn's tool calls and results are kept or summarized together.
+
+# The legacy auto-compaction header (maybe_compact).
+SUMMARY_HEADER = "[Conversation summary — earlier messages were compacted]"
+# Each message's share of the summariser's input, as legacy compaction.
+SUMMARY_LINE_CHARS = 2000
+
+
+def reported_context_tokens(rows: Sequence[ChatMessage]) -> Optional[int]:
+    """The next request's size from the newest reported usage, or None when no
+    trusted row carries one."""
+    for index in range(len(rows) - 1, -1, -1):
+        rounds = trusted_rounds(rows[index].to_dict())
+        usage = rounds[-1].get("usage") if rounds else None
+        if usage:
+            later = [row.to_dict() for row in rows[index + 1:]]
+            return usage["input_tokens"] + usage["output_tokens"] + (estimate_tokens(later) if later else 0)
+    return None
+
+
+def context_tokens(sess: Any) -> int:
+    """What the chat's next request holds: reported usage plus the projections
+    saved after it; the legacy estimate when nothing was reported."""
+    reported = reported_context_tokens(sess.history)
+    return reported if reported is not None else estimate_tokens(sess.get_context_messages())
+
+
+def over_threshold(tokens: int, window: int) -> bool:
+    return bool(window) and tokens * 100 >= window * auto_compact_threshold_percent()
+
+
+def turn_cut(roles: Sequence[str]) -> int:
+    """Where the kept part starts: the first user message at or past the middle
+    (legacy keeps the recent half), or nothing kept when there is none."""
+    return next((i for i in range(max(1, len(roles) // 2), len(roles)) if roles[i] == "user"), len(roles))
+
+
+async def summarise(messages: List[Dict[str, Any]], endpoint: Endpoint, owner: str) -> Optional[str]:
+    """The legacy summariser call over these messages, or None when it fails."""
+    util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
+    earlier = sum(1 for m in messages if "[Conversation summary" in _summary_text(m))
+    prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(messages))).replace("{n}", str(earlier + 1))
+    text = "\n".join(f"{m['role'].upper()}: {_summary_text(m)[:SUMMARY_LINE_CHARS]}" for m in messages)
+    try:
+        summary = await llm_call_async(
+            util_url or endpoint.url, util_model or endpoint.model,
+            [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+            temperature=0.2, max_tokens=SUMMARY_MAX_TOKENS,
+            headers=util_headers if util_url else endpoint.headers, timeout=30,
+        )
+    except Exception:
+        # The chat stays whole; the request may still fit.
+        logger.exception("chat_agent: compaction summary failed")
+        return None
+    # An empty summary would drop the older turns for nothing.
+    return normalize_compaction_summary(summary) or None
+
+
+def _summary_text(message: Dict[str, Any]) -> str:
+    """A message as the summariser reads it: rounds as text and calls."""
+    if "blocks" in message:
+        return "\n".join(
+            block["text"] if block["type"] == "text" else f"{block['name']}({block['arguments']})"
+            for block in message["blocks"] if block["type"] in ("text", "tool_call")
+        )
+    if message["role"] == "tool":
+        return tool_output_text(message)
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    return str(content or "")
+
+
+def compacted_history(
+    summary: ChatMessage, older: Sequence[ChatMessage], recent: Sequence[ChatMessage],
+) -> List[ChatMessage]:
+    """The rows that replace a chat's history: the summary row, then the kept rows.
+
+    The summary records the egress provenance of the rows it replaces (their
+    tool events go with them), so the gate stays armed. Kept rows lose their
+    reported usage: it measured a history that no longer exists.
+    """
+    legs = permissions.Provenance().after_history(older)
+    summary.metadata = {
+        **(summary.metadata or {}),
+        permissions.PROVENANCE_KEY: {"external": legs.external, "private": legs.private},
+    }
+    return [summary, *(_without_usage(row) for row in recent)]
+
+
+def _without_usage(row: ChatMessage) -> ChatMessage:
+    rounds = trusted_rounds(row.to_dict())
+    if not rounds or not any("usage" in r for r in rounds):
+        return row
+    metadata = dict(row.metadata)
+    metadata["agent_v2"] = {
+        **metadata["agent_v2"],
+        "rounds": [{k: v for k, v in r.items() if k != "usage"} for r in rounds],
+    }
+    # Re-sealed only because it verified above.
+    return ChatMessage(row.role, row.content, metadata=signed_metadata(row.content, metadata))
+
+
+async def compact_history(sess: Any, session_id: str, endpoint: Endpoint, owner: str) -> Optional[int]:
+    """Turn start: compact the stored chat when its next request crosses the
+    threshold of ``endpoint``'s window. Returns the window when it compacted."""
+    rows = list(sess.history or ())
+    if not rows:
+        return None
+    window = get_context_length(endpoint.url, endpoint.model)
+    if not over_threshold(context_tokens(sess), window):
+        return None
+    cut = turn_cut([row.role for row in rows])
+    older, recent = rows[:cut], rows[cut:]
+    summary = await summarise([row.to_dict() for row in older], endpoint, owner)
+    if summary is None:
+        return None
+    rows = compacted_history(
+        ChatMessage("system", f"{SUMMARY_HEADER}\n{summary}", metadata={
+            "compacted": True, "summarized_count": len(older),
+        }),
+        older, recent,
+    )
+    from core.models import get_session_manager_instance
+    manager = get_session_manager_instance()
+    # Relies on: replace_messages swaps the DB rows and the cached history
+    # together, or changes nothing and returns False.
+    if manager is None or not manager.replace_messages(session_id, rows):
+        logger.warning("chat_agent: could not save the compacted history of %s", session_id)
+        return None
+    return window
+
+
+async def fit_request(
+    conversation: List[Dict[str, Any]], history_start: int, current: Dict[str, Any],
+    endpoint: Endpoint, owner: str,
+) -> List[Dict[str, Any]]:
+    """Fit this request to ``endpoint``'s window (a fallback with a smaller
+    one): summarize the history before ``current``, the turn's user message,
+    at a turn boundary. Request-local: the next turn compacts the stored chat
+    at the fallback's (now sticky) window."""
+    window = get_context_length(endpoint.url, endpoint.model)
+    view = [{"role": m["role"], "content": _summary_text(m)} for m in conversation]
+    if not over_threshold(estimate_tokens(view), window):
+        return conversation
+    end = next(i for i, message in enumerate(conversation) if message is current)
+    history = conversation[history_start:end]
+    cut = turn_cut([message["role"] for message in history])
+    summary = await summarise(history[:cut], endpoint, owner) if history else None
+    if summary is None:
+        return conversation
+    return [
+        *conversation[:history_start], {"role": "system", "content": f"{SUMMARY_HEADER}\n{summary}"},
+        *history[cut:], *conversation[end:],
+    ]

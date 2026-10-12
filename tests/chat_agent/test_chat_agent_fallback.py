@@ -12,7 +12,6 @@ import httpx
 import pytest
 
 import routes.chat_routes as chat_routes
-import src.context_compactor as context_compactor
 import src.foreground_model_routing as foreground_model_routing
 from src.chat_agent import loop, transcript
 from src.chat_agent.providers import chat_completions
@@ -85,7 +84,7 @@ def harness(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(foreground_model_routing, "endpoint_cost_tracked", lambda url: False)
     # Large window: the fallback fits without compaction unless a test says so.
-    monkeypatch.setattr(context_compactor, "get_context_length", lambda url, model: 128_000)
+    monkeypatch.setattr(transcript, "get_context_length", lambda url, model: 128_000)
     harness.row = _SessionRow()
     harness.db = _RecordingDb(harness.row)
     monkeypatch.setattr(chat_routes, "SessionLocal", lambda: harness.db)
@@ -231,15 +230,15 @@ async def test_new_runtime_compacts_once_for_a_smaller_fallback_window(harness, 
         for i in range(8)
     ]
     windows = {PRIMARY_MODEL: 128_000, BACKUP_MODEL: 2_000}
-    monkeypatch.setattr(context_compactor, "get_context_length", lambda url, model: windows[model])
-    monkeypatch.setattr(context_compactor, "resolve_endpoint", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(transcript, "get_context_length", lambda url, model: windows[model])
+    monkeypatch.setattr(transcript, "resolve_endpoint", lambda *a, **k: (None, None, None))
     summaries = []
 
     async def summarize(url, model, messages, **kwargs):
         summaries.append(model)
         return "the earlier turns, summarized"
 
-    monkeypatch.setattr(context_compactor, "llm_call_async", summarize)
+    monkeypatch.setattr(transcript, "llm_call_async", summarize)
     _script(monkeypatch, harness, {PRIMARY_MODEL: [503], BACKUP_MODEL: [["ok"]]})
 
     _, body = await harness.send(_Request("agent"))
@@ -251,7 +250,9 @@ async def test_new_runtime_compacts_once_for_a_smaller_fallback_window(harness, 
     assert backup["messages"][0] == primary["messages"][0]
     assert "the earlier turns, summarized" in backup["messages"][1]["content"]
     assert backup["messages"][-1] == primary["messages"][-1]
-    # Request-local: the stored history is left for the next turn's context builder.
+    # The kept part starts at a turn boundary.
+    assert backup["messages"][2]["role"] == "user"
+    # Request-local: the next turn compacts the stored chat at the sticky window.
     assert harness.session.history == []
 
 

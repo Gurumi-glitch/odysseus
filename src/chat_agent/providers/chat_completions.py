@@ -17,6 +17,7 @@ from src.chat_agent.providers import (
     RoundEnd,
     RoundEvent,
     TextDelta,
+    Usage,
     provider_key,
     replays_reasoning,
     tool_output_text,
@@ -45,6 +46,10 @@ from src.llm_core import (
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
 # reasoning_details (in order) and the reasoning_content of DeepSeek-style servers.
 _REASONING_FIELDS = ("reasoning_details", "reasoning_content")
+# Legacy stream_llm sends stream_options to every Chat Completions provider
+# except these two (llm_core, "Improve OpenRouter and Groq provider requests");
+# OpenRouter reports usage in its last chunk without it.
+_NO_STREAM_OPTIONS = frozenset({"openrouter", "groq"})
 
 
 def build_payload(
@@ -58,6 +63,9 @@ def build_payload(
     provider = _detect_provider(endpoint.url)
     messages = _messages(conversation, provider_key(endpoint.url), endpoint.model)
     payload: Dict[str, Any] = {"model": endpoint.model, "messages": messages, "stream": True}
+    if provider not in _NO_STREAM_OPTIONS:
+        # Compaction triggers on the usage the provider reports (#67).
+        payload["stream_options"] = {"include_usage": True}
     if tools:
         # parallel_tool_calls is never sent: the model may still issue several
         # calls per round, and the loop runs them one at a time (spec #44).
@@ -142,6 +150,7 @@ async def stream_round(
         reasoning_content = ""
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
+        usage = None
         async for line in response.aiter_lines():
             # SSE allows "data:value" without the space.
             if not line.startswith("data:"):
@@ -156,6 +165,8 @@ async def stream_round(
             if isinstance(chunk.get("error"), dict):
                 yield ProviderError(None, str(chunk["error"].get("message") or "Provider stream error"))
                 return
+            if isinstance(chunk.get("usage"), dict):
+                usage = _usage(chunk["usage"])
             for choice in chunk.get("choices") or ():
                 delta = choice.get("delta") or {}
                 # OpenRouter: "the complete reasoning sequence is built by
@@ -173,7 +184,17 @@ async def stream_round(
              "name": call["name"], "arguments": call["arguments"]}
             for _, call in sorted(calls.items())
         ]
-        yield RoundEnd(blocks, None)
+        yield RoundEnd(blocks, usage)
+
+
+def _usage(raw: Dict[str, Any]) -> Usage:
+    # prompt_tokens counts cached prompt tokens too; the details give the cached share.
+    return Usage(
+        input_tokens=int(raw.get("prompt_tokens") or 0),
+        cached_input_tokens=int((raw.get("prompt_tokens_details") or {}).get("cached_tokens") or 0),
+        output_tokens=int(raw.get("completion_tokens") or 0),
+        reasoning_tokens=int((raw.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0),
+    )
 
 
 def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any]) -> None:

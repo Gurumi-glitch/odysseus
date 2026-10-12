@@ -45,16 +45,10 @@ from src.chat_agent.providers import (
     TextDelta,
     chat_completions,
     provider_key,
-    tool_output_text,
     xai_responses,
 )
 from src.chat_agent.routing import ComposerToggles
 from src import settings
-# Relied on: with persist=False maybe_compact never writes session history.
-# When it compacts it returns the system messages, then one summary message,
-# then the kept non-system messages; compaction_state["split_point"] is the
-# index into the non-system messages where the kept half starts.
-from src.context_compactor import maybe_compact
 from src.llm_core import LLMConfig
 from src.model_context import estimate_tokens
 # Relies on: function_call_to_tool_block converts a native call into the
@@ -197,18 +191,22 @@ def _stream_round(
 
 async def _round_with_fallback(
     turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
-    tool_schemas: Sequence[Dict[str, Any]],
+    tool_schemas: Sequence[Dict[str, Any]], history_start: int, current: Dict[str, Any],
 ) -> AsyncIterator[Union[RoundEvent, Fallback]]:
     """One round on the turn's current candidate; a failure before any output
     with an eligible status moves to the next candidate (spec #44 Providers).
-    A failure after output passes through: switching would repeat streamed text."""
+    A failure after output passes through: switching would repeat streamed text.
+    A fallback whose window the history exceeds gets it compacted once
+    (``history_start`` and ``current``: see transcript.fit_request)."""
     candidates = turn.candidates
     start = next(i for i, candidate in enumerate(candidates) if candidate.endpoint == endpoint)
     failures: List[Dict[str, Any]] = []
     reason = ""
     for index in range(start, len(candidates)):
         candidate = candidates[index]
-        request = conversation if index == start else await _fit_window(turn, candidate.endpoint, conversation)
+        request = conversation if index == start else await transcript.fit_request(
+            conversation, history_start, current, candidate.endpoint, turn.owner,
+        )
         retry_left = len(candidates) == 1
         while True:
             failure = None
@@ -271,41 +269,6 @@ def _fallback_event(
     }
 
 
-async def _fit_window(
-    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Compact once when the history exceeds the fallback's window, with the
-    existing compaction until #67. Request-local: the next turn's context
-    builder compacts the stored history at the (now sticky) fallback window."""
-    view = [{"role": message["role"], "content": _plain_text(message)} for message in conversation]
-    state: Dict[str, Any] = {}
-    compacted_view, _, compacted = await maybe_compact(
-        turn.sess, endpoint.url, endpoint.model, view, endpoint.headers,
-        owner=turn.owner, persist=False, compaction_state=state,
-    )
-    if not compacted:
-        return conversation
-    system = [message for message in conversation if message["role"] == "system"]
-    rest = [message for message in conversation if message["role"] != "system"]
-    split = state["split_point"]
-    # A kept tool result needs its call: start the kept half at the call's round.
-    while split > 0 and rest[split]["role"] == "tool":
-        split -= 1
-    return [*system, compacted_view[len(system)], *rest[split:]]
-
-
-def _plain_text(message: Dict[str, Any]) -> Any:
-    """What the legacy compactor can measure and summarize: rounds as text."""
-    if "blocks" in message:
-        return "\n".join(
-            block["text"] if block["type"] == "text" else f"{block['name']}({block['arguments']})"
-            for block in message["blocks"] if block["type"] in ("text", "tool_call")
-        )
-    if message["role"] == "tool":
-        return tool_output_text(message)
-    return message.get("content") or ""
-
-
 def _round_record(end: RoundEnd) -> Dict[str, Any]:
     if end.usage is None:
         return {"blocks": end.blocks}
@@ -339,6 +302,13 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         writer.checkpoint()
 
     try:
+        # Before anything reads the history: the context builder, and the
+        # egress provenance the summary row carries over (#67). Nobody-mode
+        # history is a request-local transcript, never compacted.
+        if not turn.toggles.incognito:
+            window = await transcript.compact_history(sess, turn.session_id, endpoint, turn.owner)
+            if window:
+                yield _event({"type": "compacted", "context_length": window})
         caps = read_caps()
         rules = permissions.Rules.from_lists(store.user_rules(turn.owner))
         # The open email preview is both external content and a private read (ADR 0002).
@@ -381,7 +351,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             turn.skills_manager, turn.owner, turn.invoked_skill, catalog,
         )
         document = turn_context.load_document(turn.owner, turn.active_document_id)
-        conversation = await prompt.build_messages(
+        conversation, history_start = await prompt.build_messages(
             build_context,
             [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
@@ -396,6 +366,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 _setting_int("skill_index_max_chars", settings.DEFAULT_SETTINGS["skill_index_max_chars"]),
             ) if skills is not None else "",
         )
+        # The turn's user message: a fallback's compaction keeps it and what follows.
+        current = conversation[-1]
         tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
         scope = tools.ExecutionScope(
             owner=turn.owner,
@@ -416,7 +388,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             end = None
             streamed.clear()
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
-            async for event in _round_with_fallback(turn, endpoint, conversation, round_tools):
+            async for event in _round_with_fallback(
+                turn, endpoint, conversation, round_tools, history_start, current,
+            ):
                 if isinstance(event, Fallback):
                     endpoint, conversation = event.candidate.endpoint, event.conversation
                     usage.route = event.candidate
