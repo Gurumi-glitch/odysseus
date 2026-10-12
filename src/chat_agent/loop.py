@@ -396,6 +396,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             active_document_id=document.id if document is not None else None,
         )
         record.context = _context_projections(contexts[-1])
+        # Live counterpart of the stored projections: the browser draws the
+        # sources box and memory pill from these, before the model streams
+        # (legacy order). web_sources are not sent: this runtime does no prefetch.
+        for key in ("rag_sources", "memories_used"):
+            if record.context[key]:
+                yield _event({"type": key, "data": record.context[key]})
         tool_calls_used = 0
         guard = repeat_guard.RepeatGuard()
         round_tools = tool_schemas
