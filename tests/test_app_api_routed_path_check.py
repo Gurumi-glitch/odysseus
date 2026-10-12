@@ -1,12 +1,14 @@
-"""app_api refuses blocked routes by the path the server will route (fork #46)."""
+"""app_api checks the path the server will route (fork #46) against its allowlist (fork #71)."""
 
 import json
+import re
 
 import httpx
 import pytest
 
 from src.constants import internal_api_base
 from src.tool_implementations import do_app_api
+from src.tools.system import _APP_API_WRITES
 
 
 class _RecordingAsyncClient:
@@ -46,7 +48,7 @@ async def _call(method, path):
         pytest.param("GET", "/x/../api/auth/status", id="dot-segments-prefix"),
         pytest.param("POST", "/api/x/../users", id="dot-segments-users"),
         pytest.param("GET", "/api/./tokens", id="single-dot-segment"),
-        pytest.param("GET", "/%61pi/admin/x", id="percent-escape-prefix"),
+        pytest.param("GET", "/%61pi/auth/settings", id="percent-escape-prefix"),
         pytest.param("POST", "/api/%73hell/exec", id="percent-escape-shell"),
         pytest.param("POST", "/api/cookbook/x/../state", id="dot-segments-method-path"),
         pytest.param("POST", "/api/cookbook/%6Bill-pid", id="percent-escape-method-path"),
@@ -83,6 +85,53 @@ async def _call(method, path):
         pytest.param("PUT", "/api/skills/my-skill", id="skill-publish-or-user-only-toggle"),
         pytest.param("POST", "/api/skills/my-skill/markdown", id="skill-markdown-save"),
         pytest.param("PUT", "/api/skills/x/../my-skill", id="skill-write-dot-segments"),
+        pytest.param("POST", "/api/session", id="session-create"),
+        pytest.param("GET", "/api/prefs/some-key", id="prefs-read"),
+        pytest.param("GET", "/api/mcp/servers/m1/tools", id="mcp-read"),
+        # Allowlist audit classes (fork #71).
+        pytest.param("POST", "/api/companion/pair", id="credential-mint"),
+        pytest.param("POST", "/api/email/send", id="outbound-send-gate"),
+        pytest.param("POST", "/api/codex/emails/send", id="outbound-send-gate-alias"),
+        pytest.param("POST", "/api/email/schedule", id="outbound-schedule-gate"),
+        pytest.param("POST", "/api/email/pending/s1/approve", id="outbound-approval-gate"),
+        pytest.param("POST", "/api/email/accounts", id="account-credential-create"),
+        pytest.param("PUT", "/api/email/accounts/a1", id="account-credential-update"),
+        pytest.param("DELETE", "/api/email/accounts/a1", id="account-credential-delete"),
+        pytest.param("POST", "/api/calendar/config/accounts", id="account-credential-create-sibling"),
+        pytest.param("POST", "/api/calendar/config", id="account-config-write"),
+        pytest.param("PUT", "/api/email/config", id="account-config-write-sibling"),
+        pytest.param("PUT", "/api/contacts/config", id="account-config-write-alias"),
+        pytest.param("GET", "/api/export", id="secret-read-backup"),
+        pytest.param("GET", "/api/tasks/t1", id="secret-read-trigger-token"),
+        pytest.param("GET", "/api/mcp/servers", id="secret-read-server-env"),
+        pytest.param("GET", "/api/mcp/oauth/authorize/m1", id="sign-in-flow-read"),
+        pytest.param("GET", "/api/email/oauth/google/authorize", id="sign-in-flow-read-sibling"),
+        pytest.param("GET", "/api/webhooks", id="secret-read-hook-url"),
+        pytest.param("GET", "/api/prefs", id="secret-read-stored-passwords"),
+        pytest.param("DELETE", "/api/skills/s1", id="persistent-prompt-delete"),
+        pytest.param("DELETE", "/api/skills/builtin/b1", id="persistent-prompt-reset"),
+        pytest.param("POST", "/api/presets/custom", id="persistent-prompt-write"),
+        pytest.param("POST", "/api/presets/groups", id="persistent-prompt-write-sibling"),
+        pytest.param("POST", "/api/presets/templates", id="persistent-prompt-write-alias"),
+        pytest.param("DELETE", "/api/mcp/servers/m1", id="control-sibling-delete"),
+        pytest.param("POST", "/api/mcp/servers/m1/reconnect", id="control-sibling-reconnect"),
+        pytest.param("PATCH", "/api/webhooks/w1", id="hook-sibling-toggle"),
+        pytest.param("DELETE", "/api/webhooks/w1", id="hook-sibling-delete"),
+        pytest.param("POST", "/api/webhooks/w1/test", id="hook-sibling-fire"),
+        pytest.param("PATCH", "/api/model-endpoints/e1", id="endpoint-sibling-toggle"),
+        pytest.param("PATCH", "/api/model-endpoints/e1/models", id="endpoint-sibling-models"),
+        pytest.param("POST", "/api/tasks", id="scheduled-create"),
+        pytest.param("POST", "/api/tasks/t1/webhook-regenerate", id="scheduled-token-mint"),
+        pytest.param("POST", "/api/tasks/t1/run", id="scheduled-run"),
+        pytest.param("POST", "/api/tasks/t1/pause", id="scheduled-pause"),
+        pytest.param("POST", "/api/tasks/t1/resume", id="scheduled-resume"),
+        pytest.param("POST", "/api/tasks/t1/revert", id="scheduled-revert"),
+        pytest.param("PUT", "/api/tasks/t1", id="scheduled-update"),
+        pytest.param("DELETE", "/api/tasks/t1", id="scheduled-delete"),
+        pytest.param("POST", "/api/assistant/run/t1", id="scheduled-run-alias"),
+        pytest.param("POST", "/api/cleanup", id="history-bulk-cleanup"),
+        pytest.param("POST", "/api/sessions/auto-sort", id="history-bulk-sort"),
+        pytest.param("POST", "/api/research/spinoff/r1", id="history-spinoff"),
     ],
 )
 async def test_app_api_refuses_blocked_route(loopback, method, path):
@@ -96,11 +145,16 @@ async def test_app_api_refuses_blocked_route(loopback, method, path):
 @pytest.mark.parametrize(
     "method,path",
     [
-        pytest.param("GET", "/api/prefs/some-key", id="prefs-read"),
         pytest.param("GET", "/api/session/s1/context", id="session-read"),
-        pytest.param("POST", "/api/session", id="session-create"),
-        pytest.param("GET", "/api/mcp/servers/m1/tools", id="mcp-tools-read"),
         pytest.param("GET", "/api/cookbook/gpus", id="plain-read"),
+        pytest.param("GET", "/api/gallery/library", id="gallery-read"),
+        pytest.param("POST", "/api/gallery/albums", id="gallery-album-create"),
+        pytest.param("PUT", "/api/gallery/albums/a1", id="gallery-album-rename"),
+        pytest.param("POST", "/api/gallery/albums/a1/add", id="gallery-album-add"),
+        pytest.param("POST", "/api/gallery/albums/a1/remove", id="gallery-album-remove"),
+        pytest.param("POST", "/api/gallery/i1/favorite", id="gallery-favorite"),
+        pytest.param("POST", "/api/gallery/i1/rename", id="gallery-rename"),
+        pytest.param("PATCH", "/api/gallery/i1", id="gallery-patch"),
         pytest.param("GET", "/api/documents/foo%20bar", id="escaped-read"),
     ],
 )
@@ -109,3 +163,33 @@ async def test_app_api_sends_allowed_route_from_internal_base(loopback, method, 
 
     assert result["exit_code"] == 0
     assert loopback == [(method, httpx.URL(f"{internal_api_base()}{path}"))]
+
+
+def _concrete(template):
+    return re.sub(r"\{[^}]+\}", "x1", template)
+
+
+def _app_routes():
+    import app as app_module
+    from fastapi.routing import iter_route_contexts
+
+    for route in iter_route_contexts(app_module.app.routes):
+        for method in route.methods or ():
+            yield method, route.path
+
+
+async def test_app_api_sends_no_write_outside_the_allowlist(loopback):
+    routes = set(_app_routes())
+    allowed = set(_APP_API_WRITES)
+    assert allowed <= routes, f"allowlisted writes with no route: {allowed - routes}"
+
+    sent = []
+    for method, template in sorted(routes):
+        if method in ("GET", "HEAD", "OPTIONS") or (method, template) in allowed:
+            continue
+        result = await _call(method, _concrete(template))
+        if result["exit_code"] == 0:
+            sent.append((method, template))
+
+    assert sent == [], "new write routes need an app_api allowlist decision (fork #71)"
+    assert loopback == []
