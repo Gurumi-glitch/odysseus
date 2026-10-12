@@ -19,7 +19,6 @@ from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixture
     _tool_messages,
     admin,
     executor,
-    fresh_session_rules,
     harness,
     send_and_answer,
     workspace,
