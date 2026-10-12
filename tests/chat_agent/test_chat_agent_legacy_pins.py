@@ -293,3 +293,13 @@ def test_allowed_models_from_privileges_is_none_when_unrestricted():
     assert _allowed_models_from_privileges({}) is None
     assert _allowed_models_from_privileges({"allowed_models": ["a"]}) == frozenset({"a"})
     assert _allowed_models_from_privileges({"block_all_models": True}) == frozenset()
+
+
+def test_parse_agent_patch_lists_every_file_a_patch_touches_and_refuses_moves():
+    # permissions._patch_paths reads apply_patch's targets with it.
+    from src.agent_tools.filesystem_tools import _parse_agent_patch
+    patch = ("*** Begin Patch\n*** Add File: a.md\n+x\n*** Delete File: b.md\n"
+             "*** Update File: c.md\n@@\n-x\n+y\n*** End Patch")
+    assert [op["path"] for op in _parse_agent_patch(patch)] == ["a.md", "b.md", "c.md"]
+    with pytest.raises(ValueError):
+        _parse_agent_patch("*** Begin Patch\n*** Update File: a.md\n*** Move to: b.md\n*** End Patch")

@@ -29,6 +29,10 @@ from src import constants
 # Relies on: _load_mcp_disabled_map reads every server's disabled_tools from
 # the database on each call, as {server_id: set of server-local tool names}.
 from src.agent_loop import _load_mcp_disabled_map
+# Relies on: _parse_agent_patch is ApplyPatchTool's own patch reader; it
+# returns one {"path": ...} per file the patch adds, updates or deletes, and
+# raises ValueError on a patch the tool refuses.
+from src.agent_tools.filesystem_tools import _parse_agent_patch
 from src.chat_agent.routing import ComposerToggles
 from src.chat_agent.store import RULE_LISTS
 from src.path_confinement import canonical_root
@@ -418,7 +422,8 @@ def _args(content: Any) -> dict:
 def _path(content: Any) -> str:
     args = _args(content)
     if args:
-        return str(args.get("path") or "")
+        # The file tools strip the path they are given.
+        return str(args.get("path") or "").strip()
     # read_file: a bare path; write_file with a body: "<path>\n<content>".
     return str(content or "").split("\n", 1)[0].strip()
 
@@ -500,7 +505,8 @@ def _path_views(path: str, workspace: Optional[str]) -> Optional[List[str]]:
     if clean is None:
         return None
     if not workspace:
-        return [clean]
+        # Without a workspace the file tools open the path's realpath.
+        return [clean, os.path.realpath(os.path.expanduser(path))]
     try:
         resolved = _resolve_tool_path_in_workspace(workspace, path)
     except ValueError:
@@ -593,16 +599,60 @@ _STORED_TASK_ACTIONS = frozenset({"edit", "resume", "run"})
 _INSTRUCTION_NAMES = frozenset(name.casefold() for name in constants.INSTRUCTION_FILENAMES)
 
 
+# The keys ApplyPatchTool reads a JSON-wrapped patch from, in its order.
+_PATCH_KEYS = ("patch_text", "patchText", "patch")
+# Trailing characters SMB/NTFS-style mounts drop from a file name.
+_DROPPED_NAME_TAIL = ". "
+
+
+def _is_instruction_name(view: str) -> bool:
+    # Casefolded: a case-insensitive mount opens AGENTS.md for agents.md.
+    return posixpath.basename(view).rstrip(_DROPPED_NAME_TAIL).casefold() in _INSTRUCTION_NAMES
+
+
+def _targets_instruction_file(path: str, workspace: Optional[str]) -> bool:
+    views = _path_views(path, workspace)
+    return views is None or any(_is_instruction_name(view) for view in views)
+
+
+def _patch_paths(content: Any) -> Optional[List[str]]:
+    """The files an apply_patch call touches, as the tool reads them; None
+    when it would refuse the patch."""
+    text = str(content or "")
+    args = _args(text.strip()) if text.strip().startswith("{") else {}
+    if args:
+        text = str(next((args[key] for key in _PATCH_KEYS if args.get(key)), ""))
+    try:
+        return [op["path"] for op in _parse_agent_patch(text)]
+    except ValueError:
+        return None
+
+
+def _mentions_instruction_file(content: Any) -> bool:
+    """A shell call that names an instruction file, raw or JSON-decoded. A
+    tripwire only: a command can build the name at run time."""
+    raw = str(content or "")
+    texts = [raw]
+    try:
+        texts.append(json.dumps(json.loads(raw), ensure_ascii=False))
+    except ValueError:
+        pass
+    return any(name in text.casefold() for text in texts for name in _INSTRUCTION_NAMES)
+
+
 def _writes_instruction_file(tool: str, content: Any, workspace: Optional[str]) -> bool:
     """A write the next prompt and classifier would trust as the user's own
-    instructions; one whose target the matcher cannot place counts."""
+    instructions; one whose target the gate cannot place counts."""
     if tool == "apply_patch":
-        text = str(content or "").casefold()
-        return any(name in text for name in _INSTRUCTION_NAMES)
+        # The TUI host bridge applies the patch with its own reader: a patch
+        # this one refuses still counts.
+        paths = _patch_paths(content)
+        return paths is None or any(_targets_instruction_file(path, workspace) for path in paths)
+    if tool in _SHELL_TOOLS:
+        return _mentions_instruction_file(content)
     if tool not in _WRITE_PATH_TOOLS:
         return False
-    views = _path_views(_path(content), workspace)
-    return views is None or any(posixpath.basename(view).casefold() in _INSTRUCTION_NAMES for view in views)
+    return _targets_instruction_file(_path(content), workspace)
 
 
 def _raw_api_writes(tool: str, content: Any) -> bool:
