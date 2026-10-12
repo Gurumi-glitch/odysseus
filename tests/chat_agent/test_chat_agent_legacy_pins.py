@@ -100,3 +100,32 @@ def test_payload_follows_per_model_temperature_and_token_rules():
                               [], temperature=0.7, max_tokens=500)
     assert "temperature" not in reasoning
     assert reasoning["max_completion_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_maybe_compact_without_persist_returns_system_summary_then_kept_half(monkeypatch):
+    import src.context_compactor as context_compactor
+
+    async def summarize(*args, **kwargs):
+        return "summary text"
+
+    monkeypatch.setattr(context_compactor, "get_context_length", lambda url, model: 1_000)
+    monkeypatch.setattr(context_compactor, "resolve_endpoint", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(context_compactor, "llm_call_async", summarize)
+    monkeypatch.setattr(
+        context_compactor, "_update_session_history",
+        lambda *a, **k: pytest.fail("persist=False must not write session history"),
+    )
+    system = {"role": "system", "content": "sys"}
+    turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"t{i} " + "w " * 400}
+             for i in range(6)]
+    state = {}
+
+    result, _, compacted = await context_compactor.maybe_compact(
+        object(), "http://h/v1", "m", [system, *turns], persist=False, compaction_state=state,
+    )
+
+    assert compacted is True
+    assert result[0] is system
+    assert result[1]["role"] == "system" and "summary text" in result[1]["content"]
+    assert result[2:] == turns[state["split_point"]:]

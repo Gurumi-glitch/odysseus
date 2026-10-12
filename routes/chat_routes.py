@@ -35,7 +35,8 @@ from src.agent_loop import (
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
-from src.chat_agent.loop import ChatAgentTurn, run_chat_agent_turn
+from src.chat_agent.loop import Candidate, ChatAgentTurn, run_chat_agent_turn
+from src.chat_agent.providers import Endpoint
 from src.chat_agent.routing import CHAT_AGENT, ComposerToggles, TurnFacts, choose_runtime
 from src.model_context import estimate_tokens
 from src.context_compactor import (
@@ -2021,6 +2022,48 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
     return False
 
 
+def _persist_session_route(sess, session_id: str, *, model, endpoint_url, headers, endpoint_id) -> None:
+    """Point the session (in memory and its row) at this model route."""
+    sess.model = model
+    sess.endpoint_url = endpoint_url
+    sess.headers = headers or {}
+    sess.endpoint_id = endpoint_id or None
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.model = model
+            db_session.endpoint_url = endpoint_url
+            db_session.endpoint_id = sess.endpoint_id
+            db_session.headers = sess.headers
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: list, event: dict) -> None:
+    """A fallback answered: the chat stays on it until the user picks another
+    model (spec #44: fallback is sticky on both runtimes).
+
+    The event names the answering route by model and endpoint id; a model can
+    sit on several endpoints, so both must match. ``candidates`` and
+    ``descriptors`` are the parallel foreground lists of this turn.
+    """
+    for (url, model, headers), descriptor in zip(candidates[1:], descriptors[1:]):
+        if (
+            model == event.get("answered_by")
+            and descriptor.get("endpoint_id") == event.get("answered_by_endpoint_id")
+        ):
+            _persist_session_route(
+                sess, session_id, model=model, endpoint_url=url, headers=headers,
+                endpoint_id=descriptor.get("endpoint_id"),
+            )
+            return
+    logger.warning("Fallback answered by %r is not a candidate of %s; session route kept",
+                   event.get("answered_by"), session_id)
+
+
 def _reconcile_selected_route_from_request(
     request: Request,
     sess,
@@ -2097,27 +2140,16 @@ def _reconcile_selected_route_from_request(
     if not route_changed and not headers_changed and not binding_changed:
         return False
 
-    sess.model = selected_model
-    sess.endpoint_url = endpoint_url
-    sess.headers = headers or {}
-    if resolved_endpoint_id:
-        sess.endpoint_id = resolved_endpoint_id
-    elif route_changed:
+    _persist_session_route(
+        sess,
+        session_id,
+        model=selected_model,
+        endpoint_url=endpoint_url,
+        headers=headers,
         # The route moved without an explicit endpoint id: drop a stale binding
         # rather than keep pointing at an endpoint the session no longer uses.
-        sess.endpoint_id = None
-    db = SessionLocal()
-    try:
-        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
-        if db_session:
-            db_session.model = selected_model
-            db_session.endpoint_url = endpoint_url
-            db_session.endpoint_id = getattr(sess, "endpoint_id", None) or None
-            db_session.headers = sess.headers or {}
-            db_session.updated_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
+        endpoint_id=resolved_endpoint_id or (None if route_changed else getattr(sess, "endpoint_id", None)),
+    )
     logger.info(
         "Reconciled selected route for %s: model=%r endpoint=%s route_changed=%s headers_changed=%s",
         session_id,
@@ -2967,6 +2999,10 @@ def setup_chat_routes(
             use_rag = "false"
             search_context = None
 
+        foreground_policy = resolve_foreground_model_policy(
+            owner=owner,
+            allowed_models=_allowed_models_for_request(request),
+        )
         # The runtime is picked once here, before compact-preview selection,
         # context prefetching, deny-set assembly and turn-contract binding.
         # The legacy promotion above still decides whether this is an agent
@@ -2989,6 +3025,22 @@ def setup_chat_routes(
         ))
         if runtime == CHAT_AGENT:
             set_session_mode(session, "agent")
+            fallback_routes = build_foreground_route_descriptors(
+                sess.endpoint_url, sess.model, sess.headers,
+                owner=owner,
+                policy=foreground_policy,
+                selected_endpoint_id=selected_endpoint_id or getattr(sess, "endpoint_id", None),
+            )
+            fallback_candidates = [
+                Candidate(Endpoint(url, model, headers), route)
+                for (url, model, headers), route in zip(
+                    build_foreground_model_candidates(
+                        sess.endpoint_url, sess.model, sess.headers,
+                        owner=owner, policy=foreground_policy,
+                    ),
+                    fallback_routes,
+                )
+            ]
             chat_agent_run = agent_runs.start(session, run_chat_agent_turn(ChatAgentTurn(
                 session_id=session,
                 sess=sess,
@@ -3017,6 +3069,15 @@ def setup_chat_routes(
                     interaction_mode="agent",
                     auto_escalated=auto_escalated,
                 ),
+                candidates=fallback_candidates,
+                fallback_statuses=foreground_policy.eligible_statuses,
+                stick_route=lambda candidate: _persist_session_route(
+                    sess, session,
+                    model=candidate.endpoint.model,
+                    endpoint_url=candidate.endpoint.url,
+                    headers=candidate.endpoint.headers,
+                    endpoint_id=candidate.route.get("endpoint_id"),
+                ),
             )), runtime=CHAT_AGENT)
             return StreamingResponse(
                 agent_runs.subscribe(session, chat_agent_run),
@@ -3032,10 +3093,6 @@ def setup_chat_routes(
             last_user_message=message,
         )
         allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
-        foreground_policy = resolve_foreground_model_policy(
-            owner=owner,
-            allowed_models=_allowed_models_for_request(request),
-        )
 
         # Decide once whether this turn runs on the compact (clean v3)
         # runtime. Every input is final here; the native workspace term of
@@ -4238,6 +4295,10 @@ def setup_chat_routes(
                                         )
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
                                     data["selected_model"] = data.get("selected_model") or _requested_model
+                                    _stick_to_fallback(
+                                        sess, session, _foreground_candidates,
+                                        _foreground_route_descriptors, data,
+                                    )
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "model_actual":
                                     if _commit_chat_compaction(_actual_candidate_index):
@@ -4728,6 +4789,10 @@ def setup_chat_routes(
                                     _agent_round_endpoint_ids[_event_round] = _agent_actual_endpoint_id
                                     _agent_round_endpoint_labels[_event_round] = _agent_actual_endpoint_label
                                     data["selected_model"] = data.get("selected_model") or _requested_model
+                                    _stick_to_fallback(
+                                        sess, session, _foreground_candidates,
+                                        _foreground_route_descriptors, data,
+                                    )
                                     yield chunk
                                 elif data.get("type") == "model_actual":
                                     _actual_model = data.get("model") or _actual_model
