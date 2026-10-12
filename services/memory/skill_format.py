@@ -81,8 +81,10 @@ def slugify(text: str, fallback: str = "skill") -> str:
 # a new dependency.
 
 # Hyphens are allowed for Claude-style keys such as `disable-model-invocation`.
-_FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_-]*):\s*(.*)$", re.IGNORECASE)
-_FM_BLOCK_LIST_RE = re.compile(r"^\s*-\s*(.*)$")
+# No `\s*` before the value group: it overlapped `(.*)` (polynomial backtracking);
+# callers strip the value themselves.
+_FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_-]*):(.*)$", re.IGNORECASE)
+_FM_BLOCK_LIST_RE = re.compile(r"^\s*-(.*)$")
 
 
 def _parse_scalar(raw: str) -> Any:
