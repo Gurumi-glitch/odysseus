@@ -879,8 +879,14 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             from src.model_context import estimate_tokens, get_context_length
             from src.model_profiles import supports_user_thinking_toggle
 
+            from src.chat_agent.transcript import reported_context_tokens
+
             messages = session.get_context_messages()
-            used = int(estimate_tokens(messages))
+            # New-runtime chats: the last usage the provider reported (it
+            # includes the system prompt and tool schemas no estimate sees)
+            # plus the rows saved after it (#67).
+            reported = reported_context_tokens(session.history)
+            used = int(reported if reported is not None else estimate_tokens(messages))
             ctx_len = int(get_context_length(session.endpoint_url, session.model) or 0)
             thinking_supported = supports_user_thinking_toggle(session.model)
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0

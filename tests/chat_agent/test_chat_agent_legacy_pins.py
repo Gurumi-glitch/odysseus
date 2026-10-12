@@ -116,33 +116,17 @@ def test_payload_follows_per_model_temperature_and_token_rules():
     assert reasoning["max_completion_tokens"] == 500
 
 
-@pytest.mark.asyncio
-async def test_maybe_compact_without_persist_returns_system_summary_then_kept_half(monkeypatch):
+@pytest.mark.parametrize(("configured", "threshold"), [(None, 85), (10, 50), (99, 95), ("x", 85)])
+def test_compaction_helpers_transcript_relies_on(monkeypatch, configured, threshold):
     import src.context_compactor as context_compactor
 
-    async def summarize(*args, **kwargs):
-        return "summary text"
-
-    monkeypatch.setattr(context_compactor, "get_context_length", lambda url, model: 1_000)
-    monkeypatch.setattr(context_compactor, "resolve_endpoint", lambda *a, **k: (None, None, None))
-    monkeypatch.setattr(context_compactor, "llm_call_async", summarize)
-    monkeypatch.setattr(
-        context_compactor, "_update_session_history",
-        lambda *a, **k: pytest.fail("persist=False must not write session history"),
-    )
-    system = {"role": "system", "content": "sys"}
-    turns = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"t{i} " + "w " * 400}
-             for i in range(6)]
-    state = {}
-
-    result, _, compacted = await context_compactor.maybe_compact(
-        object(), "http://h/v1", "m", [system, *turns], persist=False, compaction_state=state,
-    )
-
-    assert compacted is True
-    assert result[0] is system
-    assert result[1]["role"] == "system" and "summary text" in result[1]["content"]
-    assert result[2:] == turns[state["split_point"]:]
+    monkeypatch.setattr(context_compactor, "get_setting", lambda key, default=None: (
+        default if configured is None else configured
+    ))
+    assert context_compactor.auto_compact_threshold_percent() == threshold
+    assert "{count}" in context_compactor.SELF_SUMMARY_SYSTEM_PROMPT
+    assert "{n}" in context_compactor.SELF_SUMMARY_SYSTEM_PROMPT
+    assert context_compactor.normalize_compaction_summary("## Conversation Summary\nbody") == "body"
 
 
 # --- #50: tools, permissions and the execution wrapper ---------------------

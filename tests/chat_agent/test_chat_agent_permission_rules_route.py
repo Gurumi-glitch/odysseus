@@ -6,7 +6,6 @@ stream stays open, as the browser does.
 """
 
 import json
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,6 +15,7 @@ import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_security as tool_security
 from core import database
+from core.models import ChatMessage
 from src.chat_agent import permissions, store
 from tests.chat_agent.test_chat_agent_asks_route import answer_request, post_answer, send_and_answer
 from tests.chat_agent.test_chat_agent_route import (
@@ -227,7 +227,7 @@ async def test_an_egress_ask_cannot_be_allowed_for_the_whole_chat(harness, ran):
 
 @pytest.mark.asyncio
 async def test_email_read_in_an_earlier_turn_still_arms_the_egress_gate(harness, ran):
-    harness.session.history = [SimpleNamespace(role="assistant", content="Your mail says ...", metadata={
+    harness.session.history = [ChatMessage("assistant", "Your mail says ...", metadata={
         "tool_events": [{"tool": "mcp__email__read_email", "status": "done"}],
     })]
 

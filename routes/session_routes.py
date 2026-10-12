@@ -1304,7 +1304,11 @@ def setup_session_routes(
                 "timestamp": utcnow_naive().isoformat(),
             },
         )
-        new_history = [summary_msg] + recent
+        from src.chat_agent.transcript import compacted_history
+
+        # The summary keeps the egress provenance of the rows it replaces, and
+        # kept new-runtime rows drop the usage that measured the old history.
+        new_history = compacted_history(summary_msg, older, recent)
         if not session_manager.replace_messages(session_id, new_history):
             raise HTTPException(500, "Failed to save compacted history")
 
