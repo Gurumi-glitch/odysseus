@@ -114,6 +114,11 @@ def get_run_id(session_id: str) -> Optional[str]:
     return r.run_id if r else None
 
 
+def snapshot_runs() -> Dict[str, _Run]:
+    """Copy of every registered run, safe to iterate while runs come and go."""
+    return dict(_RUNS)
+
+
 def get_active_run(session_id: str) -> Optional[_Run]:
     """Return the exact active run currently registered for a session."""
     r = _RUNS.get(session_id)
