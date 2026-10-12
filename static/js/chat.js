@@ -1775,6 +1775,26 @@ import { invalidateSettings } from './appConfig.js';
       return;
     }
 
+    // While a chat_agent ask waits, a composer send answers it: a chat_stream
+    // send would cancel the waiting run (spec #44, Asks). Synthetic sends
+    // (voice, Continue) click the same button, so they land here too.
+    const pendingAskCard = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)');
+    const pendingAsk = pendingAskCard ? pendingAskCard._askUser : null;
+    if (pendingAsk && pendingAsk.session_id === sessionId) {
+      const askInput = uiModule.el('message');
+      const askText = (askInput ? askInput.value : '').trim();
+      if (askText) {
+        // Only question asks take free text; on a permission or repeat-guard
+        // ask the text is the deny reason the model reads back.
+        const decision = pendingAsk.ask_kind === 'question' ? 'answer' : 'deny';
+        chatRenderer.answerChatAsk(sessionId, pendingAsk.ask_id, decision, askText);
+        chatRenderer.resolveAskUserCard(pendingAsk.ask_id, { decision, reason: askText });
+        askInput.value = '';
+        if (uiModule.autoResize) uiModule.autoResize(askInput);
+        return;
+      }
+    }
+
     // If currently streaming, keyboard Enter can queue a non-empty composer.
     // Clicking the stop icon should still stop normally, even if text exists.
     if (isStreaming) {
@@ -5023,12 +5043,18 @@ import { invalidateSettings } from './appConfig.js';
 
               } else if (json.type === 'ask_user') {
                 if (_isBg) continue;
-                // The agent posed a multiple-choice question; the turn has ended.
+                // The agent posed a question. On legacy the turn has ended; on
+                // chat_agent it waits in place and the answer goes to the ask
+                // endpoint, so the card is routed by the run's runtime header.
                 // Use the shared history renderer so the live and restored
                 // versions have identical behavior.
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                chatRenderer.renderAskUserCard(json.data || {});
+                chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime') });
+
+              } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
+                if (_isBg) continue;
+                chatRenderer.resolveAskUserCard(json.ask_id, json);
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -6474,6 +6500,24 @@ import { invalidateSettings } from './appConfig.js';
             }
           } else if (json.type === 'message_saved') {
             replayMessageId = String(json.id || '');
+          } else if (json.type === 'ask_user') {
+            // A chat_agent ask waits in place; the replayed card (routed by the
+            // run's runtime header) replaces the one history rendered.
+            rich = true;
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime'), focus: false });
+          } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
+            chatRenderer.resolveAskUserCard(json.ask_id, json);
+          } else if (json.type === 'plan_update') {
+            rich = true;
+            const plan = (json.data && json.data.plan) ? json.data.plan : '';
+            if (plan) _setStoredPlan(plan);
+          } else if (json.type === 'doc_update') {
+            rich = true;
+            if (documentModule) documentModule.handleDocUpdate(json);
+          } else if (json.type === 'doc_suggestions') {
+            rich = true;
+            if (documentModule && documentModule.handleDocSuggestions) documentModule.handleDocSuggestions(json);
           } else if (json.type === 'fallback') {
             // Replay can attach after the selected route has already failed.
             // Reflect the fallback immediately, then reload the canonical

@@ -2988,6 +2988,66 @@ function _answerAskUserCards(root, text) {
   });
 }
 
+const CHAT_AGENT_RUNTIME = 'chat_agent';
+// ask_expired causes (src/chat_agent/asks.py, transcript.py).
+const ASK_EXPIRED_CAUSES = {
+  timeout: 'no answer in time',
+  restart: 'the server restarted',
+  cancel: 'the turn was stopped',
+};
+
+/**
+ * Mark a chat_agent ask card read-only. `resolution` is the stream's
+ * ask_resolved / ask_expired event, or the stored card's `resolved` /
+ * `expired_cause` on reload.
+ */
+function _settleAskUserCard(card, aq, resolution) {
+  const r = resolution || {};
+  if (r.type === 'ask_expired' || r.resolved === 'expired') {
+    const cause = r.cause || r.expired_cause || '';
+    const settled = !card.classList.contains('ask-user-answered');
+    _markAskUserAnswered(card, ASK_EXPIRED_CAUSES[cause] || cause);
+    if (settled) card.querySelector('.ask-user-answer-label').textContent = 'Expired';
+    return;
+  }
+  const decision = r.decision || r.resolved || '';
+  const option = (Array.isArray(aq.options) ? aq.options : []).find((opt) => opt && opt.value === decision);
+  const label = option ? String(option.label) : (decision === 'answer' ? '' : decision);
+  _markAskUserAnswered(card, [label, r.reason].filter(Boolean).join(' — '));
+}
+
+/** Settle the live card of a chat_agent ask when its ask_resolved / ask_expired event arrives. */
+export function resolveAskUserCard(askId, event) {
+  if (!askId) return;
+  document.querySelectorAll('.ask-user-card').forEach((card) => {
+    if (card.dataset.askId === String(askId)) _settleAskUserCard(card, card._askUser || {}, event);
+  });
+}
+
+/**
+ * Answer a chat_agent ask. The only answer path: a chat_stream send would
+ * cancel the waiting run (spec #44, Asks). The turn's ask_resolved event
+ * settles the card; a refusal (409: the ask is no longer open) is shown.
+ */
+export async function answerChatAsk(sessionId, askId, decision, text) {
+  const apiBase = window.API_BASE || '';
+  let detail = '';
+  try {
+    const res = await fetch(`${apiBase}/api/chat/ask/${encodeURIComponent(sessionId)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ask_id: askId, decision, text: text || '' }),
+    });
+    if (res.ok) return;
+    const body = await res.json().catch(() => ({}));
+    detail = body.detail || `Could not answer (${res.status})`;
+  } catch (err) {
+    detail = `Could not answer: ${err.message}`;
+  }
+  if (uiModule?.showToast) uiModule.showToast(detail);
+}
+
 // While a choice card is visible, let plain 1–3 activate the corresponding
 // rendered option. Reuse the option's click path so the question keeps its
 // existing submission semantics. Tool approval cards are excluded: that card
@@ -3033,16 +3093,22 @@ document.addEventListener('keydown', _handleAskUserShortcut);
  */
 export function renderAskUserCard(payload, options) {
   const aq = payload || {};
-  if (aq.resolved) return null;
-  const opts = Array.isArray(aq.options) ? aq.options : [];
   const renderOptions = options || {};
+  // `runtime` is the live run's X-Odysseus-Runtime header (or the stored
+  // row's metadata.runtime). Only chat_agent asks answer through the ask
+  // endpoint and render resolved cards read-only (spec #44, Asks); legacy
+  // cards keep their composer / approval-event paths and stay hidden once
+  // resolved.
+  const chatAsk = renderOptions.runtime === CHAT_AGENT_RUNTIME && !!aq.ask_id;
+  if (aq.resolved && !chatAsk) return null;
+  const opts = Array.isArray(aq.options) ? aq.options : [];
   const chatBox = renderOptions.root || document.getElementById('chat-history');
   const onSubmit = typeof renderOptions.onSubmit === 'function'
     ? renderOptions.onSubmit
     : null;
   if (!chatBox || !aq.question || opts.length < 2) return null;
 
-  removeAskUserCards(chatBox);
+  if (!aq.resolved) removeAskUserCards(chatBox);
 
   const card = document.createElement('div');
   card.className = 'ask-user-card';
@@ -3051,6 +3117,11 @@ export function renderAskUserCard(payload, options) {
   const multi = !!aq.multi;
   const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
   card.dataset.askUserKind = isToolApproval ? 'tool_approval' : 'question';
+  if (chatAsk) {
+    card.dataset.askId = String(aq.ask_id);
+    card._askUser = aq;
+  }
+  const isQuestion = aq.ask_kind === 'question';
   const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
 
   const question = document.createElement('div');
@@ -3059,6 +3130,15 @@ export function renderAskUserCard(payload, options) {
   question.innerHTML = emojiText(aq.question);
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
+
+  if (chatAsk && aq.description) {
+    // Permission cards spell out what a scheduled task would run (#40).
+    const description = document.createElement('div');
+    description.className = 'ask-user-option-desc';
+    description.textContent = aq.description;
+    description.style.whiteSpace = 'pre-wrap';
+    card.appendChild(description);
+  }
 
   if (isToolApproval && aq.action) {
     const action = document.createElement('div');
@@ -3081,8 +3161,17 @@ export function renderAskUserCard(payload, options) {
   list.className = 'ask-user-options';
   card.appendChild(list);
 
+  const answerAsk = (decision, text) => {
+    answerChatAsk(aq.session_id, aq.ask_id, decision, text);
+    _settleAskUserCard(card, aq, { decision, reason: text });
+  };
+
   const send = (text) => {
     if (!text) return;
+    if (chatAsk) {
+      answerAsk('answer', text);
+      return;
+    }
     if (onSubmit) {
       const accepted = onSubmit({
         kind: 'answer',
@@ -3126,6 +3215,13 @@ export function renderAskUserCard(payload, options) {
     if (!multi) {
       row.type = 'button';
       row.addEventListener('click', () => {
+        if (chatAsk && !isQuestion) {
+          // Only Deny carries the typed reason: the runtime reads text on no
+          // other permission decision (loop._permission_decision).
+          const decision = String((opt && opt.value) || '').toLowerCase();
+          answerAsk(decision, decision === 'deny' ? otherInput.value.trim() : '');
+          return;
+        }
         if (isToolApproval) {
           const detail = {
             approval_id: aq.approval_id,
@@ -3160,17 +3256,26 @@ export function renderAskUserCard(payload, options) {
   const otherInput = document.createElement('input');
   otherInput.type = 'text';
   otherInput.className = 'styled-prompt-input ask-user-other-input';
-  otherInput.placeholder = multi ? 'Other (added to selection)…' : 'Other… (type your own answer)';
-  otherInput.setAttribute('aria-label', multi ? 'Add a custom option' : 'Type a custom answer');
+  // A permission ask's text box is the deny reason the model reads back; a
+  // repeat-guard Stop reads none, so that card gets no box.
+  const denyReason = chatAsk && aq.ask_kind === 'permission';
+  otherInput.placeholder = denyReason
+    ? 'Reason for denying (optional)…'
+    : (multi ? 'Other (added to selection)…' : 'Other… (type your own answer)');
+  otherInput.setAttribute('aria-label', denyReason
+    ? 'Reason for denying'
+    : (multi ? 'Add a custom option' : 'Type a custom answer'));
   const otherSend = document.createElement('button');
   otherSend.type = 'button';
   otherSend.className = 'confirm-btn confirm-btn-primary ask-user-other-send';
-  otherSend.setAttribute('aria-label', 'Send answer');
-  otherSend.title = multi ? 'Send selection' : 'Send answer';
+  otherSend.setAttribute('aria-label', denyReason ? 'Deny with this reason' : 'Send answer');
+  otherSend.title = denyReason ? 'Deny with this reason' : (multi ? 'Send selection' : 'Send answer');
   otherSend.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const submit = () => {
     const freeText = otherInput.value.trim();
-    if (multi) {
+    if (denyReason) {
+      if (freeText) answerAsk('deny', freeText);
+    } else if (multi) {
       const picked = Array.from(card.querySelectorAll('.ask-user-option input:checked')).map((input) => input.value);
       if (freeText) picked.push(freeText);
       if (picked.length) send(picked.join(', '));
@@ -3187,7 +3292,8 @@ export function renderAskUserCard(payload, options) {
   });
   other.appendChild(otherInput);
   other.appendChild(otherSend);
-  if (!isToolApproval) card.appendChild(other);
+  if (!isToolApproval || denyReason) card.appendChild(other);
+  if (aq.resolved) _settleAskUserCard(card, aq, aq);
 
   const previous = chatBox.lastElementChild;
   const previousIsThread = previous?.classList?.contains('agent-thread');
@@ -3394,6 +3500,10 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
+            else if (ev.ask_user && metadata.runtime === CHAT_AGENT_RUNTIME) {
+              // Answered and expired asks stay in the timeline, read-only (#60).
+              renderAskUserCard(ev.ask_user, { runtime: metadata.runtime, focus: false, scroll: false });
+            }
             const ok = (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
@@ -3471,7 +3581,7 @@ export function addMessage(role, content, modelName, metadata) {
         // Session history is rendered oldest-to-newest.  A later user message
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
-        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+        renderAskUserCard(pendingAskUser, { runtime: metadata.runtime, focus: false, scroll: false });
       }
       return lastWrap;
     }
@@ -3866,6 +3976,8 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,
+  resolveAskUserCard,
+  answerChatAsk,
   buildSourcesBox,
   buildFindingsBox,
   buildRagSourcesBox,
