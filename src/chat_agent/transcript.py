@@ -15,6 +15,15 @@ from core.models import ChatMessage
 from src.chat_agent.routing import CHAT_AGENT
 
 
+# Why a turn ended early (metadata.stop_reason; #65 renders it). A turn that
+# ends because the model stopped calling tools has none.
+STOP_MAX_ROUNDS = "max_rounds"
+STOP_BUDGET = "budget"
+STOP_INTERRUPTED = "interrupted"
+STOP_REPEAT_GUARD = "repeat_guard"
+STOP_ASK_EXPIRED = "ask_expired"
+
+
 @dataclass
 class TurnRecord:
     provider: str
@@ -25,6 +34,7 @@ class TurnRecord:
     rounds: List[Dict[str, Any]] = field(default_factory=list)
     # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
     tool_events: List[Dict[str, Any]] = field(default_factory=list)
+    stop_reason: Optional[str] = None
 
     @property
     def round_texts(self) -> List[str]:
@@ -50,6 +60,8 @@ class TurnRecord:
         }
         if self.tool_events:
             metadata["tool_events"] = list(self.tool_events)
+        if self.stop_reason:
+            metadata["stop_reason"] = self.stop_reason
         return metadata
 
     def content(self) -> str:

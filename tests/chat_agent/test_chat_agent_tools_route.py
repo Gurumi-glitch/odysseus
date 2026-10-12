@@ -15,7 +15,7 @@ import src.search.content as search_content
 import src.tool_security as tool_security
 import src.tool_utils as tool_utils
 from core import database
-from src.chat_agent.tools import DEFERRED_TOOLS
+from src.chat_agent.tools import DEFERRED_TOOLS, TOOL_SEARCH
 from tests.chat_agent.test_chat_agent_route import (
     _Harness,
     _Request,
@@ -125,7 +125,8 @@ async def test_upfront_catalog_is_the_everyday_built_ins_once(harness, admin):
 
     [payload] = harness.captured["provider_requests"]
     names = _tool_names(payload)
-    assert len(names) == 57
+    # 57 everyday built-ins plus the runtime's tool_search (#58).
+    assert len(names) == 58 and names[-1] == TOOL_SEARCH
     assert len(set(names)) == len(names)
     assert not set(names) & DEFERRED_TOOLS
     assert {"manage_notes", "send_email", "list_emails", "web_search", "bash"} <= set(names)
@@ -175,6 +176,9 @@ async def test_nobody_mode_denies_memory_tools(harness, admin):
 
 
 class _FakeMcp:
+    def get_all_openai_schemas(self, disabled_map=None):
+        return []
+
     def plan_mode_blocked_mcp(self):
         return {"github": {"create_issue"}}, {"mcp__github__create_issue"}
 
@@ -223,30 +227,6 @@ async def test_a_404_web_fetch_returns_an_error_result_and_the_turn_goes_on(harn
     assert row.content == "That page returned 404."
     [event] = row.metadata["tool_events"]
     assert (event["status"], event["exit_code"], event["error"]) == ("failed", 1, True)
-
-
-@pytest.mark.asyncio
-async def test_an_ask_posture_call_returns_a_denial_until_asks_arrive(harness, admin, monkeypatch):
-    import src.tool_execution as tool_execution
-    ran = []
-
-    async def executor(*args, **kwargs):
-        ran.append(args)
-        return "bash", {"output": "", "exit_code": 0}
-
-    monkeypatch.setattr(tool_execution, "_execute_tool_block_impl", executor)
-    harness.provider_rounds = [
-        _sse_tool_calls(("bash", {"command": "ls"})),
-        _sse_events(["I need your approval to run that."]),
-    ]
-
-    _, body = await harness.send(_Request("agent", allow_bash="true"))
-
-    assert ran == []
-    [output] = _tool_events(_data_events(body), "tool_output")
-    assert output["exit_code"] == 126
-    _, second = harness.captured["provider_requests"]
-    assert "approval" in json.loads(_tool_messages(second)[0]["content"])["error"]
 
 
 @pytest.mark.asyncio
