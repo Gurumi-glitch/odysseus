@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from core.models import ChatMessage
 from src.attachment_refs import persistable_message_content
 from src.chat_agent import tools
+from src.chat_agent.asks import RESOLVED_EXPIRED
 from src.chat_agent.routing import CHAT_AGENT
 # Relies on: _grant_key returns the persistent application key (the same bytes
 # across restarts) or None when it is unavailable.
@@ -46,6 +47,7 @@ STOP_INTERRUPTED = "interrupted"
 STOP_REPEAT_GUARD = "repeat_guard"
 # A provider error or crash after the row was first checkpointed.
 STOP_ERROR = "error"
+STOP_ASK_EXPIRED = "ask_expired"
 
 
 @dataclass
@@ -63,6 +65,9 @@ class TurnRecord:
     # Context the route resolved for this turn, projected as save_assistant_response
     # does: character_name, web_sources, rag_sources, memories_used.
     context: Dict[str, Any] = field(default_factory=dict)
+    # The tool event of a call waiting on an ask: its card and no exit code
+    # yet. Checkpointed so a restart can expire the ask (spec #44, Transcript).
+    pending_ask: Optional[Dict[str, Any]] = None
 
     @property
     def round_texts(self) -> List[str]:
@@ -86,8 +91,9 @@ class TurnRecord:
             "round_texts": list(self.round_texts),
             "model": self.model,
         }
-        if self.tool_events:
-            metadata["tool_events"] = list(self.tool_events)
+        tool_events = self.tool_events + ([self.pending_ask] if self.pending_ask else [])
+        if tool_events:
+            metadata["tool_events"] = tool_events
         thinking = _thinking(self.rounds)
         if thinking:
             metadata["thinking"] = thinking
@@ -107,6 +113,9 @@ class TurnRecord:
         Every round must replay as complete call/result pairs; a call still
         waiting on an ask keeps its card, now resolved as expired.
         """
+        if self.pending_ask:
+            self.tool_events.append(self.pending_ask)
+            self.pending_ask = None
         close_open_calls(self.rounds, self.tool_events, reason, ask_cause, self.model)
 
 
@@ -131,7 +140,7 @@ def close_open_calls(
             pending.update(status=tools.STATUS_CANCELLED, exit_code=tools.EXIT_CANCELLED, error=True)
             ask = pending.get("ask_user")
             if isinstance(ask, dict) and not ask.get("resolved"):
-                ask.update(resolved="expired", expired_cause=ask_cause)
+                ask.update(resolved=RESOLVED_EXPIRED, expired_cause=ask_cause)
         if not results:
             turn_round.pop("results")
 

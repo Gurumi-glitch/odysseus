@@ -226,30 +226,6 @@ async def test_a_404_web_fetch_returns_an_error_result_and_the_turn_goes_on(harn
 
 
 @pytest.mark.asyncio
-async def test_an_ask_posture_call_returns_a_denial_until_asks_arrive(harness, admin, monkeypatch):
-    import src.tool_execution as tool_execution
-    ran = []
-
-    async def executor(*args, **kwargs):
-        ran.append(args)
-        return "bash", {"output": "", "exit_code": 0}
-
-    monkeypatch.setattr(tool_execution, "_execute_tool_block_impl", executor)
-    harness.provider_rounds = [
-        _sse_tool_calls(("bash", {"command": "ls"})),
-        _sse_events(["I need your approval to run that."]),
-    ]
-
-    _, body = await harness.send(_Request("agent", allow_bash="true"))
-
-    assert ran == []
-    [output] = _tool_events(_data_events(body), "tool_output")
-    assert output["exit_code"] == 126
-    _, second = harness.captured["provider_requests"]
-    assert "approval" in json.loads(_tool_messages(second)[0]["content"])["error"]
-
-
-@pytest.mark.asyncio
 async def test_unusable_arguments_fail_back_to_the_model(harness):
     harness.provider_rounds = [
         _sse_tool_calls(("web_search", {})),

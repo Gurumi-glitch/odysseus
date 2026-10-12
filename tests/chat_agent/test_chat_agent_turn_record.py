@@ -6,7 +6,6 @@ SessionManager on a throwaway SQLite database.
 """
 
 import asyncio
-import copy
 import json
 from datetime import datetime
 
@@ -230,21 +229,60 @@ async def test_a_cancelled_turn_replays_as_complete_pairs(harness, monkeypatch, 
     assert json.loads(_tool_messages(payload)[1]["content"])["status"] == "cancelled"
 
 
+async def _stop_while_an_ask_is_pending(harness, monkeypatch, tmp_path):
+    """A bash call raises a permission ask; the run stops while it waits.
+    Returns the row as checkpointed while the ask was pending."""
+    monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", lambda owner: True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness.provider_rounds = [_sse_tool_calls(("bash", {"command": "ls"}))]
+    send = asyncio.create_task(harness.send(_Request("agent", allow_bash="true", workspace=str(workspace))))
+
+    def pending_card():
+        events = (harness.saved[0].metadata.get("tool_events") or []) if harness.saved else []
+        return next((e["ask_user"] for e in events if e.get("ask_user")), None)
+
+    for _ in range(500):
+        if pending_card() is not None:
+            break
+        await asyncio.sleep(0.01)
+    snapshot = _as_history_row(harness.saved[0])
+    assert agent_runs.stop("session-1", agent_runs.get_run_id("session-1"))
+    await asyncio.wait_for(send, 5)
+    return snapshot
+
+
 @pytest.mark.asyncio
-async def test_restart_sweep_marks_the_row_interrupted_and_expires_its_ask(harness, monkeypatch, db):
-    snapshot = {}
-    await _cancel_during_second_call(harness, monkeypatch, snapshot)
-    metadata = copy.deepcopy(snapshot["metadata"])
-    # The second call is waiting on its ask (#56 records the card like this).
-    metadata["tool_events"].append({
-        "round": 1, "tool": "manage_notes", "command": "{}", "status": "pending", "call_id": "call_1",
-        "ask_user": {"kind": "tool_approval", "approval_id": "ask-1", "question": "Allow?"},
-    })
+async def test_a_pending_ask_is_on_the_row_without_an_exit_code(harness, monkeypatch, tmp_path):
+    snapshot = await _stop_while_an_ask_is_pending(harness, monkeypatch, tmp_path)
+
+    assert snapshot["metadata"]["in_progress"] is True
+    [event] = snapshot["metadata"]["tool_events"]
+    assert (event["call_id"], event["status"], "exit_code" in event) == ("call_0", "pending", False)
+    assert event["ask_user"]["kind"] == "tool_approval" and "resolved" not in event["ask_user"]
+
+
+@pytest.mark.asyncio
+async def test_stop_while_an_ask_is_pending_cancels_the_call_and_expires_the_ask(harness, monkeypatch, tmp_path):
+    await _stop_while_an_ask_is_pending(harness, monkeypatch, tmp_path)
+
+    [row] = harness.saved
+    [event] = row.metadata["tool_events"]
+    assert (event["status"], event["exit_code"]) == ("cancelled", 130)
+    assert (event["ask_user"]["resolved"], event["ask_user"]["expired_cause"]) == ("expired", "cancel")
+    assert row.metadata["stop_reason"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_restart_while_an_ask_is_pending_marks_the_row_interrupted_and_the_ask_expired(
+    harness, monkeypatch, tmp_path, db,
+):
+    snapshot = await _stop_while_an_ask_is_pending(harness, monkeypatch, tmp_path)
     with db() as session:
         session.add(DbSession(id="session-1", name="chat", endpoint_url="u", model="m", owner="alice"))
         session.add(DbChatMessage(
             id="row-1", session_id="session-1", role="assistant", content=snapshot["content"],
-            meta_data=json.dumps(metadata), timestamp=datetime(2026, 1, 1),
+            meta_data=json.dumps(snapshot["metadata"]), timestamp=datetime(2026, 1, 1),
         ))
         session.commit()
 
@@ -254,28 +292,33 @@ async def test_restart_sweep_marks_the_row_interrupted_and_expires_its_ask(harne
         swept = json.loads(session.get(DbChatMessage, "row-1").meta_data)
     assert "in_progress" not in swept
     assert (swept["stop_reason"], swept["stopped"]) == ("interrupted", True)
-    [_, pending] = swept["tool_events"]
-    assert (pending["status"], pending["exit_code"]) == ("cancelled", 130)
-    assert (pending["ask_user"]["resolved"], pending["ask_user"]["expired_cause"]) == ("expired", "restart")
+    [event] = swept["tool_events"]
+    assert (event["status"], event["exit_code"]) == ("cancelled", 130)
+    assert (event["ask_user"]["resolved"], event["ask_user"]["expired_cause"]) == ("expired", "restart")
     harness.context.history = [
-        {"role": "user", "content": "add two notes"},
+        {"role": "user", "content": "list files"},
         {"role": "assistant", "content": snapshot["content"], "metadata": swept},
     ]
     harness.captured["provider_requests"].clear()
     await harness.send(_Request("agent"))
     payload = harness.captured["provider_requests"][-1]
-    assert [m["tool_call_id"] for m in _tool_messages(payload)] == ["call_0", "call_1"]
+    [tool_message] = _tool_messages(payload)
+    assert json.loads(tool_message["content"])["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
 async def test_a_denied_email_delete_keeps_its_uid_with_exit_code_126(harness, monkeypatch):
+    import routes.chat_routes as chat_routes
+    from tests.chat_agent.test_chat_agent_asks_route import answering, send_and_answer
+
     monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", lambda owner: True)
+    monkeypatch.setattr(chat_routes, "effective_user", lambda request: request.state.current_user)
     harness.provider_rounds = [
         _sse_tool_calls(("delete_email", {"uid": "4711", "folder": "INBOX"})),
-        _sse_events(["I need your approval."]),
+        _sse_events(["Left it in place."]),
     ]
 
-    await harness.send(_Request("agent"))
+    await send_and_answer(harness, _Request("agent"), answering(harness, ("deny",)))
 
     [event] = harness.saved[0].metadata["tool_events"]
     assert (event["status"], event["exit_code"], event["error"]) == ("denied", 126, True)

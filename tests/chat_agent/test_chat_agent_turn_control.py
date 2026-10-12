@@ -15,6 +15,7 @@ from tests.chat_agent.test_chat_agent_route import (
     _sse_events,
     _sse_tool_calls,
 )
+from tests.chat_agent.test_chat_agent_asks_route import answering, send_and_answer
 from tests.chat_agent.test_chat_agent_tools_route import admin, db, harness  # noqa: F401  (fixtures)
 
 LIST_NOTES = ("manage_notes", {"action": "list"})
@@ -53,7 +54,7 @@ async def test_repeated_call_gets_reminders_at_3_5_8_and_stops_at_12(harness, ex
     calls, _ = executor
     harness.provider_rounds = [_sse_tool_calls(LIST_NOTES) for _ in range(13)]
 
-    _, body = await harness.send(_Request("agent"))
+    body = await send_and_answer(harness, _Request("agent"), answering(harness, ("deny",)))
 
     requests = harness.captured["provider_requests"]
     assert len(requests) == 12
@@ -64,7 +65,10 @@ async def test_repeated_call_gets_reminders_at_3_5_8_and_stops_at_12(harness, ex
     assert "repeated_times: 5" in results[5]
     assert "Do not call any tool in your next response" in results[8]
     assert "Do not call any tool in your next response" in results[11]
-    # The 12th call never runs; until asks exist the turn ends visibly.
+    # At the 12th call the user is asked; Stop means it never runs.
+    [ask] = [e["data"] for e in _data_events(body) if e.get("type") == "ask_user"]
+    assert (ask["ask_kind"], ask["kind"]) == ("repeat_guard", "tool_approval")
+    assert [o["value"] for o in ask["options"]] == ["once", "deny"]
     assert len(calls) == 11
     assert _outputs(body)[-1]["exit_code"] == 126
     [stop] = [e for e in _data_events(body) if e.get("type") == "loop_breaker_triggered"]
@@ -75,6 +79,21 @@ async def test_repeated_call_gets_reminders_at_3_5_8_and_stops_at_12(harness, ex
     # The reminder reaches the model, not the tool card.
     assert "<system-reminder>" not in row.metadata["tool_events"][2]["output"]
     assert "<system-reminder>" in row.metadata["agent_v2"]["rounds"][2]["results"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_continue_at_the_repeat_guard_ask_runs_the_call_and_the_turn_goes_on(harness, executor):
+    calls, _ = executor
+    harness.provider_rounds = [_sse_tool_calls(LIST_NOTES) for _ in range(12)] + [_sse_events(["Done."])]
+
+    body = await send_and_answer(harness, _Request("agent"), answering(harness, ("once",)))
+
+    assert len(calls) == 12
+    assert not [e for e in _data_events(body) if e.get("type") == "loop_breaker_triggered"]
+    [row] = harness.saved
+    assert row.content.endswith("Done.")
+    assert "stop_reason" not in row.metadata
+    assert row.metadata["tool_events"][11]["ask_user"]["resolved"] == "once"
 
 
 @pytest.mark.asyncio
