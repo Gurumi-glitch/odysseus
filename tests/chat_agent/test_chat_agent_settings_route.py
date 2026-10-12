@@ -109,12 +109,12 @@ def _rules_endpoint(method):
 @pytest.mark.asyncio
 async def test_rules_are_saved_normalized_per_user():
     saved = await _rules_endpoint("PUT")(_request(), {"rules": {
-        "allow": ["bash(git:*)", "mcp__email__send_email", "bash(git:*)"],
+        "allow": ["bash", "mcp__email__send_email", "bash"],
         "deny": ["web_fetch(domain:Evil.com)"],
     }})
 
     assert saved == {"available": True, "rules": {
-        "allow": ["bash(git:*)", "send_email"], "ask": [], "deny": ["web_fetch(domain:evil.com)"],
+        "allow": ["bash", "send_email"], "ask": [], "deny": ["web_fetch(domain:evil.com)"],
     }}
     assert await _rules_endpoint("GET")(_request()) == saved
     assert (await _rules_endpoint("GET")(_request("bob")))["rules"] == {"allow": [], "ask": [], "deny": []}
@@ -135,6 +135,17 @@ async def test_rules_outside_the_table_are_refused_and_nothing_is_written(body, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rule", ["bash(git:*)", "python(print(1))", "host_shell(docker ps)"])
+async def test_shell_command_specifiers_are_refused_with_the_bare_name_to_use(rule, _store_dir):
+    with pytest.raises(HTTPException) as exc:
+        await _rules_endpoint("PUT")(_request(), {"rules": {"deny": [rule]}})
+    assert exc.value.status_code == 400
+    assert "not supported yet" in exc.value.detail
+    assert f"bare name {rule.split('(')[0]}" in exc.value.detail
+    assert not _store_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_rules_write_refuses_tool_loopback(_store_dir):
     with pytest.raises(HTTPException) as exc:
         await _rules_endpoint("PUT")(
@@ -147,10 +158,10 @@ async def test_rules_write_refuses_tool_loopback(_store_dir):
 def test_flipping_the_runtime_drops_session_rules_and_keeps_user_rules():
     store.set_chat_runtime("alice", store.RUNTIME_NEW)
     store.set_user_rules("alice", {"allow": ["bash"]})
-    store.add_session_rule("alice", "s1", ["bash", "prefix", "ls"])
+    store.add_session_rule("alice", "s1", ["bash", "any", ""])
 
     store.set_chat_runtime("alice", store.RUNTIME_NEW)
-    assert store.session_rules("alice", "s1") == [["bash", "prefix", "ls"]]
+    assert store.session_rules("alice", "s1") == [["bash", "any", ""]]
     store.set_chat_runtime("alice", store.RUNTIME_LEGACY)
 
     assert store.session_rules("alice", "s1") == []

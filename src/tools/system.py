@@ -332,24 +332,16 @@ def _task_structured_schedule(args, fallback_time=None):
             'cron_expression': f'{parsed.minute} {parsed.hour} * * {cron_days}'}
 
 
-async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
-    """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
-    import uuid as _uuid
-    from core.database import SessionLocal, ScheduledTask
-    from src.task_scheduler import compute_next_run
-
-    try:
-        args = _parse_tool_args(content)
-    except ValueError:
-        return {"error": "Invalid JSON arguments", "exit_code": 1}
-
+def manage_tasks_args(content: Any) -> Dict:
+    """The arguments do_manage_tasks acts on, shorthand fields folded in;
+    ValueError on bad JSON. The chat_agent permission gate reads calls with it."""
+    args = _parse_tool_args(content)
     if not args.get("action") and any(args.get(k) is not None for k in ("task", "description", "schedule", "time", "day_of_week")):
         args["action"] = "create"
     if args.get("task") and not args.get("name"):
         args["name"] = args["task"]
     if args.get("task") and not args.get("prompt"):
         args["prompt"] = args["task"]
-    action = args.get("action", "list")
     if args.get("description") and not args.get("prompt"):
         args["prompt"] = args["description"]
     if args.get("time") and not args.get("scheduled_time"):
@@ -367,53 +359,74 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
         }
         if day in days:
             args["scheduled_day"] = days[day]
+    return args
+
+
+def find_task(db, args: Dict, owner: Optional[str], required_for: str):
+    """do_manage_tasks' lookup for edit/delete/pause/resume/run: (task, None)
+    or (None, error result). The chat_agent permission gate calls it too."""
+    import uuid as _uuid
+    from core.database import ScheduledTask
+
+    task_id = args.get("task_id")
+    if task_id:
+        task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if task:
+            return task, None
+
+        try:
+            _uuid.UUID(str(task_id))
+            looks_like_uuid = True
+        except (TypeError, ValueError):
+            looks_like_uuid = False
+        if looks_like_uuid:
+            return None, {"error": f"Task {task_id} not found", "exit_code": 1}
+
+        q = db.query(ScheduledTask).filter(ScheduledTask.name == str(task_id).strip())
+        if owner:
+            q = q.filter(ScheduledTask.owner == owner)
+        matches = q.order_by(ScheduledTask.created_at.desc()).all()
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, {
+                "error": f"Task name '{task_id}' matched {len(matches)} tasks; use task_id",
+                "exit_code": 1,
+            }
+        return None, {"error": f"Task {task_id} not found", "exit_code": 1}
+
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return None, {"error": f"task_id is required for {required_for}", "exit_code": 1}
+
+    q = db.query(ScheduledTask).filter(ScheduledTask.name == name)
+    if owner:
+        q = q.filter(ScheduledTask.owner == owner)
+    matches = q.order_by(ScheduledTask.created_at.desc()).all()
+    if not matches:
+        return None, {"error": f"Task named '{name}' not found", "exit_code": 1}
+    if len(matches) > 1:
+        return None, {
+            "error": f"Task name '{name}' matched {len(matches)} tasks; use task_id",
+            "exit_code": 1,
+        }
+    return matches[0], None
+
+
+async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
+    """Handle manage_tasks tool calls: CRUD on scheduled tasks."""
+    import uuid as _uuid
+    from core.database import SessionLocal, ScheduledTask
+    from src.task_scheduler import compute_next_run
+
+    try:
+        args = manage_tasks_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+
+    action = args.get("action", "list")
     db = SessionLocal()
     try:
-        def _task_by_id_or_exact_name(required_for: str):
-            task_id = args.get("task_id")
-            if task_id:
-                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-                if task:
-                    return task, None
-
-                try:
-                    _uuid.UUID(str(task_id))
-                    looks_like_uuid = True
-                except (TypeError, ValueError):
-                    looks_like_uuid = False
-                if looks_like_uuid:
-                    return None, {"error": f"Task {task_id} not found", "exit_code": 1}
-
-                q = db.query(ScheduledTask).filter(ScheduledTask.name == str(task_id).strip())
-                if owner:
-                    q = q.filter(ScheduledTask.owner == owner)
-                matches = q.order_by(ScheduledTask.created_at.desc()).all()
-                if len(matches) == 1:
-                    return matches[0], None
-                if len(matches) > 1:
-                    return None, {
-                        "error": f"Task name '{task_id}' matched {len(matches)} tasks; use task_id",
-                        "exit_code": 1,
-                    }
-                return None, {"error": f"Task {task_id} not found", "exit_code": 1}
-
-            name = str(args.get("name") or "").strip()
-            if not name:
-                return None, {"error": f"task_id is required for {required_for}", "exit_code": 1}
-
-            q = db.query(ScheduledTask).filter(ScheduledTask.name == name)
-            if owner:
-                q = q.filter(ScheduledTask.owner == owner)
-            matches = q.order_by(ScheduledTask.created_at.desc()).all()
-            if not matches:
-                return None, {"error": f"Task named '{name}' not found", "exit_code": 1}
-            if len(matches) > 1:
-                return None, {
-                    "error": f"Task name '{name}' matched {len(matches)} tasks; use task_id",
-                    "exit_code": 1,
-                }
-            return matches[0], None
-
         if action == "list":
             q = db.query(ScheduledTask)
             if owner:
@@ -522,7 +535,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             return {"response": f"Created task '{name}' (id: {task_id})", "task_id": task_id, "exit_code": 0}
 
         elif action == "edit":
-            task, error = _task_by_id_or_exact_name("edit")
+            task, error = find_task(db, args, owner, "edit")
             if error:
                 return error
             # Strict ownership: the old `task.owner and task.owner != owner`
@@ -611,7 +624,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             return {"response": f"Updated task '{task.name}': {', '.join(changed)}", "exit_code": 0}
 
         elif action == "delete":
-            task, error = _task_by_id_or_exact_name("delete")
+            task, error = find_task(db, args, owner, "delete")
             if error:
                 return error
             if owner and task.owner != owner:
@@ -622,7 +635,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             return {"response": f"Deleted task '{name}'", "exit_code": 0}
 
         elif action in ("pause", "resume"):
-            task, error = _task_by_id_or_exact_name(action)
+            task, error = find_task(db, args, owner, action)
             if error:
                 return error
             if owner and task.owner != owner:
@@ -646,7 +659,7 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             return {"response": f"Task '{task.name}' {action}d", "exit_code": 0}
 
         elif action == "run":
-            task, error = _task_by_id_or_exact_name("run")
+            task, error = find_task(db, args, owner, "run")
             if error:
                 return error
             if owner and task.owner != owner:

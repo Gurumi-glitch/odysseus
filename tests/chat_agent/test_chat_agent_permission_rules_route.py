@@ -93,7 +93,7 @@ async def test_send_email_asks_even_with_an_allow_rule(harness, ran):
 
 @pytest.mark.asyncio
 async def test_an_allow_rule_lifts_a_default_ask(harness, ran, workspace):
-    store.set_user_rules("alice", {"allow": ["bash(git:*)"]})
+    store.set_user_rules("alice", {"allow": ["bash"]})
 
     body = await _turn(harness, [_sse_tool_calls(("bash", {"command": "git status"}))],
                        allow_bash="true", workspace=workspace)
@@ -148,15 +148,15 @@ async def test_allow_for_this_chat_holds_in_this_chat_only_and_not_across_a_runt
 
     form = dict(allow_bash="true", workspace=workspace)
     first = await _turn(harness, bash("ls"), ("chat",), **form)
-    again = await _turn(harness, bash("ls -la"), **form)
+    again = await _turn(harness, bash("rm -rf build"), **form)
     other_chat = await _turn(harness, bash("ls"), ("once",), session="session-2", **form)
     store.set_chat_runtime("alice", store.RUNTIME_LEGACY)
     store.set_chat_runtime("alice", store.RUNTIME_NEW)
     after_flip = await _turn(harness, bash("ls"), ("once",), **form)
 
-    assert "bash(ls:*)" in _asks(first)[0]["options"][1]["description"]
+    assert _asks(first)[0]["options"][1]["description"] == "Run it and allow bash for the rest of this chat."
     assert [len(_asks(body)) for body in (first, again, other_chat, after_flip)] == [1, 0, 1, 1]
-    assert [content for _, content in ran] == ["ls", "ls -la", "ls", "ls"]
+    assert [content for _, content in ran] == ["ls", "rm -rf build", "ls", "ls"]
 
 
 @pytest.mark.asyncio
