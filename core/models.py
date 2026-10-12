@@ -161,6 +161,12 @@ class Session:
         if _SESSION_MANAGER_INSTANCE:
             _SESSION_MANAGER_INSTANCE._persist_message(self.id, message)
 
+    def update_message(self, message: ChatMessage) -> bool:
+        """Persist new content/metadata of a message already in this history."""
+        if _SESSION_MANAGER_INSTANCE:
+            return _SESSION_MANAGER_INSTANCE.update_message(self.id, message)
+        return False
+
     def get_context_messages(self) -> List[Dict[str, Any]]:
         """Get messages in format for LLM API.
 

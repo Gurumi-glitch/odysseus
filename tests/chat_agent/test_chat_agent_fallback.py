@@ -14,7 +14,7 @@ import pytest
 import routes.chat_routes as chat_routes
 import src.context_compactor as context_compactor
 import src.foreground_model_routing as foreground_model_routing
-from src.chat_agent import loop
+from src.chat_agent import loop, transcript
 from src.chat_agent.providers import chat_completions
 from tests.chat_agent.test_chat_agent_route import (
     _Harness,
@@ -205,10 +205,14 @@ async def test_new_runtime_fallback_drops_reasoning_of_other_models(harness, mon
     reasoning = [{"type": "reasoning.encrypted", "data": "opaque"}]
     harness.context.history = [
         {"role": "user", "content": "earlier question"},
-        {"role": "assistant", "content": "earlier answer", "metadata": {"agent_v2": {"rounds": [{"blocks": [
-            {"type": "reasoning", "provider": "openrouter", "model": PRIMARY_MODEL, "reasoning_details": reasoning},
-            {"type": "text", "text": "earlier answer"},
-        ]}]}}},
+        # A row the transcript writer signed (unsigned agent_v2 replays as text).
+        {"role": "assistant", "content": "earlier answer", "metadata": transcript.signed_metadata(
+            "earlier answer", {"agent_v2": {"rounds": [{"blocks": [
+                {"type": "reasoning", "provider": "openrouter", "model": PRIMARY_MODEL,
+                 "reasoning_details": reasoning},
+                {"type": "text", "text": "earlier answer"},
+            ]}]}},
+        )},
     ]
     _script(monkeypatch, harness, {PRIMARY_MODEL: [503], BACKUP_MODEL: [["ok"]]})
 

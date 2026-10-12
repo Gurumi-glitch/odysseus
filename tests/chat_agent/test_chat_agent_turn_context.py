@@ -18,7 +18,7 @@ import src.settings as settings
 import src.tool_security as tool_security
 from src.agent_loop import PLAN_MODE_DIRECTIVE
 from src.chat_agent import tools as chat_agent_tools
-from src.chat_agent import turn_context
+from src.chat_agent import transcript, turn_context
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE
 from tests.chat_agent.test_chat_agent_route import (
     _Harness,
@@ -283,6 +283,7 @@ async def test_email_ids_from_legacy_rows_carry_over_runtime_rows_replay_them(ha
     }]}
     if runtime_row:
         metadata["agent_v2"] = {"rounds": [{"blocks": [{"type": "text", "text": "You have 1 email."}]}]}
+        metadata = transcript.signed_metadata("You have 1 email.", metadata)
     harness.context.history = [
         {"role": "user", "content": "check mail"},
         {"role": "assistant", "content": "You have 1 email.", "metadata": metadata},

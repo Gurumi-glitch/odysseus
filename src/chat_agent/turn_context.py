@@ -38,6 +38,8 @@ from src.agent_loop import _uploaded_files_context_message
 from src.agent_loop import _workspace_coding_rules
 from src.agent_tools.document_tools import set_active_document, set_active_model
 from src.chat_agent.permissions import EMAIL_READER_DENIED
+# Relies on: trusted_rounds(row) is None exactly when the row replays as text.
+from src.chat_agent import transcript
 # Relies on: an untrusted message with the reader's uid, folder, account,
 # subject, sender and body preview; None without a uid.
 from src.clean_agent_preview import active_email_context_message
@@ -243,10 +245,10 @@ def _email_messages(open_items: OpenItems, saved: Dict[str, Any]) -> List[Option
 
 
 def _recent_email_context(history: List[Dict[str, Any]], current_text: str) -> Optional[Dict[str, Any]]:
-    # Runtime turns replay their tool results (ADR 0007). Rows from legacy turns
-    # replay as text only, so their email/note/calendar ids come from here.
-    legacy_rows = [m for m in history if not (m.get("metadata") or {}).get("agent_v2")]
-    rows = [*legacy_rows, {"role": "user", "content": current_text}]
+    # Trusted runtime turns replay their tool results (ADR 0007). Every other
+    # row replays as text only, so its email/note/calendar ids come from here.
+    text_rows = [m for m in history if transcript.trusted_rounds(m) is None]
+    rows = [*text_rows, {"role": "user", "content": current_text}]
     if not _has_recent_email_tool_context(rows):
         return None
     return _minimal_recent_notes_tool_context_message(rows)

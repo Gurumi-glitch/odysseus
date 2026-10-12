@@ -10,7 +10,7 @@ import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_utils as tool_utils
 from core import database
-from src.chat_agent import session_rules
+from src.chat_agent import session_rules, transcript
 from src.chat_agent.tools import TOOL_SEARCH, TOOL_SEARCH_MAX_SCHEMAS
 from src.mcp_manager import McpManager
 from tests.chat_agent.test_chat_agent_asks_route import answering, send_and_answer
@@ -154,15 +154,16 @@ async def test_a_custom_mcp_tool_is_callable_after_search(harness, admin, mcp, d
 
 
 def _history_turn_that_loaded(name):
+    # A row the transcript writer signed (unsigned agent_v2 replays as text).
     return {
         "role": "assistant", "content": "",
-        "metadata": {"agent_v2": {"rounds": [
+        "metadata": transcript.signed_metadata("", {"agent_v2": {"rounds": [
             {"blocks": [{"type": "tool_call", "call_id": "old_0", "name": TOOL_SEARCH,
                          "arguments": json.dumps({"query": f"select:{name}"})}],
              "results": [{"call_id": "old_0", "ok": True, "content": f"Loaded: {name}",
                           "error": None, "loaded": [name]}]},
             {"blocks": [{"type": "text", "text": "Loaded."}]},
-        ]}},
+        ]}}),
     }
 
 

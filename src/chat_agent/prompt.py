@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src import constants
-from src.chat_agent import store, turn_context
+from src.chat_agent import store, transcript, turn_context
 from src.chat_agent.routing import ComposerToggles
 
 logger = logging.getLogger(__name__)
@@ -191,19 +191,50 @@ def assemble(
     return [
         {"role": "system", "content": system_text},
         *([instructions] if instructions else []),
-        *(replayed for m in history for replayed in _replay(m)),
+        *_replay_history(history),
         {"role": "user", "content": _with_context(current.get("content"), context)},
     ]
+
+
+def _replay_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Replay history rows; consecutive same-role text rows merge into one.
+
+    The one merge rule: two adjacent plain-text entries of the same role join
+    with a blank line (string parts) or by concatenating their parts (when
+    either is multimodal). Structured turns and tool results never merge.
+    """
+    replayed: List[Dict[str, Any]] = []
+    for message in history:
+        for entry in _replay(message):
+            previous = replayed[-1] if replayed else None
+            if previous is not None and _is_text(previous) and _is_text(entry) and previous["role"] == entry["role"]:
+                replayed[-1] = {"role": entry["role"], "content": _join(previous["content"], entry["content"])}
+            else:
+                replayed.append(entry)
+    return replayed
+
+
+def _is_text(entry: Dict[str, Any]) -> bool:
+    return entry["role"] != "tool" and "blocks" not in entry
+
+
+def _join(first: Any, second: Any) -> Any:
+    if isinstance(first, str) and isinstance(second, str):
+        return f"{first}\n\n{second}"
+    as_parts = lambda content: content if isinstance(content, list) else [{"type": "text", "text": content}]
+    return [*as_parts(first), *as_parts(second)]
 
 
 def _replay(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     """A runtime turn replays from its agent_v2 rounds (ADR 0007); other rows as text.
 
-    Each round's ``results`` are its tool-result envelopes. Adapters decide which
-    reasoning blocks they send (same provider and model only, ADR 0004).
+    Only a record the transcript writer signed over the content now stored is
+    replayed as assistant/tool turns; an edited, rewritten or client-written
+    one replays as its text. Each round's ``results`` are its tool-result
+    envelopes. Adapters decide which reasoning blocks they send (same provider
+    and model only, ADR 0004).
     """
-    agent_v2 = (message.get("metadata") or {}).get("agent_v2")
-    rounds = agent_v2.get("rounds") if isinstance(agent_v2, dict) else None
+    rounds = transcript.trusted_rounds(message)
     if not rounds:
         return [{"role": message["role"], "content": message.get("content") or ""}]
     replayed: List[Dict[str, Any]] = []

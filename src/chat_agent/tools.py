@@ -87,10 +87,12 @@ _CATALOG_EXCLUDED_MCP_SERVERS = frozenset({"email", "builtin_browser"})
 STATUS_DONE = "done"
 STATUS_FAILED = "failed"
 STATUS_DENIED = "denied"
+STATUS_CANCELLED = "cancelled"
 # Shell conventions, so tool cards and transcripts read like a terminal.
 EXIT_DONE = 0
 EXIT_FAILED = 1
 EXIT_DENIED = 126
+EXIT_CANCELLED = 130
 
 
 def schema_name(schema: Dict[str, Any]) -> str:
