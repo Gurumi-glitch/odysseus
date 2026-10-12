@@ -4,7 +4,8 @@ The file lives at ``CHAT_AGENT_DIR/<percent-encoded lowercased user>.json``.
 It holds the runtime switch (``chat_runtime``), the user-level
 instructions toggle (``instructions_enabled``), the user's permission rules
 (``rules``: allow/ask/deny lists of rule text) and the session rules "Allow
-for this chat" saved (``session_rules``: chat id -> rule records). The user's instruction files
+for this chat" saved (``session_rules``: chat id -> rule records) and auto mode's classifier
+denials per chat (``auto_mode_denials``: chat id -> [in a row, total]). The user's instruction files
 live in ``INSTRUCTIONS_DIR/<same encoded name>/``. User rename and delete move
 or remove both (``rename_owner`` / ``delete_owner``).
 """
@@ -116,6 +117,23 @@ def add_session_rule(owner: str, session_id: str, record: list) -> None:
     if record not in records:
         records.append(record)
     data["session_rules"] = by_chat
+    atomic_write_json(store_path(owner), data, indent=2)
+
+
+def auto_mode_denials(owner: str, session_id: str) -> tuple:
+    """Auto mode's classifier denials in this chat: (in a row, in total)."""
+    by_chat = load(owner).get("auto_mode_denials")
+    counts = by_chat.get(session_id) if isinstance(by_chat, dict) else None
+    if isinstance(counts, list) and len(counts) == 2 and all(isinstance(n, int) for n in counts):
+        return tuple(counts)
+    return (0, 0)
+
+
+def set_auto_mode_denials(owner: str, session_id: str, in_a_row: int, total: int) -> None:
+    data = load(owner)
+    by_chat = data.get("auto_mode_denials") if isinstance(data.get("auto_mode_denials"), dict) else {}
+    by_chat[session_id] = [in_a_row, total]
+    data["auto_mode_denials"] = by_chat
     atomic_write_json(store_path(owner), data, indent=2)
 
 

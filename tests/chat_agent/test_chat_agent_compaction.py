@@ -314,6 +314,8 @@ def test_compact_button_on_an_idle_runtime_chat_keeps_provenance_and_drops_stale
     # The gate stays armed though the mail-reading row is gone.
     gate = Provenance().after_history(history)
     assert gate.external and gate.private
+    # Auto mode's classifier still learns where the external content came from (#68).
+    assert gate.origins == ("read_email",)
     # Kept runtime turns still replay; their old usage no longer drives the popover.
     assert transcript.trusted_rounds(history[2].to_dict())
     assert _context_percent(popover) < 5
