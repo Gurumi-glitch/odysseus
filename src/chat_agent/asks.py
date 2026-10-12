@@ -37,6 +37,8 @@ DECISIONS: Dict[str, frozenset] = {
 ALL_DECISIONS = frozenset().union(*DECISIONS.values())
 
 BY_USER = "user"
+# The runtime resolved the ask itself: nobody can answer this turn.
+BY_RUNTIME = "runtime"
 EXPIRED_TIMEOUT = "timeout"
 # Stored as the card's ``resolved`` value when nobody answered.
 RESOLVED_EXPIRED = "expired"
@@ -47,6 +49,15 @@ class Answer:
     decision: str
     text: str = ""
     by: str = BY_USER
+
+
+# Every ask of a non-interactive turn resolves to this at once: notes
+# agent-solve, group panes and compare synthesis send interactive:false, and
+# API-token turns have no browser behind them (spec #44, Asks). The text is
+# what the model reads.
+NO_INTERACTIVE_USER = Answer(
+    DENY, "Denied: no interactive user can approve or answer this in this chat.", BY_RUNTIME,
+)
 
 
 @dataclass

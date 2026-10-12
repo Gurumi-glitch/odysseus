@@ -25,6 +25,7 @@ from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
 from src.chat_agent import prompt as chat_agent_prompt, store as chat_agent_store
+from src import agent_runs
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -817,9 +818,9 @@ def setup_session_routes(
         return {"ok": True, "count": len(messages)}
 
     @router.post("/session/{sid}/delete")
-    def delete_session_beacon(request: Request, sid: str):
+    async def delete_session_beacon(request: Request, sid: str):
         """Delete session via POST (for navigator.sendBeacon on page close)."""
-        return delete_session(request, sid)
+        return await delete_session(request, sid)
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
@@ -844,6 +845,7 @@ def setup_session_routes(
                 finally:
                     db.close()
 
+                await agent_runs.stop_and_wait(sid)
                 if session_manager.delete_session(sid):
                     from routes.chat_helpers import remove_session_sft_trace_rows
                     remove_session_sft_trace_rows(effective_user(request), sid)
@@ -864,7 +866,7 @@ def setup_session_routes(
             db.close()
 
     @router.delete("/session/{sid}")
-    def delete_session(request: Request, sid: str, delete_images: bool = False):
+    async def delete_session(request: Request, sid: str, delete_images: bool = False):
         """Permanently delete a session and all its messages."""
         _verify_session_owner(request, sid, session_manager)
         try:
@@ -880,6 +882,9 @@ def setup_session_routes(
             finally:
                 db.close()
 
+            # Stop the chat's run first: its cancel path saves the partial
+            # turn, which the delete then removes with the rest.
+            await agent_runs.stop_and_wait(sid)
             # Delete the session and all its messages
             if (session_manager.delete_session(sid, delete_images=True) if delete_images
                     else session_manager.delete_session(sid)):
