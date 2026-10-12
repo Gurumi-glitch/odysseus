@@ -8,6 +8,11 @@ import { chromium } from 'playwright';
 const renderer = await readFile(new URL('../static/js/chatRenderer.js', import.meta.url), 'utf8');
 const chat = await readFile(new URL('../static/js/chat.js', import.meta.url), 'utf8');
 const addMessage = renderer.slice(renderer.indexOf('export function addMessage('), renderer.indexOf('\nconst chatRenderer =')).replace('export ', '');
+// The ask card functions addMessage and resumeStream reach (chat_agent asks, #60).
+const askCards = renderer
+  .slice(renderer.indexOf('/** Remove any unanswered multiple-choice cards'), renderer.indexOf('/**\n * Add a message to the chat history.'))
+  .replaceAll('export async function', 'async function')
+  .replaceAll('export function', 'function');
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
@@ -24,11 +29,12 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume }) => {
+  await page.evaluate(async ({ addMessage, resume, askCards }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
       uiModule: { esc, scrollHistory: noop, showToast: value => window.toasts.push(value), showError: error => { throw Error(error); }, el: id => document.getElementById(id), captureHistoryScroll: () => ({ y: scrollY }), restoreHistoryScroll: s => scrollTo(0, s.y) },
+      svgifyEmoji: x => x, CHAT_AGENT_RUNTIME: 'chat_agent', resumeRuntime: 'legacy', posts: [],
       hideWelcomeScreen: noop, resolveDocumentPlaceholderLinks: x => x,
       replyModelPair: () => ({ actualModel: 'test', requestedModel: 'test' }),
       modelRouteLabel: () => 'test', sameModelName: () => true, applyModelColor: noop,
@@ -60,15 +66,19 @@ async function setup() {
     window.generatedImageResult = (await import('/static/js/generatedImageResult.js')).generatedImageResult;
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
-    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox };
+    const cards = new Function(askCards + '\nreturn { renderAskUserCard, resolveAskUserCard, answerChatAsk };')();
+    Object.assign(window, cards);
+    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, ...cards };
     let controller;
     const stream = new ReadableStream({ start(value) { controller = value; } });
     window.send = event => controller.enqueue(new TextEncoder().encode('data: ' + (typeof event === 'string' ? event : JSON.stringify(event)) + '\n\n'));
     window.sendError = event => controller.enqueue(new TextEncoder().encode('event: error\ndata: ' + JSON.stringify(event) + '\n\n'));
-    window.fetch = async url => String(url).includes('/api/chat/resume/')
-      ? new Response(stream, { headers: { 'X-Odysseus-Run-Id': 'run-1' } })
-      : new Response(JSON.stringify({ history: window.savedHistory }));
-  }, { addMessage, resume });
+    window.fetch = async (url, init) => {
+      if (String(url).includes('/api/chat/resume/')) return new Response(stream, { headers: { 'X-Odysseus-Run-Id': 'run-1', 'X-Odysseus-Runtime': window.resumeRuntime } });
+      if (String(url).includes('/api/chat/ask/')) { window.posts.push({ url: String(url), body: JSON.parse(init.body) }); return new Response(JSON.stringify({ accepted: true })); }
+      return new Response(JSON.stringify({ history: window.savedHistory }));
+    };
+  }, { addMessage, resume, askCards });
   return page;
 }
 
@@ -309,5 +319,72 @@ test('resume keeps the same initial bubble through preparation and round-one sta
       return {same, count};
     });
     assert.deepEqual(result, {same: true, count: 1});
+  } finally { await page.close(); }
+});
+
+const permissionAsk = {
+  kind: 'tool_approval', approval_id: 'ask-1', ask_id: 'ask-1', ask_kind: 'permission', session_id: 's',
+  question: 'Allow this action?', description: 'The agent wants to run this action and needs your approval.',
+  options: [{ label: 'Allow once', value: 'once' }, { label: 'Allow for this chat', value: 'chat' }, { label: 'Deny', value: 'deny' }],
+  action: { tool: 'bash', content: 'ls' },
+};
+
+test('chat_agent history: a pending ask keeps its card answerable, answered and expired asks are read-only', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(async ask => {
+      const root = document.querySelector('#chat-history');
+      const state = () => [...root.querySelectorAll('.ask-user-card')].map(card => ({
+        askId: card.dataset.askId || '', answered: card.classList.contains('ask-user-answered'),
+        live: card.querySelectorAll('button:not(:disabled), input:not(:disabled)').length,
+        value: card.querySelector('.ask-user-answer-value')?.textContent || '',
+      }));
+      addMessage('assistant', 'Checking', 'test', { _fromHistory: true, runtime: 'chat_agent', in_progress: true, round_texts: ['Checking'],
+        tool_events: [{ round: 1, tool: 'bash', command: 'ls', status: 'pending', ask_user: ask }] });
+      const pending = state();
+      [...root.querySelectorAll('.ask-user-option')].find(b => b.textContent.includes('Deny')).click();
+      await new Promise(r => setTimeout(r, 20));
+      const answered = state();
+      root.replaceChildren();
+      addMessage('assistant', 'Done', 'test', { _fromHistory: true, runtime: 'chat_agent', round_texts: ['Done'],
+        tool_events: [
+          { round: 1, tool: 'bash', command: 'ls', exit_code: 0, output: 'a b', ask_user: { ...ask, resolved: 'once' } },
+          { round: 1, tool: 'bash', command: 'pwd', exit_code: 130, ask_user: { ...ask, ask_id: 'ask-2', resolved: 'expired', expired_cause: 'restart' } },
+        ] });
+      return { pending, answered, history: state(), posts: window.posts.map(p => p.body) };
+    }, permissionAsk);
+    assert.deepEqual(result.pending, [{ askId: 'ask-1', answered: false, live: 5, value: '' }]);
+    assert.deepEqual(result.answered, [{ askId: 'ask-1', answered: true, live: 0, value: 'Deny' }]);
+    assert.deepEqual(result.posts, [{ ask_id: 'ask-1', decision: 'deny', text: '' }]);
+    assert.deepEqual(result.history, [
+      { askId: 'ask-1', answered: true, live: 0, value: 'Allow once' },
+      { askId: 'ask-2', answered: true, live: 0, value: 'the server restarted' },
+    ]);
+  } finally { await page.close(); }
+});
+
+test('resume on a chat_agent run replays the ask card over the history one and settles it on ask_resolved', async () => {
+  const page = await setup();
+  try {
+    await page.evaluate(ask => {
+      window.resumeRuntime = 'chat_agent';
+      addMessage('assistant', 'Checking', 'test', { _fromHistory: true, runtime: 'chat_agent', in_progress: true, round_texts: ['Checking'],
+        tool_events: [{ round: 1, tool: 'bash', command: 'ls', status: 'pending', ask_user: ask }] });
+    }, permissionAsk);
+    await startReplay(page);
+    await page.evaluate(ask => { send({ type: 'ask_user', data: ask }); }, permissionAsk);
+    await page.waitForFunction(() => document.querySelectorAll('.ask-user-card').length === 1
+      && document.querySelector('.ask-user-card') === document.querySelector('#chat-history').lastElementChild);
+    const open = await page.evaluate(() => document.querySelectorAll('.ask-user-card button:not(:disabled)').length);
+    assert.equal(open, 4);
+    await page.evaluate(() => { send({ type: 'ask_resolved', ask_id: 'ask-1', decision: 'deny', reason: 'use a note instead', by: 'user' }); });
+    await page.waitForSelector('.ask-user-card.ask-user-answered');
+    const result = await page.evaluate(async () => {
+      const value = document.querySelector('.ask-user-answer-value').textContent;
+      send('[DONE]');
+      await running;
+      return { value, cards: document.querySelectorAll('.ask-user-card').length, posts: window.posts.length };
+    });
+    assert.deepEqual(result, { value: 'Deny — use a note instead', cards: 1, posts: 0 });
   } finally { await page.close(); }
 });
