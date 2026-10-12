@@ -1,7 +1,8 @@
 """Build the model request for one turn from the route's context builder.
 
-Order: one system message (route preset/persona system messages, then the
-behaviour section) -> history -> the current user message carrying this
+Order: one system message (route preset/persona system messages, the
+behaviour section, then the runtime's sections such as the unavailable-tools
+line) -> history -> the current user message carrying this
 turn's context (memory, RAG, date/time).
 """
 
@@ -18,19 +19,26 @@ BEHAVIOUR_SECTION = (
 )
 
 
-async def build_messages(build_context: Callable[..., Awaitable[Any]]) -> List[Dict[str, Any]]:
+async def build_messages(
+    build_context: Callable[..., Awaitable[Any]], system_sections: List[str],
+) -> List[Dict[str, Any]]:
     # prefetch=False: the model fetches URLs, searches and YouTube itself, so
     # toggles and provenance apply. agent_mode=False keeps the legacy skills
     # index out; this runtime builds its own.
     ctx = await build_context(prefetch=False, agent_mode=False)
-    return assemble(ctx.preface, ctx.messages)
+    return assemble(ctx.preface, ctx.messages, system_sections)
 
 
-def assemble(preface: List[Dict[str, Any]], messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def assemble(
+    preface: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+    system_sections: List[str] = (),
+) -> List[Dict[str, Any]]:
     preface_ids = {id(message) for message in preface}
     system_text = "\n\n".join(
         [str(m.get("content") or "") for m in preface if m.get("role") == "system"]
         + [BEHAVIOUR_SECTION]
+        + [section for section in system_sections if section]
     )
     turn_context = [m for m in preface if m.get("role") != "system"]
     # Relies on: with agent_mode=False, build_chat_context places the

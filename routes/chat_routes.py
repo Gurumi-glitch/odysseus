@@ -2992,6 +2992,7 @@ def setup_chat_routes(
             chat_agent_run = agent_runs.start(session, run_chat_agent_turn(ChatAgentTurn(
                 session_id=session,
                 sess=sess,
+                owner=owner,
                 toggles=composer_toggles,
                 auto_escalated=auto_escalated,
                 temperature=(
@@ -3016,6 +3017,10 @@ def setup_chat_routes(
                     interaction_mode="agent",
                     auto_escalated=auto_escalated,
                 ),
+                privileges=_request_privileges(request, owner),
+                delegated_credential=is_delegated_credential(request),
+                active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
+                client_runtime_context=client_runtime_context,
             )), runtime=CHAT_AGENT)
             return StreamingResponse(
                 agent_runs.subscribe(session, chat_agent_run),

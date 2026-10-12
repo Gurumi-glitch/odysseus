@@ -8,6 +8,7 @@ The legacy message sanitizer is deliberately not used: it drops
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
@@ -50,7 +51,29 @@ class ProviderError:
     message: str
 
 
-RoundEvent = Union[TextDelta, ProviderError]
+@dataclass(frozen=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: str
+
+    def to_message(self) -> Dict[str, Any]:
+        return {"id": self.call_id, "type": "function",
+                "function": {"name": self.name, "arguments": self.arguments}}
+
+
+RoundEvent = Union[TextDelta, ToolCall, ProviderError]
+
+
+def assistant_message(text: str, calls: List[ToolCall]) -> Dict[str, Any]:
+    message: Dict[str, Any] = {"role": "assistant", "content": text or None}
+    if calls:
+        message["tool_calls"] = [call.to_message() for call in calls]
+    return message
+
+
+def tool_message(call_id: str, content: str) -> Dict[str, Any]:
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
 
 
 def build_payload(
@@ -59,9 +82,15 @@ def build_payload(
     *,
     temperature: float,
     max_tokens: int,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     provider = _detect_provider(endpoint.url)
     payload: Dict[str, Any] = {"model": endpoint.model, "messages": messages, "stream": True}
+    if tools:
+        # parallel_tool_calls is never sent: the model may still issue several
+        # calls per round, and the loop runs them one at a time (spec #44).
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     if not _omit_temperature(provider, endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
@@ -86,8 +115,14 @@ async def stream_round(
     *,
     temperature: float,
     max_tokens: int,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncIterator[RoundEvent]:
-    payload = build_payload(endpoint, messages, temperature=temperature, max_tokens=max_tokens)
+    """Stream one round: text deltas as they arrive, then its tool calls."""
+    payload = build_payload(endpoint, messages, temperature=temperature,
+                            max_tokens=max_tokens, tools=tools)
+    # Tool calls arrive as fragments keyed by index; they are complete only
+    # when the stream ends.
+    partial_calls: Dict[int, Dict[str, str]] = {}
     target_url = _normalize_openai_chat_url(endpoint.url)
     client = _get_http_client()
     async with client.stream(
@@ -110,7 +145,7 @@ async def stream_round(
                 continue
             data = line[5:].strip()
             if data == "[DONE]":
-                return
+                break
             try:
                 chunk = json.loads(data)
             except json.JSONDecodeError:
@@ -119,6 +154,23 @@ async def stream_round(
                 yield ProviderError(None, str(chunk["error"].get("message") or "Provider stream error"))
                 return
             for choice in chunk.get("choices") or ():
-                text = (choice.get("delta") or {}).get("content")
-                if text:
-                    yield TextDelta(text)
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    yield TextDelta(delta["content"])
+                for fragment in delta.get("tool_calls") or ():
+                    _merge_tool_call_fragment(partial_calls, fragment)
+    for index in sorted(partial_calls):
+        call = partial_calls[index]
+        yield ToolCall(call["id"] or f"call_{uuid.uuid4().hex}", call["name"], call["arguments"])
+
+
+def _merge_tool_call_fragment(partial_calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any]) -> None:
+    call = partial_calls.setdefault(int(fragment.get("index") or 0),
+                                    {"id": "", "name": "", "arguments": ""})
+    if fragment.get("id"):
+        call["id"] = fragment["id"]
+    function = fragment.get("function") or {}
+    if function.get("name"):
+        call["name"] += function["name"]
+    if function.get("arguments"):
+        call["arguments"] += function["arguments"]
