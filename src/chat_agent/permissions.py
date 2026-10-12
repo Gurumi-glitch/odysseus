@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+# Relies on: _load_mcp_disabled_map reads every server's disabled_tools from
+# the database on each call, as {server_id: set of server-local tool names}.
+from src.agent_loop import _load_mcp_disabled_map
 from src.chat_agent.routing import ComposerToggles
 # get_mcp_manager: the process-wide MCP manager, None before startup.
 from src.tool_utils import get_mcp_manager
@@ -226,8 +229,19 @@ def _is_custom_mcp(name: str) -> bool:
     return name.startswith("mcp__") and not name.startswith("mcp__email__")
 
 
+def _mcp_server_disabled_reason(name: str) -> Optional[str]:
+    # Checked per call, not per turn: a schema loaded in an earlier turn
+    # stays offered after the admin disables the tool on its server (#58).
+    parts = name.split("__", 2)
+    if not _is_custom_mcp(name) or len(parts) != 3:
+        return None
+    if parts[2] in _load_mcp_disabled_map().get(parts[1], ()):
+        return f"Tool '{name}' is disabled on its MCP server."
+    return None
+
+
 def decide(layers: DenyLayers, name: str, content: Any) -> Decision:
-    reason = layers.deny_reason(name, content)
+    reason = layers.deny_reason(name, content) or _mcp_server_disabled_reason(name)
     if reason:
         return Decision(DENY, reason)
     if posture(name, content) == ASK:
