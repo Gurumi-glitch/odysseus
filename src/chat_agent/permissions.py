@@ -770,7 +770,49 @@ class Provenance:
 
 
 def _egress(name: str, content: Any) -> bool:
-    return ToolEffect.NETWORK_EGRESS in capabilities_for_action(canonical_tool(name), content).effects
+    tool = canonical_tool(name)
+    effects = capabilities_for_action(tool, content).effects
+    if ToolEffect.NETWORK_EGRESS in effects:
+        return True
+    # The shared registry leaves these readers off NETWORK_EGRESS, which the
+    # legacy preflight blocks; here each one is read from the call it runs.
+    if tool == "pdf_extract":
+        # Relies on: capabilities_for_action picks pdf_extract's source the way
+        # the tool does and drops the network read only when it is local.
+        return ToolEffect.BROKERED_NETWORK_READ in effects
+    if tool == "youtube_tool":
+        return _youtube_fetches_elsewhere(content)
+    return False
+
+
+_YOUTUBE_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be",
+})
+# Every argument YouTubeTool reads a target from.
+_YOUTUBE_TARGET_KEYS = ("url", "video_url", "video_id", "channel_url", "handle")
+
+
+def _youtube_fetches_elsewhere(content: Any) -> bool:
+    """A target URL off YouTube: the channel actions hand it to yt-dlp as is."""
+    raw = str(content or "").strip()
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        # YouTubeTool._parse_args reads non-JSON text as the url.
+        args = {"url": raw}
+    if not isinstance(args, dict):
+        return False
+    for key in _YOUTUBE_TARGET_KEYS:
+        target = str(args.get(key) or "").strip()
+        if not target.casefold().startswith(("http://", "https://")):
+            continue
+        try:
+            host = (httpx.URL(target).host or "").lower().rstrip(".")
+        except (httpx.InvalidURL, ValueError):
+            return True
+        if host not in _YOUTUBE_HOSTS:
+            return True
+    return False
 
 
 # --- The gate ------------------------------------------------------------------

