@@ -6,6 +6,8 @@ import json
 import pytest
 
 import routes.chat_helpers as chat_helpers
+import routes.chat_routes as chat_routes
+from src.chat_agent import store
 from src.chat_agent.permissions import ALLOW, ASK, Provenance
 from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
     _events,
@@ -114,3 +116,24 @@ def _gate(name, arguments, provenance=_ARMED):
 def test_a_reader_opening_a_remote_url_meets_the_egress_gate(name, arguments, outcome):
     assert _gate(name, arguments) == outcome
     assert _gate(name, arguments, provenance=Provenance()) == ALLOW
+
+
+# --- M2: only a message typed into the chat box is the user's own words ------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", [store.RUNTIME_NEW, store.RUNTIME_LEGACY])
+@pytest.mark.parametrize(("form", "delegated", "stamped"), [
+    ({}, False, "agent"),
+    ({"interactive": "false"}, False, None),
+    ({}, True, None),
+], ids=["browser", "non-interactive", "api-token"])
+async def test_interaction_mode_marks_only_interactive_browser_turns(
+    harness, monkeypatch, runtime, form, delegated, stamped,
+):
+    store.set_chat_runtime("alice", runtime)
+    monkeypatch.setattr(chat_routes, "is_delegated_credential", lambda request: delegated)
+
+    await harness.send(_Request("agent", **form))
+
+    assert harness.captured["build_context"]["interaction_mode"] == stamped
