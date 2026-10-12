@@ -1722,6 +1722,14 @@ import { invalidateSettings } from './appConfig.js';
     return true;
   }
 
+  // budget_exceeded.kind is tokens | cost | tool_calls; a missing kind keeps
+  // the legacy tool-call text (spec #44, Stream events).
+  function _budgetExceededText(json) {
+    if (json.kind === 'tokens') return 'Token budget reached';
+    if (json.kind === 'cost') return 'Cost budget reached';
+    return `Tool budget reached (${json.used}/${json.limit} calls)`;
+  }
+
   export function queueStreamingComposerRequest() {
     if (!isStreaming) return false;
     const queuedInput = uiModule.el('message');
@@ -1914,6 +1922,10 @@ import { invalidateSettings } from './appConfig.js';
         const stoppedLabel = document.createElement('span');
         stoppedLabel.textContent = '[Message interrupted]';
         stoppedIndicator.appendChild(stoppedLabel);
+        // A chat_agent run records the stop itself (stop_reason interrupted;
+        // its Resume would be the legacy merge), so only the marker shows.
+        const _sid = sessionModule.getCurrentSessionId();
+        const _stoppedAgentRun = _streamRuntimes.get(_sid) === 'chat_agent';
         const continueBtn = document.createElement('button');
         continueBtn.className = 'continue-btn resume-btn';
         continueBtn.title = 'Resume response';
@@ -1930,12 +1942,11 @@ import { invalidateSettings } from './appConfig.js';
             if (sb) sb.click();
           }
         });
-        stoppedIndicator.appendChild(continueBtn);
+        if (!_stoppedAgentRun) stoppedIndicator.appendChild(continueBtn);
         _stoppedViewHolder.querySelector('.body').appendChild(stoppedIndicator);
 
         // Tell server to mark this message as stopped
-        const _sid = sessionModule.getCurrentSessionId();
-        if (_sid) fetch(`${API_BASE}/api/session/${_sid}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
+        if (_sid && !_stoppedAgentRun) fetch(`${API_BASE}/api/session/${_sid}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
         // Add footer with copy/regen if not already present
         if (!_stoppedViewHolder.querySelector('.msg-footer')) {
@@ -2214,6 +2225,7 @@ import { invalidateSettings } from './appConfig.js';
     let _streamSawDone = false;
     let spinner = null;
     let timedOut = false;
+    let streamRuntime = ''; // X-Odysseus-Runtime of this send's run; the catch path reads it too
     let processingProbeTimer = null;
     let processingProbeAbort = null;
     let _renderStream = () => {};
@@ -2872,7 +2884,7 @@ import { invalidateSettings } from './appConfig.js';
         return;
       }
       const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
-      const streamRuntime = res.headers.get('X-Odysseus-Runtime') || '';
+      streamRuntime = res.headers.get('X-Odysseus-Runtime') || '';
       if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration, streamRuntime);
 
       // Mark the chat log busy while streaming so screen readers wait for the
@@ -3000,9 +3012,15 @@ import { invalidateSettings } from './appConfig.js';
             await new Promise(resolve => setTimeout(resolve, 100 * (_attempt + 1)));
             return _replaceLiveTurnWithSavedAssistantMessage(_attempt + 1);
           }
-          if (!saved || !String(saved.content || '').trim()) return false;
+          // A chat_agent row's content is every round joined; the live
+          // timeline already shows the earlier rounds, so only the last
+          // round's text replaces the final bubble (#65).
+          const savedRounds = saved?.metadata?.runtime === 'chat_agent' && !saved.metadata.edited
+            && Array.isArray(saved.metadata.round_texts) ? saved.metadata.round_texts : null;
+          const savedText = savedRounds ? savedRounds[savedRounds.length - 1] : saved?.content;
+          if (!saved || !String(savedText || '').trim()) return false;
           const scrollSnapshot = uiModule.captureHistoryScroll?.();
-          const rendered = _renderTerminalAnswer(saved.content, _savedAssistantMessageId, saved.metadata?.render_owner, saved.metadata?.replacement_scope);
+          const rendered = _renderTerminalAnswer(savedText, _savedAssistantMessageId, saved.metadata?.render_owner, saved.metadata?.replacement_scope);
           uiModule.restoreHistoryScroll?.(scrollSnapshot);
           if (rendered) _streamTurnMarker.remove();
           return rendered;
@@ -4174,7 +4192,9 @@ import { invalidateSettings } from './appConfig.js';
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
                 const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-                if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
+                // The chat_agent runtime marks reasoning with thinking deltas,
+                // so a reply opening like "Let me look at ..." is prose there.
+                if (!hasUnclosedThink && streamRuntime !== 'chat_agent' && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
                   const _trimmedRT = normalizedRoundText.trimStart();
                   const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
                   if (_isReasoning) {
@@ -4499,7 +4519,7 @@ import { invalidateSettings } from './appConfig.js';
                     }
                   }
                 }
-              } else if (json.type === 'rounds_exhausted') {
+              } else if (json.type === 'rounds_exhausted' || (json.type === 'budget_exceeded' && streamRuntime === 'chat_agent')) {
                 // The agent hit the per-turn step limit while still working.
                 // Offer a Continue button instead of stalling silently.
                 // NOTE: append to the chat-history container (bottom), NOT the
@@ -4507,6 +4527,8 @@ import { invalidateSettings } from './appConfig.js';
                 // finalize, which would wipe a note placed inside it.
                 const _chatBox = document.getElementById('chat-history');
                 if (!_isBg && _chatBox) {
+                  _cancelThinkingTimer();
+                  _removeThinkingSpinner();
                   // Drop any prior box so repeated cap-hits each get a fresh
                   // Continue at the bottom (multiple continues in a row).
                   const _old = _chatBox.querySelector('.rounds-exhausted');
@@ -4515,7 +4537,9 @@ import { invalidateSettings } from './appConfig.js';
                   note.className = 'stopped-indicator rounds-exhausted';
                   const label = document.createElement('span');
                   label.className = 'rounds-exhausted-label';
-                  label.textContent = `Reached the ${json.rounds || ''}-step limit — not finished.`;
+                  label.textContent = json.type === 'budget_exceeded'
+                    ? `${_budgetExceededText(json)} — not finished.`
+                    : `Reached the ${json.rounds || ''}-step limit — not finished.`;
                   note.appendChild(label);
                   const contBtn = document.createElement('button');
                   contBtn.className = 'continue-btn';
@@ -4524,11 +4548,18 @@ import { invalidateSettings } from './appConfig.js';
                   const _holder = holder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
-                    _hideUserBubble = true;
-                    _pendingContinue = _holder;
+                    // On chat_agent, Continue is a new turn with its own user
+                    // bubble; the legacy merge into the capped bubble is never
+                    // used (spec #44 Transcript, #65).
+                    if (streamRuntime !== 'chat_agent') {
+                      _hideUserBubble = true;
+                      _pendingContinue = _holder;
+                    }
                     const msgInput = uiModule.el('message');
                     if (msgInput) {
-                      msgInput.value = 'You hit the step limit before finishing — the task is not complete. Continue from exactly where you left off and keep going until it is done. Do NOT repeat work already done.';
+                      msgInput.value = streamRuntime === 'chat_agent'
+                        ? 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.'
+                        : 'You hit the step limit before finishing — the task is not complete. Continue from exactly where you left off and keep going until it is done. Do NOT repeat work already done.';
                       const sb = document.querySelector('.send-btn');
                       if (sb) sb.click();
                     }
@@ -4883,6 +4914,8 @@ import { invalidateSettings } from './appConfig.js';
                     currentToolBubble._elapsedTicker = null;
                   }
                   const ok = (json.exit_code === 0 || json.exit_code == null);
+                  // `blocked`: the runtime refused the call (denied, exit 126).
+                  const toolStatus = ok ? 'done' : json.blocked ? 'denied' : 'failed';
                   const cmd = json.command || '';
                   let outHtml = '';
                   if (!_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
@@ -4929,7 +4962,7 @@ import { invalidateSettings } from './appConfig.js';
                   }
 	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '') + (browserTool ? ' browser-preview-node' : '');
-                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${toolStatus}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -5169,7 +5202,7 @@ import { invalidateSettings } from './appConfig.js';
                 _removeThinkingSpinner();
                 const budgetDiv = document.createElement('div');
                 budgetDiv.style.cssText = 'font-size:11px;opacity:0.6;font-style:italic;padding:4px 8px;margin:4px 0;';
-                budgetDiv.textContent = `Tool budget reached (${json.used}/${json.limit} calls). Agent stopped.`;
+                budgetDiv.textContent = `${_budgetExceededText(json)}. Agent stopped.`;
                 const chatBox = document.getElementById('chat-history');
                 chatBox.appendChild(budgetDiv);
 
@@ -5782,12 +5815,14 @@ import { invalidateSettings } from './appConfig.js';
                 if (sb) sb.click();
               }
             });
-            stoppedIndicator.appendChild(continueBtn);
+            // A chat_agent run records the stop itself; its Resume would be
+            // the legacy merge (see the Stop handler in handleChatSubmit).
+            if (streamRuntime !== 'chat_agent') stoppedIndicator.appendChild(continueBtn);
             _catchViewHolder.querySelector('.body').appendChild(stoppedIndicator);
 
             // Tell server to mark this message as stopped
             const _sid2 = sessionModule.getCurrentSessionId();
-            if (_sid2) fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
+            if (_sid2 && streamRuntime !== 'chat_agent') fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
             if (!_catchViewHolder.querySelector('.msg-footer')) {
               _catchViewHolder.appendChild(createMsgFooter(_catchViewHolder));
@@ -6201,9 +6236,10 @@ import { invalidateSettings } from './appConfig.js';
     // Persist as an assistant message with stopped+cancelled metadata so the
     // chat-history loader renders the same indicator after a refresh.
     // Include the model name so the bubble header still shows which model
-    // was running when the user hit Stop.
+    // was running when the user hit Stop. A chat_agent run writes its own
+    // row on Stop (completed tool work kept), so no empty row is injected.
     const sid = sessionModule.getCurrentSessionId();
-    if (sid) {
+    if (sid && _streamRuntimes.get(sid) !== 'chat_agent') {
       let modelName = '';
       try { modelName = sessionModule.getCurrentModel?.() || ''; } catch {}
       // Fallback: pull from the holder's existing meta (the streaming
@@ -6311,6 +6347,21 @@ import { invalidateSettings } from './appConfig.js';
     const box = document.getElementById('chat-history');
     if (!box) return false;
     if (replaceHolder && replaceHolder.parentNode) replaceHolder.remove();
+    const agentRuntimeRun = resumeRuntime === 'chat_agent';
+    // Everything after the user's message is this turn (#65): the replay
+    // starts at the run's first event although history already drew the
+    // checkpointed in_progress row, and at the end the saved row is drawn
+    // in place of the replayed nodes and ask cards.
+    const clearTurnNodes = () => {
+      const users = box.querySelectorAll('.msg-user');
+      let node = users.length ? users[users.length - 1].nextSibling : null;
+      while (node) {
+        const next = node.nextSibling;
+        if (node.id !== 'chat-queued-bubble-host') node.remove();
+        node = next;
+      }
+    };
+    if (agentRuntimeRun) clearTurnNodes();
 
     // Block duplicate re-attach attempts while this reader is live. A dedicated
     // set (not _backgroundStreams) so checkBackgroundStream doesn't mistake this
@@ -6455,7 +6506,7 @@ import { invalidateSettings } from './appConfig.js';
       currentToolBubble.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
         '<span class="agent-thread-icon">' + (ok ? '✓' : '✗') + '</span>' + icon +
         '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
-        '<span class="agent-thread-status">' + (ok ? 'done' : 'failed') + '</span>' +
+        '<span class="agent-thread-status">' + (ok ? 'done' : json.blocked ? 'denied' : 'failed') + '</span>' +
         '<span class="agent-thread-chevron" aria-hidden="true"></span></div>' +
         '<div class="agent-thread-content">' +
         (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') +
@@ -6669,6 +6720,18 @@ import { invalidateSettings } from './appConfig.js';
           if (!isReplayCurrent()) { removeReplayNodes(); return true; }
           const saved = (data.history || []).find(message => message.role === 'assistant'
             && String(message.metadata?._db_id || '') === replayMessageId);
+          if (saved && agentRuntimeRun) {
+            // The saved row renders from its rounds (steers between them,
+            // tool status, stop reason); the replayed bubbles make way for it.
+            removeReplayNodes();
+            clearTurnNodes();
+            chatRenderer.addMessage('assistant', saved.content, saved.metadata?.model || (meta && meta.model), { ...saved.metadata, _fromHistory: true });
+            const lastBubble = [...box.querySelectorAll('.msg-ai')].pop();
+            if (lastBubble && metricsData) displayMetrics(lastBubble, metricsData);
+            replayRendering.settle();
+            uiModule.restoreHistoryScroll?.(scrollSnapshot);
+            return true;
+          }
           if (saved) {
             metricsData = { ...metricsData, ...saved.metadata };
             roundText = String(saved.content || '');
