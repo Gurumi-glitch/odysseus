@@ -33,7 +33,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
-from src.chat_agent.permissions import task_args
+from src.chat_agent.permissions import mcp_server, task_args
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
 from src.agent_loop import _allow_visual_tool_evidence_for_model
@@ -170,12 +170,6 @@ def deferred_catalog(denied: Iterable[str], *, include_mcp: bool) -> List[Dict[s
             and schema_name(schema) not in denied
         ]
     return catalog
-
-
-def mcp_server(name: str) -> str:
-    """The server id of an mcp__<server>__<tool> name, else ""."""
-    parts = name.split("__", 2)
-    return parts[1] if len(parts) == 3 and parts[0] == "mcp" else ""
 
 
 def catalog_section(catalog: Sequence[Dict[str, Any]]) -> str:
