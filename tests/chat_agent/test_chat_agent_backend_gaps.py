@@ -58,6 +58,23 @@ async def test_continue_marks_the_new_turn_user_row_as_continue(harness, form_so
     assert harness.captured["build_context"]["source"] == saved
 
 
+@pytest.mark.asyncio
+async def test_turn_end_metrics_are_saved_flat_on_the_assistant_row(harness):
+    # The history renderer calls displayMetrics(wrap, metadata): legacy saves
+    # the final metrics flat into the row's metadata (save_assistant_response).
+    _, body = await harness.send(_Request("agent"))
+
+    [metrics] = [e["data"] for e in _data_events(body) if e.get("type") == "metrics"]
+    [row] = harness.saved
+    assert metrics.keys() <= row.metadata.keys()
+    for key in ("response_time", "input_tokens", "output_tokens", "tokens_per_second", "requested_model"):
+        assert row.metadata[key] == metrics[key]
+    # Projections still own their keys, and the record still verifies.
+    assert row.metadata["runtime"] == "chat_agent"
+    from src.chat_agent.transcript import trusted_rounds
+    assert trusted_rounds({"content": row.content, "metadata": row.metadata}) is not None
+
+
 def test_add_user_message_stores_the_source_on_the_user_row():
     from routes.chat_helpers import PreprocessedMessage, add_user_message
 

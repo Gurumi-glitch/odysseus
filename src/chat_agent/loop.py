@@ -605,8 +605,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             record.add_steers(unused)
         # The last round's text with its titles linked, once (spec #44, Stream events).
         yield _event({"type": "final_response", "content": record.round_texts[-1]})
+        metrics = record.metrics = usage.metrics(record, conversation, contexts[-1].context_length)
         message_id = writer.finish()
-        metrics = usage.metrics(record, conversation, contexts[-1].context_length)
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
         # Stop: keep the completed blocks and the text streamed so far; partial
