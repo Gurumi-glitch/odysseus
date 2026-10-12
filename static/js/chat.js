@@ -5600,6 +5600,8 @@ import { invalidateSettings } from './appConfig.js';
 
         // Attach footer to the last visible bubble (roundHolder for multi-round agent, holder for single)
         const footerTarget = (roundHolder && roundHolder !== holder && roundHolder.style.display !== 'none') ? roundHolder : holder;
+        // memories_used landed on holder before any round bubble existed; the pill reads it from the footer's bubble
+        if (footerTarget !== holder && holder._memoriesUsed) footerTarget._memoriesUsed = holder._memoriesUsed;
         if (!footerTarget.querySelector('.msg-footer')) {
           footerTarget.appendChild(createMsgFooter(footerTarget, { animate: true }));
         }
@@ -6831,6 +6833,7 @@ import { invalidateSettings } from './appConfig.js';
       if (replayMessageId) target.dataset.dbId = replayMessageId;
       if (target.classList.contains('msg-ai')) {
         target.dataset.raw = roundText;
+        if (metricsData?.memories_used?.length) target._memoriesUsed = metricsData.memories_used;
         if (!target.querySelector('.msg-footer')) target.appendChild(createMsgFooter(target));
         const body = target.querySelector('.body');
         if (body && !body.querySelector('.sources-section')) {
