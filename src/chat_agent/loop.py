@@ -381,8 +381,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 approved_plan=turn.approved_plan, denied=layers.denied_names,
             ),
             skill_index=prompt.skill_index_section(
-                skills.index_for(owner=turn.owner),
-                _setting_int("skill_index_max_chars", settings.DEFAULT_SETTINGS["skill_index_max_chars"]),
+                skills.index_for(owner=turn.owner), prompt.SKILL_INDEX_MAX_CHARS,
             ) if skills is not None else "",
         )
         # The turn's user message: a fallback's compaction keeps it and what follows.

@@ -32,6 +32,9 @@ SKILL_INDEX_HEADER = (
     "Skills you can load with load_skill(name) when one fits the task. They are "
     "guidance, not permission:"
 )
+# Every usable skill's name is listed; their descriptions share this many
+# characters (#44, Skills).
+SKILL_INDEX_MAX_CHARS = 8000
 
 # Exact wording belongs to the prompt ticket (spec #44, Context and prompt).
 BEHAVIOUR_SECTION = (
