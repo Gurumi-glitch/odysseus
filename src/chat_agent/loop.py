@@ -135,6 +135,9 @@ class ChatAgentTurn:
     # The route's run_post_response_tasks bound to this request (memory and
     # skill extraction, webhook, auto-name); the loop adds the turn's results.
     after_turn: Optional[Callable[..., None]] = None
+    # False when nobody can answer an ask (interactive:false or an API token):
+    # every ask then resolves at once as a denial.
+    interactive: bool = True
 
 
 @dataclass(frozen=True)
@@ -728,7 +731,10 @@ class _Ask:
 
     async def events(self) -> AsyncIterator[str]:
         yield _event({"type": "ask_user", "data": self.card})
-        self.reply = await asks.wait(self.turn.session_id, self.turn.owner, self.card)
+        if self.turn.interactive:
+            self.reply = await asks.wait(self.turn.session_id, self.turn.owner, self.card)
+        else:
+            self.reply = asks.NO_INTERACTIVE_USER
         yield _event(asks.resolution_event(self.card, self.reply))
 
 
@@ -753,6 +759,8 @@ def _permission_decision(
 ) -> permissions.Decision:
     if reply is None:
         return permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
+    if reply.by == asks.BY_RUNTIME:
+        return permissions.Decision(permissions.DENY, reply.text)
     if reply.decision == asks.DENY:
         reason = "Denied by the user."
         return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
@@ -764,6 +772,8 @@ def _permission_decision(
 def _question_result(reply: Optional[asks.Answer]) -> str:
     if reply is None:
         return "The user did not answer in time."
+    if reply.by == asks.BY_RUNTIME:
+        return reply.text
     if reply.decision == asks.DENY:
         return "The user declined to answer."
     return f"The user answered: {reply.text}"
