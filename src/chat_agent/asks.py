@@ -4,7 +4,7 @@ An ask is a Future inside the detached run, keyed by session, run and ask id
 (spec #44, Asks). The run is flagged ``awaiting_user`` while it waits, so the
 background gate does not hold the instance for one open question. The only
 answer path is ``POST /api/chat/ask/{sid}``; a chat_stream send would cancel
-the waiting run.
+the waiting run. Steers queue per run the same way.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src import agent_runs
 
@@ -107,6 +107,40 @@ def answer(session_id: str, owner: str, ask_id: str, decision: str, text: str = 
     if decision not in DECISIONS[pending.kind]:
         return False
     pending.future.set_result(Answer(decision, text))
+    return True
+
+
+class SteerQueue:
+    """Messages the user sends while the run is live; the loop takes them at
+    round boundaries (spec #44, Asks, steering, finish)."""
+
+    def __init__(self, session_id: str, owner: str) -> None:
+        self.key = (session_id, _run_id(session_id))
+        self.owner = owner_key(owner)
+        self.texts: List[str] = []
+        _STEERS[self.key] = self
+
+    def take(self) -> List[str]:
+        texts, self.texts = self.texts, []
+        return texts
+
+    def close(self) -> List[str]:
+        """Stop accepting steers; returns the ones not taken yet."""
+        if _STEERS.get(self.key) is self:
+            del _STEERS[self.key]
+        return self.take()
+
+
+_STEERS: Dict[Tuple[str, str], SteerQueue] = {}
+
+
+def steer(session_id: str, owner: str, text: str) -> bool:
+    """Queue a steer for the session's live run, started by this owner.
+    False when no run takes steers (a legacy run, or the turn already ended)."""
+    queue = _STEERS.get((session_id, _run_id(session_id)))
+    if queue is None or queue.owner != owner_key(owner):
+        return False
+    queue.texts.append(text)
     return True
 
 

@@ -259,8 +259,8 @@ def _replay(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     Only a record the transcript writer signed over the content now stored is
     replayed as assistant/tool turns; an edited, rewritten or client-written
     one replays as its text. Each round's ``results`` are its tool-result
-    envelopes. Adapters decide which reasoning blocks they send (same provider
-    and model only, ADR 0004).
+    envelopes, then its ``steers`` as user messages. Adapters decide which
+    reasoning blocks they send (same provider and model only, ADR 0004).
     """
     rounds = transcript.trusted_rounds(message)
     if not rounds:
@@ -269,6 +269,7 @@ def _replay(message: Dict[str, Any]) -> List[Dict[str, Any]]:
     for turn_round in rounds:
         replayed.append({"role": "assistant", "blocks": turn_round["blocks"]})
         replayed.extend({"role": "tool", **result} for result in turn_round.get("results") or ())
+        replayed.extend({"role": "user", "content": block["text"]} for block in turn_round.get("steers") or ())
     return replayed
 
 
