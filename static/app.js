@@ -1390,6 +1390,7 @@ function initializeEventListeners() {
         }
 
       }
+      syncAutoModeButton();
     })
     .catch(() => {});
 
@@ -1772,6 +1773,7 @@ function initializeEventListeners() {
   const MODE_TOOLS = [
     { btnId: 'web-toggle-btn',  checkboxId: 'web-toggle',  stateKey: 'web' },
     { btnId: 'bash-toggle-btn', checkboxId: 'bash-toggle', stateKey: 'bash' },
+    { btnId: 'auto-mode-toggle-btn', checkboxId: 'auto-mode-toggle', stateKey: 'auto' },
   ];
 
   function _modeKey(stateKey, mode) { return `${stateKey}_${mode}`; }
@@ -1780,8 +1782,26 @@ function initializeEventListeners() {
     const state = loadToggleState();
     const key = _modeKey(stateKey, mode);
     if (Object.prototype.hasOwnProperty.call(state, key)) return !!state[key];
-    return mode === 'agent'; // default: ON in agent, OFF in chat
+    // Auto mode answers asks for the user: opt-in, never a default (#68).
+    return mode === 'agent' && stateKey !== 'auto'; // default: ON in agent, OFF in chat
   }
+
+  // The auto mode icon exists only on the new chat runtime, for users with
+  // the privilege (#68). Settings calls this again after the runtime switch.
+  async function syncAutoModeButton() {
+    const btn = el('auto-mode-toggle-btn');
+    if (!btn) return;
+    let runtimeOn = false;
+    try {
+      const res = await fetch(`${API_BASE}/api/chat_agent/settings`, { credentials: 'same-origin' });
+      const data = await res.json();
+      runtimeOn = res.ok && !!data.available && data.chat_runtime === 'new';
+    } catch (_) {}
+    const privileges = window._userPrivileges || {};
+    btn.hidden = !(runtimeOn && privileges.can_use_auto_mode !== false);
+    document.dispatchEvent(new CustomEvent('overflow-state-change'));
+  }
+  window.__odysseusSyncAutoModeButton = syncAutoModeButton;
 
   function saveToolPref(stateKey, mode, value) {
     const state = loadToggleState();
@@ -1792,6 +1812,7 @@ function initializeEventListeners() {
   const TOOL_TOGGLE_TOAST_LABELS = {
     web: 'Web search',
     bash: 'Shell',
+    auto: 'Auto mode',
   };
 
   function showToolToggleToast(stateKey, active) {
@@ -1840,8 +1861,8 @@ function initializeEventListeners() {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
-      // Hide bash button in chat mode
-      if (mode === 'chat' && stateKey === 'bash') {
+      // Hide bash and auto mode buttons in chat mode
+      if (mode === 'chat' && (stateKey === 'bash' || stateKey === 'auto')) {
         btn.style.display = 'none';
         return;
       }
@@ -2014,6 +2035,7 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+  setupToggle('auto-mode-toggle-btn', 'auto-mode-toggle', 'auto');
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -2312,7 +2334,7 @@ function initializeEventListeners() {
     if (!inputLeft || !overflowMenu || !overflowWrapper) return;
 
     // Buttons that can be collapsed (in reverse priority — last collapsed first)
-    const collapsibleIds = ['bash-toggle-btn', 'web-toggle-btn'];
+    const collapsibleIds = ['auto-mode-toggle-btn', 'bash-toggle-btn', 'web-toggle-btn'];
     const collapsibleBtns = collapsibleIds.map(id => el(id)).filter(Boolean);
     // Map of toolbar btn id → overflow mirror element (created dynamically)
     const overflowMirrors = new Map();
@@ -2395,6 +2417,9 @@ function initializeEventListeners() {
       // Collapse from lowest priority until it fits
       if (totalWidth > available) {
         for (let i = 0; i < collapsibleBtns.length; i++) {
+          // A button the runtime switch hides takes no space and must not
+          // reappear as an overflow entry.
+          if (collapsibleBtns[i].hidden) continue;
           collapsibleBtns[i].classList.add('toolbar-collapsed');
           const mirror = overflowMirrors.get(collapsibleBtns[i].id);
           if (mirror) mirror.style.display = '';
@@ -2692,9 +2717,9 @@ function initializeEventListeners() {
         const beforeNobody = Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {};
         if (!beforeNobody.nobody_prev_mode) beforeNobody.nobody_prev_mode = beforeNobody.mode || 'agent';
         Storage.setJSON(Storage.KEYS.TOGGLES, beforeNobody);
-        const _offIds = ['web-toggle', 'bash-toggle', 'research-toggle'];
+        const _offIds = ['web-toggle', 'bash-toggle', 'auto-mode-toggle', 'research-toggle'];
         _offIds.forEach(id => { const c = el(id); if (c) c.checked = false; });
-        ['web-toggle-btn', 'bash-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
+        ['web-toggle-btn', 'bash-toggle-btn', 'auto-mode-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
         if (typeof window.__odysseusSetChatMode === 'function') {
           window.__odysseusSetChatMode('chat');
         } else {

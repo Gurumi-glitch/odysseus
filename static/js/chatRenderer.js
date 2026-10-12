@@ -436,6 +436,16 @@ function _toolDisplayInfo(tool, command, data = null) {
   return { label: '', commandHtml: '' };
 }
 
+/**
+ * The line a tool card shows when auto mode's classifier denied the call
+ * (#68): the output is the denial reason, so it is shown open instead of
+ * folded under "Output".
+ */
+export function toolDenialHtml(ev) {
+  if (!ev || ev.denied_by !== 'auto_mode' || !String(ev.output || '').trim()) return '';
+  return `<div class="agent-thread-denial">${uiModule.esc(String(ev.output))}</div>`;
+}
+
 function _suppressRawToolOutput(tool, ok) {
   if (!ok) return false;
   const lower = String(tool || '').toLowerCase();
@@ -3573,8 +3583,9 @@ export function addMessage(role, content, modelName, metadata) {
             const evStatus = ev.status || ((ev.exit_code === 0 || ev.exit_code == null) ? 'done' : 'failed');
             const ok = evStatus === 'done';
             const evIcon = ok ? '✓' : evStatus === 'pending' ? '▶' : '✗';
-            let outHtml = '';
-            if (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
+            let outHtml = toolDenialHtml(ev);
+            const evDenied = !!outHtml;
+            if (!evDenied && !_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
               outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
             }
             const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
@@ -3609,7 +3620,7 @@ export function addMessage(role, content, modelName, metadata) {
             }
             const node = document.createElement('div');
             const browserTool = _isPrivateBrowserTool(ev.tool);
-            node.className = 'agent-thread-node' + (ok || evStatus === 'pending' ? '' : ' error') + (browserTool ? ' open browser-preview-node' : '');
+            node.className = 'agent-thread-node' + (ok || evStatus === 'pending' ? '' : ' error') + (browserTool ? ' open browser-preview-node' : evDenied ? ' open' : '');
             // Hide raw JSON for high-level app tools and diffs; show the same
             // compact command summary that live streaming uses.
             const evToolInfo = _toolDisplayInfo(ev.tool, ev.command, ev);
@@ -4082,6 +4093,7 @@ const chatRenderer = {
   copyMessageText,
   safeToolScreenshotSrc,
   safeDisplayImageSrc,
+  toolDenialHtml,
   removeAskUserCards,
   renderAskUserCard,
   resolveAskUserCard,

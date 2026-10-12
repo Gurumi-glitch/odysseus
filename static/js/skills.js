@@ -1860,8 +1860,9 @@ function _applySkillStateToHeader(card, state, fallbackVerdict) {
   const current = skills.find(s => (s.name || s.id) === name) || {};
   const merged = { ...current, ...(state || {}) };
   if (verdict && !merged.audit_verdict) merged.audit_verdict = verdict;
-  // The audit payload carries no `state`; the pill keeps the one from the last
-  // list load and loadSkills() at the end of the run corrects it.
+  // results[].skill_state.state is the card state after this skill's audit
+  // (demoted, binned, published), so the pill and filters update live.
+  if (state && state.state) card.dataset.skillStatus = state.state;
   const statsEl = card.querySelector('.skill-stats');
   if (statsEl && (state || verdict)) {
     statsEl.innerHTML = _skillStatsHtml(merged);

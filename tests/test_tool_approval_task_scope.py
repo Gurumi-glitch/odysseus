@@ -347,7 +347,7 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "const skipBubble = _hideUserBubble || !!approvalForSend;" in frontend
     assert "fd.append('message', approvalForSend ? '' : _finalMsgWithInject);" in frontend
     assert "json.type === 'tool_approval_resolved'" in frontend
-    assert "if (aq.resolved) return null;" in renderer
+    assert "if (aq.resolved && !chatAsk) return null;" in renderer
     assert "ev.ask_user && !ev.ask_user.resolved" in renderer
     assert '"label": "Allow once"' not in approvals
     assert '"label": "Allow for this task"' in approvals

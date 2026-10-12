@@ -848,6 +848,9 @@ import { invalidateSettings } from './appConfig.js';
     } catch (_) {}
   }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
+  // The next send's form field `source`: 'continue' after a capped chat_agent
+  // turn, so its user row records metadata.source (spec #44 Transcript).
+  let _pendingTurnSource = '';
   function _createChatSendPerf() {
     const started = (performance && performance.now) ? performance.now() : Date.now();
     let last = started;
@@ -1661,6 +1664,61 @@ import { invalidateSettings } from './appConfig.js';
       message: items.map(item => String(item.message || '').trim()).filter(Boolean).join('\n\n'),
       createdAt: items[0]?.createdAt || Date.now(),
     };
+  }
+
+  // A fallback answered and the server moved the session onto it (#55). The
+  // cached session and the last picker choice must follow, or the picker
+  // keeps the failed model and the next send carries it back as
+  // selected_model / selected_endpoint_id.
+  function _stickToFallbackRoute(json, sid) {
+    if (!sid || !json.answered_by) return;
+    const endpointId = json.answered_by_endpoint_id ? String(json.answered_by_endpoint_id) : '';
+    const items = window.modelsModule?.getCachedItems?.() || [];
+    const endpoint = endpointId ? items.find(item => String(item.endpoint_id || '') === endpointId) : null;
+    const s = (sessionModule.getSessions?.() || []).find(x => x.id === sid);
+    if (s) {
+      s.model = json.answered_by;
+      s.endpoint_id = endpointId;
+      s.endpoint_name = json.answered_by_endpoint_label || '';
+      // Unknown URL beats the failed one: the server ignores a model without
+      // a route rather than re-binding the session to the failed endpoint.
+      s.endpoint_url = endpoint ? endpoint.url || '' : '';
+    }
+    const lastPicked = window.__odysseusLastPickedRoute || null;
+    if (lastPicked && lastPicked.session_id === sid) {
+      window.__odysseusLastPickedRoute = {
+        model: json.answered_by,
+        endpoint_url: endpoint ? endpoint.url || '' : '',
+        endpoint_id: endpointId,
+        display: _shortModel(json.answered_by),
+        picked_at: Date.now(),
+        session_id: sid,
+      };
+    }
+    if (sessionModule.updateModelPicker) sessionModule.updateModelPicker();
+  }
+
+  // auto_mode stream states (#68): active; paused, after the chat's denials
+  // passed a threshold, until an approved ask; unavailable, when the turn
+  // cannot use it (no privilege, no one to answer asks).
+  function _applyAutoModeState(state) {
+    const btn = uiModule.el('auto-mode-toggle-btn');
+    if (!btn) return;
+    btn.classList.toggle('auto-paused', state === 'paused');
+    btn.title = state === 'paused' ? 'Auto mode paused until you approve an ask' : 'Auto mode';
+  }
+
+  /** The paused state of a chat as the server stores it, for the icon on session load (#68). */
+  async function checkAutoModePaused(sessionId) {
+    let paused = false;
+    if (sessionId) {
+      try {
+        const res = await fetch(`${API_BASE}/api/chat_agent/auto_mode/${encodeURIComponent(sessionId)}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        paused = res.ok && !!data.paused;
+      } catch (_) {}
+    }
+    _applyAutoModeState(paused ? 'paused' : 'active');
   }
 
   function _setComposerAndSend(message) {
@@ -2637,6 +2695,15 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
 	      }
+	      // One-shot, set by the composer's /name skill invocation (#66).
+	      if (window.__odysseusPendingInvokedSkill) {
+	        fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);
+	        window.__odysseusPendingInvokedSkill = '';
+	      }
+	      if (_pendingTurnSource) {
+	        fd.append('source', _pendingTurnSource);
+	        _pendingTurnSource = '';
+	      }
 	      if (el('web-toggle').checked) {
 	        if (!isAgentMode) {
 	          fd.append('use_web', 'true');
@@ -2652,6 +2719,9 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.set('plan_mode', 'false');
 	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      // Auto mode (#68) is agent-only like the shell toggle; the server checks
+      // the runtime, the privilege and that someone can answer asks.
+      fd.append('auto_mode', el('auto-mode-toggle')?.checked ? 'true' : 'false');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {
         fd.append('use_rag', 'false');
@@ -4497,6 +4567,7 @@ import { invalidateSettings } from './appConfig.js';
                   var _selM = _shortModel(json.selected_model || '');
                   var _ansM = _shortModel(json.answered_by || '');
                   uiModule.showToast('Fallback: ' + _selM + ' failed — answered by ' + _ansM, 6000);
+                  _stickToFallbackRoute(json, streamSessionId);
                   var _fallbackHolder = applyModelRouteEventState(json, holder, roundHolder, modelName);
                   if (_fallbackHolder) {
                     var _rEl = _fallbackHolder.querySelector('.role');
@@ -4554,6 +4625,8 @@ import { invalidateSettings } from './appConfig.js';
                     if (streamRuntime !== 'chat_agent') {
                       _hideUserBubble = true;
                       _pendingContinue = _holder;
+                    } else {
+                      _pendingTurnSource = 'continue';
                     }
                     const msgInput = uiModule.el('message');
                     if (msgInput) {
@@ -4917,8 +4990,9 @@ import { invalidateSettings } from './appConfig.js';
                   // `blocked`: the runtime refused the call (denied, exit 126).
                   const toolStatus = ok ? 'done' : json.blocked ? 'denied' : 'failed';
                   const cmd = json.command || '';
-                  let outHtml = '';
-                  if (!_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
+                  let outHtml = chatRenderer.toolDenialHtml(json);
+                  const deniedByAuto = !!outHtml;
+                  if (!deniedByAuto && !_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
                     outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
                   }
                   // File-write diff (write_file): show a before/after unified diff.
@@ -4960,7 +5034,7 @@ import { invalidateSettings } from './appConfig.js';
 	                  if (browserTool) {
                     outHtml = _privateBrowserPreviewHtml(cmd, json.screenshot) + outHtml;
                   }
-	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
+	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool || deniedByAuto;
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '') + (browserTool ? ' browser-preview-node' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${toolStatus}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
@@ -5117,6 +5191,9 @@ import { invalidateSettings } from './appConfig.js';
               } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
                 if (_isBg) continue;
                 chatRenderer.resolveAskUserCard(json.ask_id, json);
+
+              } else if (json.type === 'auto_mode') {
+                if (!_isBg) _applyAutoModeState(json.state);
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -6502,7 +6579,8 @@ import { invalidateSettings } from './appConfig.js';
       const output = String(json.output || '');
       const label = String(json.label || json.tool || 'Tool');
       const icon = renderToolIcon(json.tool || '', command, json) || '';
-      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error');
+      const denialHtml = chatRenderer.toolDenialHtml(json);
+      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (denialHtml ? ' open' : '');
       currentToolBubble.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
         '<span class="agent-thread-icon">' + (ok ? '✓' : '✗') + '</span>' + icon +
         '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
@@ -6510,7 +6588,7 @@ import { invalidateSettings } from './appConfig.js';
         '<span class="agent-thread-chevron" aria-hidden="true"></span></div>' +
         '<div class="agent-thread-content">' +
         (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') +
-        (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '') +
+        (denialHtml || (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '')) +
         '</div>';
       if (currentToolThread) currentToolThread.classList.remove('streaming');
     };
@@ -6592,6 +6670,8 @@ import { invalidateSettings } from './appConfig.js';
             chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime'), focus: false });
           } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
             chatRenderer.resolveAskUserCard(json.ask_id, json);
+          } else if (json.type === 'auto_mode') {
+            _applyAutoModeState(json.state);
           } else if (json.type === 'plan_update') {
             rich = true;
             const plan = (json.data && json.data.plan) ? json.data.plan : '';
@@ -6607,6 +6687,7 @@ import { invalidateSettings } from './appConfig.js';
             // Reflect the fallback immediately, then reload the canonical
             // multi-round record when the detached run completes.
             rich = true;
+            _stickToFallbackRoute(json, sessionId);
             const fallbackHolder = applyModelRouteEventState(json, holder, null, meta && meta.model);
             if (fallbackHolder) {
               _setRoleModelLabel(
@@ -8212,6 +8293,7 @@ import { invalidateSettings } from './appConfig.js';
     abortCurrentRequest,
     detachCurrentStream,
     checkBackgroundStream,
+    checkAutoModePaused,
     resumeStream,
     hideWelcomeScreen: chatRenderer.hideWelcomeScreen,
     showWelcomeScreen: chatRenderer.showWelcomeScreen,

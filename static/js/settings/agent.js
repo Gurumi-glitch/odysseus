@@ -36,6 +36,8 @@ export async function initAgentSettings() {
         if (!res.ok) throw new Error(data.detail || 'Failed to save');
         runtimeToggle.checked = data.chat_runtime === 'new';
         runtimeMsg.textContent = 'Saved. Applies from your next message.'; runtimeMsg.style.color = 'var(--fg)';
+        // The composer's auto mode icon exists only on the new runtime (#68).
+        if (window.__odysseusSyncAutoModeButton) window.__odysseusSyncAutoModeButton();
       } catch (e) {
         // Keep the switch honest: a refused save leaves the server state unchanged.
         runtimeToggle.checked = !runtimeToggle.checked;

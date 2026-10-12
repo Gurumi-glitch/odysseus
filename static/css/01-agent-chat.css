@@ -2757,6 +2757,11 @@ body.bg-pattern-ascii-fireflies {
 	      color: var(--fg);
 	      background: color-mix(in srgb, var(--fg) 9%, transparent);
 	    }
+	    /* Runtime-switch gate on the auto mode icon (#68): the author
+	       display rule above would otherwise beat the hidden attribute. */
+	    .input-icon-btn[hidden] { display: none !important; }
+	    /* Auto mode paused: on, but asks come back to the user until one is approved. */
+	    .input-icon-btn.auto-paused { color: var(--warn); opacity: 1; }
 	    .plan-mode-btn {
 	      width: 28px;
 	      height: 28px;
