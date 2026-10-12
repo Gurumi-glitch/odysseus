@@ -737,7 +737,21 @@ _EXTERNAL_SOURCES = (
     WEB_ACCESS_TOOL_NAMES | _EMAIL_READS
     | {"pdf_extract", "trigger_research", "manage_research", "manage_bg_jobs"}
 )
-_PRIVATE_SOURCES = _EMAIL_READS | {"search_chats", "vault_get", "vault_search"}
+
+
+def _reads_private(tool: str, content: Any) -> bool:
+    """A call that brings the user's private data into the context (2026-10-13
+    decision, ADR 0002 amendment): every known READ_PRIVATE call, which covers
+    email, chat search, vault, the session/contact/account listers and the
+    read actions of the manage_* tools, plus a GET raw API call. Custom MCP
+    tools (unknown) stay the external leg only."""
+    if tool in _RAW_API_TOOLS:
+        return not _raw_api_writes(tool, content)
+    # Relies on: capabilities_for_action gives a manage_* read action only
+    # READ_PRIVATE, a write action only its writes, and an unreadable action
+    # both (so an unparsed call counts as a read).
+    capabilities = capabilities_for_action(tool, content)
+    return capabilities.known and ToolEffect.READ_PRIVATE in capabilities.effects
 
 
 # Row metadata where a compaction summary keeps the provenance of the rows it
@@ -754,13 +768,13 @@ class Provenance:
     # Where the external content came from, for auto mode's classifier.
     origins: Tuple[str, ...] = ()
 
-    def after(self, name: str) -> "Provenance":
-        """The provenance once a call to ``name`` has run."""
+    def after(self, name: str, content: Any = "") -> "Provenance":
+        """The provenance once a call to ``name`` with ``content`` has run."""
         tool = policy_name(name)
         external = tool in _EXTERNAL_SOURCES or tool.startswith(_MCP_PREFIX)
         return Provenance(
             external=self.external or external,
-            private=self.private or tool in _PRIVATE_SOURCES,
+            private=self.private or _reads_private(tool, content),
             origins=self.origins + ((tool,) if external and tool not in self.origins else ()),
         )
 
@@ -773,7 +787,7 @@ class Provenance:
             metadata = (getattr(row, "metadata", None) if not isinstance(row, dict) else row.get("metadata")) or {}
             for event in metadata.get("tool_events") or ():
                 if isinstance(event, dict) and event.get("tool"):
-                    provenance = provenance.after(str(event["tool"]))
+                    provenance = provenance.after(str(event["tool"]), event.get("command") or "")
             recorded = metadata.get(PROVENANCE_KEY)
             if isinstance(recorded, dict):
                 # A recorded leg only ever arms the gate, so a forged one costs an ask.

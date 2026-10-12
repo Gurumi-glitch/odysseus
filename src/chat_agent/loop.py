@@ -534,7 +534,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                             prior_tool_events=record.tool_events,
                         )
                         outcome.model_text = adapted.model_text
-                        provenance = provenance.after(block.tool_type)
+                        provenance = provenance.after(block.tool_type, block.content)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
