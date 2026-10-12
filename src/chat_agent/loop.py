@@ -17,7 +17,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
 from src.agent_loop import _configured_model_tool_surface
 from src.agent_tools import MAX_AGENT_ROUNDS
-from src.chat_agent import permissions, prompt, tools, transcript
+from src.chat_agent import asks, permissions, prompt, tools, transcript
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
@@ -35,10 +35,12 @@ from src import settings
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
 from src.tool_schemas import function_call_to_tool_block
+from src.turn_contract import canonical_tool
 
 logger = logging.getLogger(__name__)
 
 TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
+ASK_EXPIRED_REASON = "Not run: the user did not answer the approval request in time."
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             denied_names=layers.denied_names,
         )
         tool_calls_used = 0
+        # An unanswered ask ends the turn after its round, keeping the work done.
+        ask_expired = False
         while True:
             end = None
             async for event in _stream_round(turn, provider, endpoint, conversation, tool_schemas):
@@ -168,7 +172,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             budget_hit = False
             for call in calls:
                 block = function_call_to_tool_block(call["name"], call["arguments"])
-                if caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                # The card shown for this call, stored on its tool event.
+                card, reply = None, None
+                if ask_expired:
+                    decision = permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
+                elif caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
                     # Every call still gets a result, so the round replays
                     # as a complete call/result pair.
                     budget_hit = True
@@ -176,6 +184,18 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 else:
                     tool_calls_used += 1
                     decision = _gate(call, block, layers, offered)
+                if decision.outcome == permissions.ASK and asks.granted_for_chat(
+                    turn.owner, turn.session_id, canonical_tool(block.tool_type),
+                ):
+                    decision = permissions.Decision(permissions.ALLOW)
+                if decision.outcome == permissions.ASK:
+                    ask_id = asks.new_ask_id()
+                    card = asks.permission_card(ask_id, turn.session_id, block.tool_type, block.content)
+                    yield _event({"type": "ask_user", "data": card})
+                    reply = await asks.wait(turn.session_id, ask_id, asks.PERMISSION)
+                    yield _event(asks.resolution_event(ask_id, reply))
+                    ask_expired = reply is None
+                    decision = _permission_decision(turn, block, reply)
                 if decision.outcome == permissions.ALLOW:
                     yield _event({
                         "type": "tool_start", "tool": block.tool_type, "command": block.content,
@@ -183,16 +203,30 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         "call_id": call["call_id"],
                     })
                     outcome = await tools.execute(call["call_id"], block, scope)
+                    question = outcome.result.get("ask_user") if outcome.ok else None
+                    if question:
+                        ask_id = asks.new_ask_id()
+                        card = asks.question_card(ask_id, turn.session_id, question)
+                        yield _event({"type": "ask_user", "data": card})
+                        reply = await asks.wait(turn.session_id, ask_id, asks.QUESTION)
+                        yield _event(asks.resolution_event(ask_id, reply))
+                        ask_expired = reply is None
+                        outcome.model_text = _question_result(reply)
                 else:
                     outcome = tools.refused_outcome(
                         call, block, decision.reason,
                         denied=decision.outcome != permissions.INVALID,
                     )
                 yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
-                record.tool_events.append(outcome.tool_event(len(record.rounds), endpoint.model))
+                tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
+                if card is not None:
+                    tool_event["ask_user"] = asks.resolved_card(card, reply)
+                record.tool_events.append(tool_event)
                 results.append(outcome.envelope())
                 conversation.append({"role": "tool", **outcome.envelope()})
             round_record["results"] = results
+            if ask_expired:
+                break
             if budget_hit:
                 yield _event({"type": "budget_exceeded", "kind": "tool_calls",
                               "limit": caps.max_tool_calls, "used": tool_calls_used})
@@ -227,6 +261,27 @@ def _gate(
             permissions.INVALID, f"{call['name']}: the arguments are not valid for this tool.",
         )
     return permissions.decide(layers, block.tool_type, block.content)
+
+
+def _permission_decision(
+    turn: ChatAgentTurn, block: Any, reply: Optional[asks.Answer],
+) -> permissions.Decision:
+    if reply is None:
+        return permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
+    if reply.decision == asks.DENY:
+        reason = "Denied by the user."
+        return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
+    if reply.decision == asks.CHAT:
+        asks.grant_for_chat(turn.owner, turn.session_id, canonical_tool(block.tool_type))
+    return permissions.Decision(permissions.ALLOW)
+
+
+def _question_result(reply: Optional[asks.Answer]) -> str:
+    if reply is None:
+        return "The user did not answer in time."
+    if reply.decision == asks.DENY:
+        return "The user declined to answer."
+    return f"The user answered: {reply.text}"
 
 
 def _tool_output_event(outcome: tools.ToolOutcome, *, attempted: bool) -> dict:

@@ -35,6 +35,7 @@ from src.agent_loop import (
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
+from src.chat_agent import asks as chat_asks
 from src.chat_agent.loop import ChatAgentTurn, run_chat_agent_turn
 from src.chat_agent.routing import CHAT_AGENT, ComposerToggles, TurnFacts, choose_runtime
 from src.model_context import estimate_tokens
@@ -5038,6 +5039,22 @@ def setup_chat_routes(
         expected_run_id = request.headers.get("X-Odysseus-Run-Id")
         accepted = agent_runs.request_finish(session_id, expected_run_id)
         return {"accepted": accepted}
+
+    @router.post("/api/chat/ask/{session_id}")
+    async def chat_ask(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
+        """Answer a chat_agent ask; the waiting turn continues (spec #44, Asks)."""
+        if is_internal_tool_request(request) or is_delegated_credential(request):
+            raise HTTPException(403, "Only you, in an interactive session, can answer an ask.")
+        _verify_session_owner(request, session_id)
+        decision = str(body.get("decision") or "")
+        if decision not in {chat_asks.ONCE, chat_asks.CHAT, chat_asks.DENY, chat_asks.ANSWER}:
+            raise HTTPException(400, "decision must be once, chat, deny or answer.")
+        text = body.get("text") or ""
+        if not isinstance(text, str):
+            raise HTTPException(400, "text must be a string.")
+        if not chat_asks.answer(session_id, str(body.get("ask_id") or ""), decision, text):
+            raise HTTPException(409, "No open ask matches this answer.")
+        return {"accepted": True}
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
