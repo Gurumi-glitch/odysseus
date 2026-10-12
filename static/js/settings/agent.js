@@ -7,6 +7,38 @@ import { byId as el } from './dom.js';
 import { postSettings as _postSettings } from './api.js';
 
 export async function initAgentSettings() {
+  var runtimeToggle = el('set-chatRuntimeToggle');
+  var runtimeCard = el('set-chatRuntimeCard');
+  var runtimeMsg = el('set-chatRuntimeMsg');
+  if (runtimeToggle) {
+    // Per-user switch in the chat_agent store (spec #44), not /api/auth/settings.
+    try {
+      var rtRes = await fetch('/api/chat_agent/settings', { credentials: 'same-origin' });
+      var rt = await rtRes.json();
+      if (!rtRes.ok) throw new Error(rt.detail || 'Failed to load');
+      if (rt.available) runtimeToggle.checked = rt.chat_runtime === 'new';
+      else if (runtimeCard) runtimeCard.style.display = 'none';
+    } catch (e) { runtimeMsg.textContent = e.message || 'Failed to load'; runtimeMsg.style.color = 'var(--red)'; }
+
+    runtimeToggle.addEventListener('change', async function() {
+      try {
+        var res = await fetch('/api/chat_agent/settings', {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_runtime: runtimeToggle.checked ? 'new' : 'legacy' }),
+        });
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.detail || 'Failed to save');
+        runtimeToggle.checked = data.chat_runtime === 'new';
+        runtimeMsg.textContent = 'Saved. Applies from your next message.'; runtimeMsg.style.color = 'var(--fg)';
+      } catch (e) {
+        // Keep the switch honest: a refused save leaves the server state unchanged.
+        runtimeToggle.checked = !runtimeToggle.checked;
+        runtimeMsg.textContent = e.message || 'Failed to save'; runtimeMsg.style.color = 'var(--red)';
+      }
+    });
+  }
+
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
