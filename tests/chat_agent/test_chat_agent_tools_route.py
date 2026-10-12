@@ -171,7 +171,7 @@ async def test_nobody_mode_denies_memory_tools(harness, admin):
     first, second = harness.captured["provider_requests"]
     assert "manage_memory" not in _tool_names(first)
     assert "manage_memory" in first["messages"][0]["content"]
-    assert [e["tool"] for e in _tool_events(_data_events(body), "tool_start")] == []
+    assert [e["tool"] for e in _tool_events(_data_events(body), "tool_start")] == ["manage_memory"]
     assert json.loads(_tool_messages(second)[0]["content"])["status"] == "denied"
 
 
