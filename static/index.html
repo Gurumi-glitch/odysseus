@@ -1652,6 +1652,21 @@
             <div class="admin-toggle-sub" style="margin-bottom:8px">Run agent-mode turns on the new chat runtime instead of the legacy agent loop. Applies from your next message.</div>
             <div id="set-chatRuntimeMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
           </div>
+          <div class="admin-card" id="set-chatInstructionsCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>Instructions<span style="flex:1"></span><label class="admin-switch" title="Load your instructions file on the new runtime"><input type="checkbox" id="set-chatInstructionsToggle"><span class="admin-slider"></span></label></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Standing instructions the new runtime reads before every turn. The workspace's AGENTS.md or CLAUDE.md loads as well; the switch only affects this file.</div>
+            <div class="settings-col">
+              <textarea id="set-chatInstructionsText" rows="8" class="settings-select" style="font-family:inherit;resize:vertical" placeholder="e.g. Answer in the language I write in. Keep replies short and skip pleasantries."></textarea>
+              <div class="settings-row" style="margin-top:4px;align-items:center">
+                <span id="set-chatInstructionsPath" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);word-break:break-all;"></span>
+                <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;flex-shrink:0">
+                  <span id="set-chatInstructionsCount" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></span>
+                  <button class="admin-btn-add" id="set-chatInstructionsSave" style="display:inline-flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>Save</button>
+                </span>
+              </div>
+              <div id="set-chatInstructionsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Image Generation<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-imgEnabledToggle"><span class="admin-slider"></span></label></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Configure which model to use for image generation.</div>
