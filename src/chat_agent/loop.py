@@ -27,7 +27,9 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # session's registered run is running and Finish was requested for it; a run
 # that replaces it starts with the flag clear.
 from src import agent_runs
-from src.chat_agent import asks, permissions, prompt, repeat_guard, session_rules, tools, transcript
+from src.chat_agent import (
+    asks, permissions, prompt, repeat_guard, session_rules, tools, transcript, turn_context,
+)
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
@@ -117,6 +119,12 @@ class ChatAgentTurn:
     fallback_statuses: FrozenSet[int]
     # Moves the session's stored model and endpoint (fallback is sticky).
     stick_route: Callable[[Candidate], None]
+    # What the browser has open: the reader's email (uid/folder/account and
+    # cached subject/from/preview), the visible editor tab's document id, and
+    # the approved plan it sends back while that plan runs.
+    active_email: Optional[Dict[str, str]] = None
+    active_document_id: str = ""
+    approved_plan: str = ""
 
 
 @dataclass(frozen=True)
@@ -306,12 +314,24 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         catalog = tools.deferred_catalog(
             layers.denied_names, include_mcp=not layers.hide_all_mcp,
         ) if upfront else []
-        unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
+        # The reader's denials come and go with the open email, so the turn
+        # context names them; the system prompt stays the same across turns.
+        reader_denied = permissions.EMAIL_READER_DENIED if turn.active_email_open else frozenset()
+        unavailable = [
+            name for name in tools.upfront_tool_names()
+            if name in layers.disabled and name not in reader_denied
+        ]
+        document = turn_context.load_document(turn.owner, turn.active_document_id)
         conversation = await prompt.build_messages(
             turn.build_context,
             [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
             toggles=turn.toggles,
+            model=endpoint.model,
+            open_items=turn_context.OpenItems(
+                document=document, email=turn.active_email,
+                approved_plan=turn.approved_plan, denied=layers.denied_names,
+            ),
         )
         tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
         scope = tools.ExecutionScope(
@@ -320,6 +340,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             workspace=turn.toggles.workspace,
             client_runtime_context=turn.client_runtime_context,
             denied_names=layers.denied_names,
+            active_document_id=document.id if document is not None else None,
         )
         tool_calls_used = 0
         guard = repeat_guard.RepeatGuard()
@@ -425,6 +446,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 if ask is not None:
                     tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
                 record.tool_events.append(tool_event)
+                record.link_sources.append({**outcome.result, **tool_event})
                 envelope = outcome.envelope()
                 if reminder:
                     # The reminder is for the model only; the tool card keeps the output.
@@ -456,6 +478,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
+        # The last round's text with its titles linked, once (spec #44, Stream events).
+        yield _event({"type": "final_response", "content": record.round_texts[-1]})
         message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
     except Exception:
         # A crash ends the turn visibly; it never falls back to legacy, which

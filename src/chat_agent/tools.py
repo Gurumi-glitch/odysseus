@@ -231,6 +231,9 @@ class ExecutionScope:
     workspace: Optional[str]
     client_runtime_context: Optional[Dict[str, Any]]
     denied_names: frozenset
+    # The open editor document: document tools without an explicit id edit
+    # this one, never the owner's most recent document in another chat.
+    active_document_id: Optional[str] = None
 
 
 @dataclass
@@ -304,6 +307,7 @@ async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcom
         exact_approval=None,
         client_runtime_context=scope.client_runtime_context,
         request_authority=authority,
+        active_document_id=scope.active_document_id,
     )
     if tool_result_is_successful(result):
         status, exit_code = STATUS_DONE, EXIT_DONE

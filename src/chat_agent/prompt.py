@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src import constants
-from src.chat_agent import store
+from src.chat_agent import store, turn_context
 from src.chat_agent.routing import ComposerToggles
 
 logger = logging.getLogger(__name__)
@@ -144,13 +144,30 @@ async def build_messages(
     *,
     owner: str,
     toggles: ComposerToggles,
+    model: str,
+    open_items: turn_context.OpenItems,
 ) -> List[Dict[str, Any]]:
     # prefetch=False: the model fetches URLs, searches and YouTube itself, so
     # toggles and provenance apply. agent_mode=False keeps the legacy skills
     # index out; this runtime builds its own.
     ctx = await build_context(prefetch=False, agent_mode=False)
+    turn_context.bind_process_state(open_items.document, model)
     files = [] if toggles.incognito else instruction_files(owner, toggles.workspace)
-    return assemble(ctx.preface, ctx.messages, system_sections, instructions_message(files))
+    preface_ids = {id(message) for message in ctx.preface}
+    *history, current = [m for m in ctx.messages if id(m) not in preface_ids]
+    page = turn_context.messages(
+        open_items=open_items,
+        plan_mode=toggles.plan_mode,
+        workspace=toggles.workspace,
+        current_text=_plain(current.get("content")),
+        history=history,
+        uploaded_files=ctx.uploaded_files,
+        attachment_meta=ctx.preprocessed.attachment_meta or [],
+    )
+    return assemble(
+        ctx.preface, ctx.messages, [*turn_context.system_sections(), *system_sections],
+        instructions_message(files), page,
+    )
 
 
 def assemble(
@@ -158,6 +175,7 @@ def assemble(
     messages: List[Dict[str, Any]],
     system_sections: List[str] = (),
     instructions: Optional[Dict[str, Any]] = None,
+    page: List[Dict[str, Any]] = (),
 ) -> List[Dict[str, Any]]:
     preface_ids = {id(message) for message in preface}
     system_text = "\n\n".join(
@@ -165,16 +183,15 @@ def assemble(
         + [BEHAVIOUR_SECTION]
         + [section for section in system_sections if section]
     )
-    turn_context = [m for m in preface if m.get("role") != "system"]
     # Relies on: with agent_mode=False, build_chat_context places the
     # date/time message immediately before the current user message.
     *history, datetime_message, current = [m for m in messages if id(m) not in preface_ids]
-    turn_context.append(datetime_message)
+    context = [*page, *(m for m in preface if m.get("role") != "system"), datetime_message]
     return [
         {"role": "system", "content": system_text},
         *([instructions] if instructions else []),
         *(replayed for m in history for replayed in _replay(m)),
-        {"role": "user", "content": _with_context(current.get("content"), turn_context)},
+        {"role": "user", "content": _with_context(current.get("content"), context)},
     ]
 
 
@@ -193,6 +210,12 @@ def _replay(message: Dict[str, Any]) -> List[Dict[str, Any]]:
         replayed.append({"role": "assistant", "blocks": turn_round["blocks"]})
         replayed.extend({"role": "tool", **result} for result in turn_round.get("results") or ())
     return replayed
+
+
+def _plain(content: Any) -> str:
+    if isinstance(content, list):
+        return " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    return str(content or "")
 
 
 def _with_context(content: Any, context: List[Dict[str, Any]]) -> Any:
