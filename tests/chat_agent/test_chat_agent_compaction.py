@@ -259,7 +259,7 @@ def _runtime_row(text, input_tokens, output_tokens=1_000):
 
 @pytest.fixture
 def popover(manager, monkeypatch):
-    from fastapi import FastAPI
+    from fastapi import APIRouter, FastAPI
     from fastapi.testclient import TestClient
 
     from routes import session_routes
@@ -268,6 +268,7 @@ def popover(manager, monkeypatch):
     monkeypatch.setattr("src.model_context.get_context_length", lambda url, model: POPOVER_WINDOW)
     # app.py's order: the session routes come first, so their
     # /api/session/{id}/compact is the one the Compact button reaches.
+    monkeypatch.setattr(session_routes, "router", APIRouter(prefix="/api", tags=["sessions"]))
     app = FastAPI()
     app.include_router(session_routes.setup_session_routes(manager, {}))
     app.include_router(history_routes.setup_history_routes(manager))

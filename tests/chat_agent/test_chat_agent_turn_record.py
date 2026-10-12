@@ -10,7 +10,7 @@ import json
 from datetime import datetime
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -346,6 +346,8 @@ def manager(monkeypatch):
     monkeypatch.setattr(history_routes, "_verify_session_owner", lambda *a: None)
     monkeypatch.setattr(session_routes, "_verify_session_owner", lambda *a: None)
     monkeypatch.setattr(session_routes, "effective_user", lambda request: "alice")
+    # setup_session_routes registers on a module-level router; start clean.
+    monkeypatch.setattr(session_routes, "router", APIRouter(prefix="/api", tags=["sessions"]))
     app = FastAPI()
     app.include_router(history_routes.setup_history_routes(manager))
     app.include_router(session_routes.setup_session_routes(manager, {}))

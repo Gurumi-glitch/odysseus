@@ -54,6 +54,7 @@ def _context_info(monkeypatch, *, admin, cwd):
     monkeypatch.setattr(routes, "_verify_session_owner", lambda *args: None)
     monkeypatch.setattr("src.tool_security.blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", lambda owner: admin)
+    monkeypatch.setattr(routes, "router", APIRouter(prefix="/api"))
     session = SimpleNamespace(endpoint_url="", model="", cwd="")
     router = routes.setup_session_routes(SimpleNamespace(get_session=lambda sid: session), {})
     endpoint = next(
