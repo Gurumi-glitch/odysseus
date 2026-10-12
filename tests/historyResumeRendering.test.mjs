@@ -448,3 +448,21 @@ test('a tool call auto mode denied shows its reason on the card, in history and 
     assert.deepEqual(live, { open: true, status: 'denied', denial: 'Denied by auto mode: the user did not ask for that' });
   } finally { await page.close(); }
 });
+
+// A stored chat_agent ask keeps the typed deny reason (asks.resolved_card),
+// and the history card shows it with the chosen option.
+test('a resolved ask in history shows the stored deny reason', async () => {
+  const page = await setup();
+  try {
+    const answer = await page.evaluate(() => {
+      addMessage('assistant', 'Stopped', 'test', { _fromHistory: true, runtime: 'chat_agent', round_texts: ['Checking'], tool_events: [
+        { round: 1, tool: 'bash', command: 'ls', status: 'denied', exit_code: 126, output: 'Denied', ask_user: {
+          kind: 'tool_approval', approval_id: 'ask-9', ask_id: 'ask-9', ask_kind: 'permission', session_id: 's', question: 'Allow this action?',
+          options: [{ label: 'Allow once', value: 'once' }, { label: 'Deny', value: 'deny' }], resolved: 'deny', reason: 'not on this machine',
+        } },
+      ] });
+      return document.querySelector('.ask-user-card .ask-user-answer-value')?.textContent;
+    });
+    assert.equal(answer, 'Deny — not on this machine');
+  } finally { await page.close(); }
+});
