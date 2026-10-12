@@ -1311,6 +1311,13 @@ def _reject_delegated_tool_approval(request: Request) -> None:
         )
 
 
+def _require_interactive_answerer(request: Request, action: str) -> None:
+    """Asks and steering speak for the person at the keyboard: tool loopback
+    and API tokens act for them without being them (spec #44, Asks)."""
+    if is_internal_tool_request(request) or is_delegated_credential(request):
+        raise HTTPException(403, f"Only you, in an interactive session, can {action}.")
+
+
 def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
     """Persist a consumed approval decision on its existing tool event."""
 
@@ -5152,8 +5159,7 @@ def setup_chat_routes(
     @router.post("/api/chat/ask/{session_id}")
     async def chat_ask(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
         """Answer a chat_agent ask; the waiting turn continues (spec #44, Asks)."""
-        if is_internal_tool_request(request) or is_delegated_credential(request):
-            raise HTTPException(403, "Only you, in an interactive session, can answer an ask.")
+        _require_interactive_answerer(request, "answer an ask")
         _verify_session_owner(request, session_id)
         decision = str(body.get("decision") or "")
         if decision not in chat_asks.ALL_DECISIONS:
@@ -5172,8 +5178,7 @@ def setup_chat_routes(
     async def chat_steer(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
         """Queue a message for the running chat_agent turn; it joins at the
         next round boundary (spec #44, Asks, steering, finish)."""
-        if is_internal_tool_request(request) or is_delegated_credential(request):
-            raise HTTPException(403, "Only you, in an interactive session, can steer a turn.")
+        _require_interactive_answerer(request, "steer a turn")
         _verify_session_owner(request, session_id)
         text = body.get("text")
         if not isinstance(text, str) or not text.strip():
