@@ -2962,6 +2962,32 @@ export function displayMetrics(messageElement, metrics) {
   if (uiModule) uiModule.scrollHistory();
 }
 
+/**
+ * A steering message: sent while a chat_agent turn ran, joined at the next
+ * round boundary (spec #44, #63). Not a `.msg-user`: regenerate, delete and
+ * the turn-rendering scan treat `.msg-user` as the turn's real message, and a
+ * steer never answers an ask (#65).
+ */
+export function renderSteerBubble(text) {
+  const box = document.getElementById('chat-history');
+  if (!box) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-steer';
+  wrap.title = 'Sent while the agent was working; it joined the turn at the next round';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = 'You';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = String(text || '');
+  wrap.appendChild(role);
+  wrap.appendChild(body);
+  wrap.dataset.raw = String(text || '');
+  box.appendChild(wrap);
+  if (uiModule) uiModule.scrollHistory();
+  return wrap;
+}
+
 /** Remove any unanswered multiple-choice cards currently in the chat. */
 export function removeAskUserCards(root) {
   const scope = root || document.getElementById('chat-history') || document;
@@ -3355,11 +3381,17 @@ export function addMessage(role, content, modelName, metadata) {
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
 
     // --- Agent multi-bubble reconstruction from saved metadata ---
+    // A chat_agent row's content is every round plus the steer quotes; its
+    // round_texts are the replay source (spec #44 Transcript, #65). An edited
+    // row renders content.
+    const agentRuntimeRow = role === 'assistant' && metadata?.runtime === CHAT_AGENT_RUNTIME
+      && Array.isArray(metadata.round_texts) && metadata.round_texts.length > 0;
     if (
       role === 'assistant'
       && metadata
       && (
-        (Array.isArray(metadata.tool_events) && metadata.tool_events.length > 0)
+        agentRuntimeRow
+        || (Array.isArray(metadata.tool_events) && metadata.tool_events.length > 0)
         || (Array.isArray(metadata.round_texts) && metadata.round_texts.length > 1)
       )
     ) {
@@ -3367,7 +3399,20 @@ export function addMessage(role, content, modelName, metadata) {
       const toolEvents = metadata.tool_events || [];
       const replacesTurn = metadata.replacement_scope === 'turn'
         && ['structured', 'streamed'].includes(metadata.render_owner);
-      if (replacesTurn) {
+      if (agentRuntimeRow) {
+        roundTexts = metadata.edited ? [typeof textRaw === 'string' ? textRaw : ''] : [...roundTexts];
+        // A Shorter/Simpler rewrite is stored as the chosen variant (rewriteWith
+        // in chat.js, variants[0] is the original); it replaced the last bubble
+        // live, so it replaces the last round's text here.
+        const variants = Array.isArray(metadata.variants) ? metadata.variants : [];
+        const variantIndex = Number(metadata.variantIndex ?? variants.length - 1);
+        const variant = !metadata.edited && variantIndex > 0 ? variants[variantIndex] : null;
+        if (variant && variant.raw) {
+          let lastTextIdx = roundTexts.length - 1;
+          while (lastTextIdx > 0 && !String(roundTexts[lastTextIdx] || '').trim()) lastTextIdx--;
+          roundTexts[lastTextIdx] = variant.raw;
+        }
+      } else if (replacesTurn) {
         // Persisted content owns the answer. Round metadata still owns the
         // reasoning/tool chronology, but its drafts must not become answers.
         roundTexts = (Array.isArray(roundTexts) ? roundTexts : []).map(text =>
@@ -3523,7 +3568,11 @@ export function addMessage(role, content, modelName, metadata) {
               // Answered and expired asks stay in the timeline, read-only (#60).
               renderAskUserCard(ev.ask_user, { runtime: metadata.runtime, focus: false, scroll: false });
             }
-            const ok = (ev.exit_code === 0 || ev.exit_code == null);
+            // chat_agent events carry status (done | failed | denied | cancelled |
+            // pending, spec #44 Transcript); legacy ones only an exit code.
+            const evStatus = ev.status || ((ev.exit_code === 0 || ev.exit_code == null) ? 'done' : 'failed');
+            const ok = evStatus === 'done';
+            const evIcon = ok ? '✓' : evStatus === 'pending' ? '▶' : '✗';
             let outHtml = '';
             if (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
               outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
@@ -3560,14 +3609,14 @@ export function addMessage(role, content, modelName, metadata) {
             }
             const node = document.createElement('div');
             const browserTool = _isPrivateBrowserTool(ev.tool);
-            node.className = 'agent-thread-node' + (ok ? '' : ' error') + (browserTool ? ' open browser-preview-node' : '');
+            node.className = 'agent-thread-node' + (ok || evStatus === 'pending' ? '' : ' error') + (browserTool ? ' open browser-preview-node' : '');
             // Hide raw JSON for high-level app tools and diffs; show the same
             // compact command summary that live streaming uses.
             const evToolInfo = _toolDisplayInfo(ev.tool, ev.command, ev);
             const evHeaderAction = evToolInfo.headerActionHtml || '';
             const evToolIcon = renderToolIcon(ev.tool, ev.command, ev);
             const evCmdHtml = browserTool ? '' : (evToolInfo.commandHtml || ((ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : ''));
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${evToolIcon}<span class="agent-thread-tool">${esc(evToolInfo.label || ev.tool)}</span>${evHeaderAction}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${evIcon}</span>${evToolIcon}<span class="agent-thread-tool">${esc(evToolInfo.label || ev.tool)}</span>${evHeaderAction}<span class="agent-thread-status">${esc(evStatus)}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -3583,6 +3632,46 @@ export function addMessage(role, content, modelName, metadata) {
             }
           }
         }
+
+        // Steers joined the turn after this round (metadata.steers, #63).
+        for (const steer of (agentRuntimeRow && Array.isArray(metadata.steers)) ? metadata.steers : []) {
+          if (Number(steer.round) === roundNum && steer.text) lastWrap = renderSteerBubble(steer.text) || lastWrap;
+        }
+      }
+
+      if (agentRuntimeRow && metadata.stop_reason) {
+        // Why the turn ended early (transcript.STOP_*). A capped turn offers
+        // Continue, which is a new turn: never the legacy merge (spec #44).
+        const stopLabels = {
+          interrupted: '[Message interrupted]',
+          max_rounds: 'Reached the step limit — not finished.',
+          budget: 'Reached the tool budget — not finished.',
+          repeat_guard: '[Agent guard: the same call repeated]',
+          ask_expired: '[Stopped: the question was not answered]',
+          error: '[The turn failed]',
+        };
+        const capped = metadata.stop_reason === 'max_rounds' || metadata.stop_reason === 'budget';
+        const note = document.createElement('div');
+        note.className = 'stopped-indicator' + (capped ? ' rounds-exhausted' : '');
+        const label = document.createElement('span');
+        if (capped) label.className = 'rounds-exhausted-label';
+        label.textContent = stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`;
+        note.appendChild(label);
+        if (capped) {
+          const contBtn = document.createElement('button');
+          contBtn.className = 'continue-btn';
+          contBtn.title = 'Continue the task in a new turn';
+          contBtn.textContent = 'Continue ▸';
+          contBtn.addEventListener('click', () => {
+            note.remove();
+            const msgInput = document.getElementById('message');
+            if (!msgInput) return;
+            msgInput.value = 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.';
+            document.querySelector('.send-btn')?.click();
+          });
+          note.appendChild(contBtn);
+        }
+        box.appendChild(note);
       }
 
       const firstWrap = lastMsgAi || lastWrap;
@@ -3997,6 +4086,7 @@ const chatRenderer = {
   renderAskUserCard,
   resolveAskUserCard,
   answerChatAsk,
+  renderSteerBubble,
   buildSourcesBox,
   buildFindingsBox,
   buildRagSourcesBox,
