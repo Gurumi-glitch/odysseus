@@ -15,7 +15,9 @@ const askCards = renderer
   .replaceAll('export function', 'function');
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
 // The sticky-fallback helper resumeStream calls (#55).
-const stickToFallback = chat.slice(chat.indexOf('  function _stickToFallbackRoute('), chat.indexOf('  function _setComposerAndSend('));
+const stickToFallback = chat.slice(chat.indexOf('  function _stickToFallbackRoute('), chat.indexOf('  // auto_mode stream states'));
+// The auto mode denial line addMessage and resumeStream put on a tool card (#68).
+const toolDenial = renderer.slice(renderer.indexOf('export function toolDenialHtml('), renderer.indexOf('function _suppressRawToolOutput(')).replace('export ', '');
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
@@ -31,7 +33,7 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume, askCards, stickToFallback }) => {
+  await page.evaluate(async ({ addMessage, resume, askCards, stickToFallback, toolDenial }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
@@ -70,9 +72,10 @@ async function setup() {
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
     window._stickToFallbackRoute = (0, eval)('(' + stickToFallback + ')');
+    window.toolDenialHtml = (0, eval)('(' + toolDenial + ')');
     const cards = new Function(askCards + '\nreturn { renderAskUserCard, resolveAskUserCard, answerChatAsk };')();
     Object.assign(window, cards);
-    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, ...cards };
+    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, toolDenialHtml: window.toolDenialHtml, ...cards };
     let controller;
     const stream = new ReadableStream({ start(value) { controller = value; } });
     window.send = event => controller.enqueue(new TextEncoder().encode('data: ' + (typeof event === 'string' ? event : JSON.stringify(event)) + '\n\n'));
@@ -82,7 +85,7 @@ async function setup() {
       if (String(url).includes('/api/chat/ask/')) { window.posts.push({ url: String(url), body: JSON.parse(init.body) }); return new Response(JSON.stringify({ accepted: true })); }
       return new Response(JSON.stringify({ history: window.savedHistory }));
     };
-  }, { addMessage, resume, askCards, stickToFallback });
+  }, { addMessage, resume, askCards, stickToFallback, toolDenial });
   return page;
 }
 
@@ -413,5 +416,35 @@ test('resume on a chat_agent run replays the ask card over the history one and s
       return { value, cards: document.querySelectorAll('.ask-user-card').length, posts: window.posts.length };
     });
     assert.deepEqual(result, { value: 'Deny — use a note instead', cards: 1, posts: 0 });
+  } finally { await page.close(); }
+});
+
+// Auto mode denials (#68): the stored event and the live tool_output both
+// carry denied_by, and the card shows the classifier's reason open.
+test('a tool call auto mode denied shows its reason on the card, in history and on resume', async () => {
+  const page = await setup();
+  try {
+    const history = await page.evaluate(() => {
+      addMessage('assistant', 'Done', 'test', { _fromHistory: true, runtime: 'chat_agent', round_texts: ['Cleaning up'], tool_events: [
+        { round: 1, tool: 'bash', command: 'rm -rf build', status: 'denied', exit_code: 126, denied_by: 'auto_mode', output: 'Denied by auto mode: the user did not ask for that' },
+        { round: 1, tool: 'bash', command: 'ls', status: 'denied', exit_code: 126, output: 'Denied: no interactive user' },
+      ] });
+      const nodes = [...document.querySelectorAll('.agent-thread-node')];
+      return nodes.map(node => ({ open: node.classList.contains('open'), denial: node.querySelector('.agent-thread-denial')?.textContent || '', folded: !!node.querySelector('details.agent-tool-output') }));
+    });
+    assert.deepEqual(history, [
+      { open: true, denial: 'Denied by auto mode: the user did not ask for that', folded: false },
+      { open: false, denial: '', folded: true },
+    ]);
+    await page.evaluate(() => document.querySelector('#chat-history').replaceChildren());
+    await startReplay(page);
+    const live = await page.evaluate(async () => {
+      send({ type: 'tool_start', tool: 'bash', command: 'rm -rf build' });
+      send({ type: 'tool_output', tool: 'bash', command: 'rm -rf build', exit_code: 126, blocked: true, denied_by: 'auto_mode', output: 'Denied by auto mode: the user did not ask for that' });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      const node = document.querySelector('.agent-thread-node');
+      return { open: node.classList.contains('open'), status: node.querySelector('.agent-thread-status').textContent, denial: node.querySelector('.agent-thread-denial')?.textContent || '' };
+    });
+    assert.deepEqual(live, { open: true, status: 'denied', denial: 'Denied by auto mode: the user did not ask for that' });
   } finally { await page.close(); }
 });

@@ -1699,6 +1699,12 @@ body.fullwidth-chat .chat-history {
 .agent-thread-node.open .agent-thread-content {
   display: block;
 }
+.agent-thread-denial {
+  color: var(--color-error);
+  font-size: 0.85em;
+  padding: 4px 0;
+  white-space: pre-wrap;
+}
 .agent-thread-cmd {
   background: color-mix(in srgb, var(--fg) 5%, transparent);
   border: 1px solid var(--border);

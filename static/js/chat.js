@@ -1698,6 +1698,29 @@ import { invalidateSettings } from './appConfig.js';
     if (sessionModule.updateModelPicker) sessionModule.updateModelPicker();
   }
 
+  // auto_mode stream states (#68): active; paused, after the chat's denials
+  // passed a threshold, until an approved ask; unavailable, when the turn
+  // cannot use it (no privilege, no one to answer asks).
+  function _applyAutoModeState(state) {
+    const btn = uiModule.el('auto-mode-toggle-btn');
+    if (!btn) return;
+    btn.classList.toggle('auto-paused', state === 'paused');
+    btn.title = state === 'paused' ? 'Auto mode paused until you approve an ask' : 'Auto mode';
+  }
+
+  /** The paused state of a chat as the server stores it, for the icon on session load (#68). */
+  async function checkAutoModePaused(sessionId) {
+    let paused = false;
+    if (sessionId) {
+      try {
+        const res = await fetch(`${API_BASE}/api/chat_agent/auto_mode/${encodeURIComponent(sessionId)}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        paused = res.ok && !!data.paused;
+      } catch (_) {}
+    }
+    _applyAutoModeState(paused ? 'paused' : 'active');
+  }
+
   function _setComposerAndSend(message) {
     const input = uiModule.el('message');
     if (!input) return false;
@@ -2696,6 +2719,9 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.set('plan_mode', 'false');
 	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      // Auto mode (#68) is agent-only like the shell toggle; the server checks
+      // the runtime, the privilege and that someone can answer asks.
+      fd.append('auto_mode', el('auto-mode-toggle')?.checked ? 'true' : 'false');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {
         fd.append('use_rag', 'false');
@@ -4964,8 +4990,9 @@ import { invalidateSettings } from './appConfig.js';
                   // `blocked`: the runtime refused the call (denied, exit 126).
                   const toolStatus = ok ? 'done' : json.blocked ? 'denied' : 'failed';
                   const cmd = json.command || '';
-                  let outHtml = '';
-                  if (!_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
+                  let outHtml = chatRenderer.toolDenialHtml(json);
+                  const deniedByAuto = !!outHtml;
+                  if (!deniedByAuto && !_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
                     outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
                   }
                   // File-write diff (write_file): show a before/after unified diff.
@@ -5007,7 +5034,7 @@ import { invalidateSettings } from './appConfig.js';
 	                  if (browserTool) {
                     outHtml = _privateBrowserPreviewHtml(cmd, json.screenshot) + outHtml;
                   }
-	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
+	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool || deniedByAuto;
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '') + (browserTool ? ' browser-preview-node' : '');
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${toolStatus}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
@@ -5164,6 +5191,9 @@ import { invalidateSettings } from './appConfig.js';
               } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
                 if (_isBg) continue;
                 chatRenderer.resolveAskUserCard(json.ask_id, json);
+
+              } else if (json.type === 'auto_mode') {
+                if (!_isBg) _applyAutoModeState(json.state);
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -6549,7 +6579,8 @@ import { invalidateSettings } from './appConfig.js';
       const output = String(json.output || '');
       const label = String(json.label || json.tool || 'Tool');
       const icon = renderToolIcon(json.tool || '', command, json) || '';
-      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error');
+      const denialHtml = chatRenderer.toolDenialHtml(json);
+      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (denialHtml ? ' open' : '');
       currentToolBubble.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
         '<span class="agent-thread-icon">' + (ok ? '✓' : '✗') + '</span>' + icon +
         '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
@@ -6557,7 +6588,7 @@ import { invalidateSettings } from './appConfig.js';
         '<span class="agent-thread-chevron" aria-hidden="true"></span></div>' +
         '<div class="agent-thread-content">' +
         (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') +
-        (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '') +
+        (denialHtml || (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '')) +
         '</div>';
       if (currentToolThread) currentToolThread.classList.remove('streaming');
     };
@@ -6639,6 +6670,8 @@ import { invalidateSettings } from './appConfig.js';
             chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime'), focus: false });
           } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
             chatRenderer.resolveAskUserCard(json.ask_id, json);
+          } else if (json.type === 'auto_mode') {
+            _applyAutoModeState(json.state);
           } else if (json.type === 'plan_update') {
             rich = true;
             const plan = (json.data && json.data.plan) ? json.data.plan : '';
@@ -8260,6 +8293,7 @@ import { invalidateSettings } from './appConfig.js';
     abortCurrentRequest,
     detachCurrentStream,
     checkBackgroundStream,
+    checkAutoModePaused,
     resumeStream,
     hideWelcomeScreen: chatRenderer.hideWelcomeScreen,
     showWelcomeScreen: chatRenderer.showWelcomeScreen,

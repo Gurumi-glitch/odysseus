@@ -13,6 +13,8 @@ const askCards = renderer
   .replaceAll('export async function', 'async function')
   .replaceAll('export function', 'function');
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
+// The auto mode denial line on a tool card (#68).
+const toolDenial = renderer.slice(renderer.indexOf('export function toolDenialHtml('), renderer.indexOf('function _suppressRawToolOutput(')).replace('export ', '');
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
@@ -28,7 +30,7 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume, askCards }) => {
+  await page.evaluate(async ({ addMessage, resume, askCards, toolDenial }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
@@ -64,7 +66,8 @@ async function setup() {
     Object.assign(window, cards);
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
-    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, ...cards };
+    window.toolDenialHtml = (0, eval)('(' + toolDenial + ')');
+    window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, toolDenialHtml: window.toolDenialHtml, ...cards };
     let controller;
     const stream = new ReadableStream({ start(value) { controller = value; } });
     window.send = event => controller.enqueue(new TextEncoder().encode('data: ' + (typeof event === 'string' ? event : JSON.stringify(event)) + '\n\n'));
@@ -72,7 +75,7 @@ async function setup() {
       if (String(url).includes('/api/chat/resume/')) return new Response(stream, { headers: { 'X-Odysseus-Run-Id': 'run-1', 'X-Odysseus-Runtime': window.resumeRuntime } });
       return new Response(JSON.stringify({ history: window.savedHistory }));
     };
-  }, { addMessage, resume, askCards });
+  }, { addMessage, resume, askCards, toolDenial });
   return page;
 }
 

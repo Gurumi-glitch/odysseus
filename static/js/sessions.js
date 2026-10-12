@@ -2014,6 +2014,7 @@ export async function loadSessions() {
       if (window.chatModule && window.chatModule.showWelcomeScreen) {
         window.chatModule.showWelcomeScreen();
       }
+      if (window.chatModule && window.chatModule.checkAutoModePaused) window.chatModule.checkAutoModePaused('');
       updateModelPicker();
       // Only auto-create if there are truly zero sessions (not just unselected)
       if (activeSessions.length === 0 && !_autoCreateInProgress) {
@@ -2321,6 +2322,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     } catch (e) {
       console.warn('checkBackgroundStream error:', e);
     }
+    if (window.chatModule && window.chatModule.checkAutoModePaused) window.chatModule.checkAutoModePaused(id);
     // Check server for active stream (survives page refresh)
     _checkServerStream(id);
     // Document panel: keep open if next session also wants it, otherwise close
