@@ -1,5 +1,7 @@
 """Control-plane routes of the chat_agent runtime (spec #44)."""
 
+import os
+
 from fastapi import APIRouter, HTTPException, Request
 
 from core.atomic_io import atomic_write_text
@@ -85,6 +87,8 @@ def _instructions(user: str) -> dict:
         "available": True,
         "enabled": store.instructions_enabled(user),
         "content": content,
-        "path": path,
+        # The host path differs anyway, and the server's layout is not the
+        # user's business.
+        "path": os.path.join(store.instructions_display_dir(user), store.USER_INSTRUCTIONS_FILENAME),
         "max_chars": constants.INSTRUCTION_FILE_MAX_CHARS,
     }

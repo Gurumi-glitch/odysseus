@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -36,26 +37,33 @@ BEHAVIOUR_SECTION = (
 )
 
 
+# UTF-8 needs at most 4 bytes per character, so this many bytes always hold
+# INSTRUCTION_FILE_MAX_CHARS characters when the file has that many.
+_UTF8_MAX_BYTES_PER_CHAR = 4
+
+
 @dataclass(frozen=True)
 class InstructionFile:
+    # User files are labelled "instructions/<user>/..." so neither the model
+    # nor context info learns the server's data path; workspace files keep
+    # the absolute path the admin picked.
     path: str
     text: str
-    original_chars: int
-
-    @property
-    def truncated(self) -> bool:
-        return self.original_chars > len(self.text)
+    size_bytes: int
+    truncated: bool
 
 
 def instruction_files(owner: str, workspace: Optional[str]) -> List[InstructionFile]:
     """The user's folder (unless disabled in Settings), then the workspace's
     ancestors from the broadest down to the picked folder; both filenames each."""
-    folders = [store.instructions_dir(owner)] if store.instructions_enabled(owner) else []
-    folders += _workspace_folders(workspace)
+    folders = []
+    if store.instructions_enabled(owner):
+        folders.append((store.instructions_dir(owner), store.instructions_display_dir(owner)))
+    folders += [(folder, folder) for folder in _workspace_folders(workspace)]
     files = []
-    for folder in folders:
+    for folder, label in folders:
         for name in INSTRUCTION_FILENAMES:
-            loaded = _read_instruction_file(os.path.join(folder, name))
+            loaded = _read_instruction_file(folder, name, os.path.join(label, name))
             if loaded:
                 files.append(loaded)
     return files
@@ -77,19 +85,41 @@ def _workspace_folders(workspace: Optional[str]) -> List[str]:
     return folders[::-1]
 
 
-def _read_instruction_file(path: str) -> Optional[InstructionFile]:
+def _writable_by_others(mode: int) -> bool:
+    return bool(mode & stat.S_IWOTH)
+
+
+def _read_instruction_file(folder: str, name: str, label: str) -> Optional[InstructionFile]:
+    """Load one file as trusted instructions, refusing what anyone could plant.
+
+    Refused: symlinks (a cloned repo's AGENTS.md -> ~/.ssh/id_rsa would ship
+    the key to the provider), non-regular files (a FIFO blocks the turn), and
+    files in or themselves world-writable (/tmp/AGENTS.md above a workspace).
+    """
+    path = os.path.join(folder, name)
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except (FileNotFoundError, NotADirectoryError):
         return None
     except OSError as exc:
-        logger.warning("instruction file unreadable: %s (%s)", path, type(exc).__name__)
-        return None
-    if not text.strip():
+        logger.warning("instruction file skipped: %s (%s)", label, type(exc).__name__)
         return None
     limit = constants.INSTRUCTION_FILE_MAX_CHARS
-    return InstructionFile(path=path, text=text[:limit], original_chars=len(text))
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or _writable_by_others(info.st_mode | os.stat(folder).st_mode):
+            logger.warning("instruction file skipped: %s (not a private regular file)", label)
+            return None
+        raw = handle.read(limit * _UTF8_MAX_BYTES_PER_CHAR)
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        return None
+    return InstructionFile(
+        path=label,
+        text=text[:limit],
+        size_bytes=info.st_size,
+        truncated=len(text) > limit or info.st_size > len(raw),
+    )
 
 
 def instructions_message(files: List[InstructionFile]) -> Optional[Dict[str, Any]]:
@@ -100,8 +130,8 @@ def instructions_message(files: List[InstructionFile]) -> Optional[Dict[str, Any
         body = item.text
         if item.truncated:
             body += (
-                f"\n[Truncated: only the first {len(item.text)} of "
-                f"{item.original_chars} characters were loaded.]"
+                f"\n[Truncated: only the first {len(item.text)} characters of "
+                f"this {item.size_bytes}-byte file were loaded.]"
             )
         sections.append(f"# {item.path}\n{body}")
     return {"role": "user", "content": "\n\n".join(sections)}

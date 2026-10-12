@@ -46,7 +46,8 @@ async def test_user_file_loads_as_one_block_between_system_and_history(harness, 
     assert [m["role"] for m in messages] == ["system", "user", "user", "assistant", "user"]
     block = messages[1]["content"]
     assert "End every reply with ✅" in block
-    assert str(path) in block
+    assert "# instructions/alice/AGENTS.md\n" in block
+    assert str(tmp_path) not in str(messages)
     assert "End every reply" not in messages[0]["content"]
     assert messages[2] == {"role": "user", "content": "earlier question"}
 
@@ -76,7 +77,8 @@ async def test_workspace_files_add_to_the_user_file_broadest_first(
     block = _provider_messages(harness)[1]["content"]
     order = ["USER RULE", "HOME RULE", "PROJECT AGENTS", "PROJECT CLAUDE"]
     assert [block.index(text) for text in order] == sorted(block.index(text) for text in order)
-    assert str(user) in block and str(picked_workspace / "CLAUDE.md") in block
+    assert "instructions/alice/AGENTS.md" in block
+    assert str(picked_workspace / "CLAUDE.md") in block
     assert "ABOVE HOME" not in block
 
 
@@ -122,7 +124,7 @@ async def test_a_long_file_is_cut_at_the_limit_and_marked(harness, tmp_path):
 
     block = _provider_messages(harness)[1]["content"]
     assert "a" * limit in block and "TAIL" not in block
-    assert f"first {limit} of {limit + 4} characters" in block
+    assert f"first {limit} characters of this {limit + 4}-byte file" in block
 
 
 def _panel_request(user="alice", **state):
@@ -155,7 +157,7 @@ async def test_panel_edits_the_same_file_the_host_edits(panel, tmp_path):
 
     empty = await panel["GET"](_panel_request())
     assert empty == {
-        "available": True, "enabled": True, "content": "", "path": str(host_file),
+        "available": True, "enabled": True, "content": "", "path": "instructions/alice/AGENTS.md",
         "max_chars": constants.INSTRUCTION_FILE_MAX_CHARS,
     }
 
@@ -329,7 +331,7 @@ async def test_context_info_lists_loaded_files_without_contents(context_info, tm
     info = await context_info(cwd=str(workspace))
 
     assert info["instructions"] == [
-        {"path": store.user_instructions_path("alice"), "truncated": True},
+        {"path": "instructions/alice/AGENTS.md", "truncated": True},
         {"path": str(workspace / "CLAUDE.md"), "truncated": False},
     ]
 
@@ -365,3 +367,41 @@ def test_pin_resolve_request_workspace_drops_the_path_for_non_admins(monkeypatch
     assert _resolve_request_workspace(request, str(tmp_path)) == ("", "")
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
     assert _resolve_request_workspace(request, str(tmp_path))[0] == str(tmp_path.resolve())
+
+
+
+def test_folder_names_follow_auth_username_keys(monkeypatch, tmp_path):
+    """AuthManager keys users by strip().lower(); casefold would merge accounts."""
+    monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
+    monkeypatch.setattr(constants, "INSTRUCTIONS_DIR", str(tmp_path / "instructions"))
+
+    assert store.instructions_dir(" Alice ") == store.instructions_dir("alice")
+    assert store.instructions_dir("straße") != store.instructions_dir("strasse")
+    assert store.store_path("straße") != store.store_path("strasse")
+
+
+@pytest.mark.asyncio
+async def test_files_anyone_could_plant_are_not_loaded(harness, tmp_path, picked_workspace):
+    shared = picked_workspace.parent
+    (shared / "AGENTS.md").write_text("PLANTED IN SHARED DIR", encoding="utf-8")
+    shared.chmod(0o777)
+    loose = picked_workspace / "CLAUDE.md"
+    loose.write_text("WORLD WRITABLE FILE", encoding="utf-8")
+    loose.chmod(0o666)
+    secret = tmp_path / "id_rsa"
+    secret.write_text("PRIVATE KEY", encoding="utf-8")
+    (picked_workspace / "AGENTS.md").symlink_to(secret)
+    os.mkfifo(_fifo_target(tmp_path))
+
+    await harness.send(_Request("agent", workspace=str(picked_workspace)))
+
+    payload = str(_provider_messages(harness))
+    for text in ("PLANTED IN SHARED DIR", "WORLD WRITABLE FILE", "PRIVATE KEY"):
+        assert text not in payload
+    assert [m["role"] for m in _provider_messages(harness)] == ["system", "user", "assistant", "user"]
+
+
+def _fifo_target(tmp_path):
+    folder = tmp_path / "instructions" / "alice"
+    folder.mkdir(parents=True)
+    return str(folder / "AGENTS.md")

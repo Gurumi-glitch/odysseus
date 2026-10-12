@@ -24,7 +24,7 @@ upstream's `src/agent_runtime/` and never edits the legacy loop
 
 | Module | Job | Status |
 |---|---|---|
-| `store.py` | Per-user JSON store `CHAT_AGENT_DIR/<percent-encoded casefolded user>.json` (confined). Holds `chat_runtime: legacy\|new` and `instructions_enabled`. Owns the user instruction folder `INSTRUCTIONS_DIR/<same name>/` (`confine()`d). `rename_owner` / `delete_owner` are called from the user rename/delete routes. Rules and session rules join here. | #48, #52 |
+| `store.py` | Per-user JSON store `CHAT_AGENT_DIR/<percent-encoded lowercased user>.json` (confined). Holds `chat_runtime: legacy\|new` and `instructions_enabled`. Owns the user instruction folder `INSTRUCTIONS_DIR/<same name>/` (`confine()`d). `rename_owner` / `delete_owner` are called from the user rename/delete routes. Rules and session rules join here. | #48, #52 |
 | `routing.py` | `ComposerToggles` snapshot; `choose_runtime(TurnFacts)` → `legacy` or `chat_agent`. | #48 |
 | `prompt.py` | Calls the route's context builder with `prefetch=False, agent_mode=False` (no URL/web/YouTube prefetch, no legacy skills index) and assembles: one system message (route system messages, then the behaviour section) → instructions block (user role: user folder unless disabled, then workspace ancestors up to home, `AGENTS.md` + `CLAUDE.md`, 12k chars each, labelled by path; none in Nobody mode) → history → current user message carrying the turn context (memory, RAG, date/time). | #48, #52 |
 | `loop.py` | `ChatAgentTurn` + `run_chat_agent_turn`: emits `turn_mode`, `delta`, `message_saved`, `event: error`, `[DONE]`. A crash ends the turn with a visible error; it never falls back to legacy. | #48 (one round, no tools) |

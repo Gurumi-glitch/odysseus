@@ -1,6 +1,6 @@
 """Per-user store of the chat_agent runtime: one JSON file per user.
 
-The file lives at ``CHAT_AGENT_DIR/<percent-encoded casefolded user>.json``.
+The file lives at ``CHAT_AGENT_DIR/<percent-encoded lowercased user>.json``.
 It holds the runtime switch (``chat_runtime``) and the user-level
 instructions toggle (``instructions_enabled``). The user's instruction files
 live in ``INSTRUCTIONS_DIR/<same encoded name>/``. User rename and delete move
@@ -33,7 +33,9 @@ USER_INSTRUCTIONS_FILENAME = "AGENTS.md"
 
 
 def _owner_name(owner: str) -> str:
-    name = quote(str(owner or "").strip().casefold(), safe="")
+    # strip().lower() is how AuthManager keys usernames; casefold() would merge
+    # distinct accounts such as "straße" and "strasse" into one folder.
+    name = quote(str(owner or "").strip().lower(), safe="")
     if not name:
         raise ValueError("chat_agent store needs an owner")
     return name
@@ -90,6 +92,11 @@ def set_instructions_enabled(owner: str, enabled: bool) -> None:
 def instructions_dir(owner: str) -> str:
     """Return the owner's instruction folder, confined to ``INSTRUCTIONS_DIR``."""
     return confine(constants.INSTRUCTIONS_DIR, _owner_name(owner), allow_root=False)
+
+
+def instructions_display_dir(owner: str) -> str:
+    """The folder as shown to the user and the model: no server data path."""
+    return os.path.join(os.path.basename(constants.INSTRUCTIONS_DIR), _owner_name(owner))
 
 
 def user_instructions_path(owner: str) -> str:
