@@ -397,8 +397,11 @@ def sweep_interrupted_turns() -> int:
 
 # The legacy auto-compaction header (maybe_compact).
 SUMMARY_HEADER = "[Conversation summary — earlier messages were compacted]"
-# Each message's share of the summariser's input, as legacy compaction.
+# Each message's share of the summariser's input, and the summariser call's
+# sampling and wait, as legacy compaction (context_compactor).
 SUMMARY_LINE_CHARS = 2000
+SUMMARY_TEMPERATURE = 0.2
+SUMMARY_TIMEOUT_S = 30
 
 
 def reported_context_tokens(rows: Sequence[ChatMessage]) -> Optional[int]:
@@ -440,8 +443,8 @@ async def summarise(messages: List[Dict[str, Any]], endpoint: Endpoint, owner: s
         summary = await llm_call_async(
             util_url or endpoint.url, util_model or endpoint.model,
             [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
-            temperature=0.2, max_tokens=SUMMARY_MAX_TOKENS,
-            headers=util_headers if util_url else endpoint.headers, timeout=30,
+            temperature=SUMMARY_TEMPERATURE, max_tokens=SUMMARY_MAX_TOKENS,
+            headers=util_headers if util_url else endpoint.headers, timeout=SUMMARY_TIMEOUT_S,
         )
     except Exception:
         # The chat stays whole; the request may still fit.
