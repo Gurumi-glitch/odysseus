@@ -34,7 +34,7 @@ upstream's `src/agent_runtime/` and never edits the legacy loop
 | `providers/__init__.py` | Canonical conversation and block shapes both adapters serialize (`text`, `tool_call`, `reasoning` tagged with provider+model, tool-result envelope `{call_id, ok, content, error}`); `provider_key(url)` (`"xai"` for x.ai hosts, else `_detect_provider`); round events `TextDelta`, `RoundEnd(blocks, usage)`, `ProviderError`. | #51 |
 | `providers/xai_responses.py` | xAI Responses: `store:false`, `prompt_cache_key` = chat id, `include: reasoning.encrypted_content`; each output item kept on its block as `item` and replayed unchanged; reasoning only to the same model; a 400 on replayed reasoning retries once without it; usage incl. cached tokens. | #51 |
 | `providers/chat_completions.py` | Chat Completions dialect. Imports legacy transport/headers/URL helpers from `src.llm_core`; never the legacy message sanitizer. Streams `reasoning_details` / `reasoning_content` into a reasoning block and passes them back unchanged to the same model. Sends `tools` + `tool_choice: auto` when tools exist; streamed `delta.tool_calls` fragments become `tool_call` blocks. | #48, #50, #51 |
-| `transcript.py` | `TurnRecord` → assistant row with `metadata.agent_v2` (`turn_id`, `provider`, `model`, `rounds[]` = `{blocks, usage?, results?}`) plus projections `content`, `round_texts`, `tool_events` (`round`, `tool`, `command`, `output`, `status`, `exit_code`, `call_id`, `error`), `model`, `runtime: "chat_agent"`. Nobody mode writes the request-local incognito transcript. | #48, #50, #51 (write at turn end) |
+| `transcript.py` | `TurnRecord` → assistant row with `metadata.agent_v2` (`turn_id`, `provider`, `model`, `rounds[]` = `{blocks, usage?, results?}`, `content_digest`) plus projections `content`, `round_texts`, `tool_events` (`round`, `tool`, `command`, `output`, `status`, `exit_code`, `call_id`, `error`), `thinking`, `character_name`, `web_sources`, `rag_sources`, `memories_used`, `model`, `stop_reason`, `runtime: "chat_agent"`. `TurnWriter` inserts the row `in_progress` at the first round, rewrites it after each round end and each tool result (`Session.update_message`, found by `turn_id`), and finishes it; Stop keeps completed blocks and streamed text, unfinished calls get `cancelled` (130). `content_digest` = HMAC (app key) over persisted content + record; `trusted_rounds` replays only a verifying, un-`edited`, finished row. `sweep_interrupted_turns` (app startup) marks leftover `in_progress` rows `interrupted` and expires their open asks (`ask_user.resolved = "expired"`, `expired_cause`). Nobody mode writes the request-local incognito transcript once, at finish. | #48, #50, #51, #57 |
 | `classifier.py`, `result_events.py`, `asks.py` | Not yet built. | #53–#68 |
 
 Control-plane route: `routes/chat_agent_routes.py`
@@ -62,7 +62,9 @@ legacy predicate `agent_loop._agent_route_tool_mode` runs on text tools.
   are created on first write.
 - `prompt._replay` turns a history row with `agent_v2.rounds` into
   `assistant{blocks}` + `tool{...}` entries (round `results` are the tool-result
-  envelopes); rows without it replay as text.
+  envelopes) only when `transcript.trusted_rounds` verifies it; other rows
+  (incl. client-written or edited `agent_v2`) replay as text, and adjacent
+  same-role text rows merge (blank line, or concatenated parts).
 - Tests live in `tests/chat_agent/` with unique basenames. The primary seam is
   the chat route with a scripted HTTP transport: patch
   `providers.chat_completions._get_http_client` with an `httpx.MockTransport`

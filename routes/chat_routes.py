@@ -3021,6 +3021,26 @@ def setup_chat_routes(
                 delegated_credential=is_delegated_credential(request),
                 active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
                 client_runtime_context=client_runtime_context,
+                after_turn=functools.partial(
+                    run_post_response_tasks,
+                    sess=sess,
+                    session_manager=session_manager,
+                    session_id=session,
+                    message=message,
+                    memory_manager=memory_manager,
+                    memory_vector=memory_vector,
+                    webhook_manager=webhook_manager,
+                    incognito=incognito,
+                    skills_manager=skills_manager,
+                    owner=owner,
+                    extract_skills=user_requested_agent,
+                    # The runtime has no legacy tool policy; its denies are per call.
+                    allow_background_extraction=_post_response_extraction_allowed(
+                        tools_blocked=False,
+                        tool_approval_continuation=tool_approval_continuation,
+                        client_runtime_context=client_runtime_context,
+                    ),
+                ),
             )), runtime=CHAT_AGENT)
             return StreamingResponse(
                 agent_runs.subscribe(session, chat_agent_run),
