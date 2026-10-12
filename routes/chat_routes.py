@@ -3073,6 +3073,9 @@ def setup_chat_routes(
                     use_enhanced_message=True,
                     interaction_mode="agent",
                     auto_escalated=auto_escalated,
+                    # Continue after a capped turn (spec #44 Transcript); no
+                    # other client value reaches the row.
+                    source="continue" if form_data.get("source") == "continue" else None,
                 ),
                 privileges=_request_privileges(request, owner),
                 delegated_credential=is_delegated_credential(request),

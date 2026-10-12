@@ -1,5 +1,7 @@
 """Backend gaps found by the #65 UI pass (spec #44), driven through the chat route."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.chat_agent.test_chat_agent_route import (
@@ -44,3 +46,32 @@ async def test_refused_and_unoffered_calls_get_a_tool_start_before_their_output(
     assert (first["tool"], first["round"]) == ("web_fetch", 1)
     assert "example.com" in first["full_command"]
     assert second["tool"] == "no_such_tool"
+
+
+@pytest.mark.parametrize("form_source, saved", [("continue", "continue"), ("merge", None), ("", None)])
+@pytest.mark.asyncio
+async def test_continue_marks_the_new_turn_user_row_as_continue(harness, form_source, saved):
+    # Spec #44 Transcript: Continue after a capped turn sends a new turn whose
+    # user row records metadata.source = "continue"; no other value is stored.
+    await harness.send(_Request("agent", source=form_source))
+
+    assert harness.captured["build_context"]["source"] == saved
+
+
+def test_add_user_message_stores_the_source_on_the_user_row():
+    from routes.chat_helpers import PreprocessedMessage, add_user_message
+
+    rows = []
+    sess = SimpleNamespace(add_message=rows.append)
+    handler = SimpleNamespace(update_session_name_if_needed=lambda *a, **k: None)
+    preprocessed = PreprocessedMessage(
+        enhanced_message="Continue", user_content="Continue", text_for_context="Continue",
+        youtube_transcripts=[], attachment_meta=[],
+    )
+
+    add_user_message(sess, handler, preprocessed, interaction_mode="agent", source="continue")
+    add_user_message(sess, handler, preprocessed, interaction_mode="agent")
+
+    assert [row.metadata for row in rows] == [
+        {"interaction_mode": "agent", "source": "continue"}, {"interaction_mode": "agent"},
+    ]
