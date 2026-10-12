@@ -165,7 +165,9 @@ async def test_deny_gives_the_model_a_denial_with_the_reason_and_the_turn_contin
     [row] = harness.saved
     assert row.content == "OK, I left build alone."
     assert "stop_reason" not in row.metadata
-    assert row.metadata["tool_events"][0]["ask_user"]["resolved"] == "deny"
+    card = row.metadata["tool_events"][0]["ask_user"]
+    # History shows why the user said no, as the live card did.
+    assert (card["resolved"], card["reason"]) == ("deny", "keep the build")
 
 
 @pytest.mark.asyncio

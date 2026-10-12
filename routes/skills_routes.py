@@ -1597,6 +1597,7 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 if refreshed:
                     res["skill_state"] = {
                         "name": refreshed.get("name"),
+                        "state": skill_state(refreshed),
                         "status": refreshed.get("status"),
                         "confidence": refreshed.get("confidence"),
                         "audit_verdict": refreshed.get("audit_verdict"),

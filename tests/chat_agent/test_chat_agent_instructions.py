@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import APIRouter, HTTPException
 
 import src.constants as constants
 import src.tool_security as tool_security
@@ -299,6 +299,9 @@ def context_info(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
     monkeypatch.setattr(session_routes, "_verify_session_owner", lambda *a, **k: None)
+    # setup_session_routes registers on a module-level router; start clean,
+    # or the path lookup below finds an earlier test's endpoint.
+    monkeypatch.setattr(session_routes, "router", APIRouter(prefix="/api", tags=["sessions"]))
     session = SimpleNamespace(endpoint_url="", model="", cwd="")
     router = session_routes.setup_session_routes(
         SimpleNamespace(get_session=lambda session_id: session), {},
