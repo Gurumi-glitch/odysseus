@@ -126,13 +126,12 @@ class ToolOutcome:
         return event
 
 
-def refused_outcome(call: Dict[str, Any], block: Any, reason: str) -> ToolOutcome:
-    """A call the gate did not run: unusable arguments fail, the rest are denied."""
-    if block is None:
-        return ToolOutcome(call["call_id"], call["name"], call["arguments"], STATUS_FAILED,
-                           EXIT_FAILED, reason)
-    return ToolOutcome(call["call_id"], block.tool_type, block.content, STATUS_DENIED,
-                       EXIT_DENIED, reason)
+def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bool) -> ToolOutcome:
+    """A call the gate did not run: denied, or failed for unusable arguments."""
+    tool, command = (block.tool_type, block.content) if block is not None else (call["name"], call["arguments"])
+    if denied:
+        return ToolOutcome(call["call_id"], tool, command, STATUS_DENIED, EXIT_DENIED, reason)
+    return ToolOutcome(call["call_id"], tool, command, STATUS_FAILED, EXIT_FAILED, reason)
 
 
 async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcome:

@@ -297,6 +297,29 @@ async def test_per_model_compact_surface_strips_descriptions(harness, db):
     assert len(json.dumps(notes)) < len(json.dumps(full))
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["list_models", "chat_with_model", "mcp__email__list_emails", "Manage_Notes"])
+async def test_a_tool_the_turn_did_not_offer_never_runs(harness, admin, monkeypatch, db, name):
+    import src.tool_execution as tool_execution
+    ran = []
+
+    async def executor(*args, **kwargs):
+        ran.append(args)
+        return name, {"output": "", "exit_code": 0}
+
+    monkeypatch.setattr(tool_execution, "_execute_tool_block_impl", executor)
+    harness.provider_rounds = [
+        _sse_tool_calls((name, {"action": "list", "model": "m", "message": "hi"})),
+        _sse_events(["That tool is not available."]),
+    ]
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert ran == []
+    [output] = _tool_events(_data_events(body), "tool_output")
+    assert output["exit_code"] == 126
+
+
 def _settings(monkeypatch, values):
     import src.settings as settings
     monkeypatch.setattr(settings, "get_setting", lambda key, default=None: values.get(key, default))

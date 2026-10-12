@@ -130,6 +130,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
         )
         tool_schemas = tools.upfront_schemas(layers.denied_names, surface)
+        offered = frozenset(tools.schema_name(schema) for schema in tool_schemas)
         unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
         conversation = await prompt.build_messages(
             turn.build_context, [tools.unavailable_line(unavailable)] if tool_schemas else [],
@@ -170,7 +171,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     decision = permissions.Decision(permissions.DENY, TOOL_CALL_CAP_REASON)
                 else:
                     tool_calls_used += 1
-                    decision = _gate(call, block, layers)
+                    decision = _gate(call, block, layers, offered)
                 if decision.outcome == permissions.ALLOW:
                     yield _event({
                         "type": "tool_start", "tool": block.tool_type, "command": block.content,
@@ -179,7 +180,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     })
                     outcome = await tools.execute(call["call_id"], block, scope)
                 else:
-                    outcome = tools.refused_outcome(call, block, decision.reason)
+                    outcome = tools.refused_outcome(
+                        call, block, decision.reason,
+                        denied=decision.outcome != permissions.INVALID,
+                    )
                 yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
                 record.tool_events.append(outcome.tool_event(len(record.rounds), endpoint.model))
                 results.append(outcome.envelope())
@@ -205,7 +209,15 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield "data: [DONE]\n\n"
 
 
-def _gate(call: Dict[str, Any], block: Any, layers: permissions.DenyLayers) -> permissions.Decision:
+def _gate(
+    call: Dict[str, Any], block: Any, layers: permissions.DenyLayers, offered: frozenset,
+) -> permissions.Decision:
+    """Admit only a tool this turn offered, then decide on the exact block the
+    executor will run (the converter may rename it, e.g. a URL read_file)."""
+    if call["name"] not in offered:
+        return permissions.Decision(
+            permissions.DENY, f"Tool '{call['name']}' is not available in this chat.",
+        )
     if block is None:
         return permissions.Decision(
             permissions.INVALID, f"{call['name']}: the arguments are not valid for this tool.",

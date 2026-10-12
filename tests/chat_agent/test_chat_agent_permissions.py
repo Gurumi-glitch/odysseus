@@ -111,3 +111,21 @@ def test_hidden_tools_are_not_listed_as_unavailable(non_admin):
     layers = _layers(allow_web_search="false")
     assert "web_search" in layers.disabled
     assert "bash" not in layers.disabled
+
+
+class _FakeMcp:
+    def plan_mode_blocked_mcp(self):
+        return {"github": {"create_issue"}}, {"mcp__github__create_issue"}
+
+
+def test_plan_mode_denies_mcp_write_tools(admin, monkeypatch):
+    import src.tool_utils as tool_utils
+    monkeypatch.setattr(tool_utils, "_mcp_manager", _FakeMcp())
+    layers = _layers(plan_mode=True)
+    assert permissions.decide(layers, "mcp__github__create_issue", "{}").outcome == DENY
+    assert permissions.decide(layers, "mcp__github__list_issues", "{}").outcome == ASK
+
+
+@pytest.mark.parametrize("name", ["mcp__Email__send_email", "MCP__email__send_email", "mcp__email__SEND_EMAIL"])
+def test_spelling_variants_of_a_sensitive_tool_never_run_unasked(admin, name):
+    assert permissions.decide(_layers(), name, "{}").outcome != ALLOW
