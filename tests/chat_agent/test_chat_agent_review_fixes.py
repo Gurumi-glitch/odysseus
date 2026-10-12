@@ -2,11 +2,20 @@
 import pytest
 
 from src.chat_agent import store
-from tests.chat_agent.test_chat_agent_route import _Request, harness  # noqa: F401 (fixture)
 from src.chat_agent.loop import Candidate, _TurnUsage
 from src.chat_agent.providers import Endpoint, RoundEnd
 from src.chat_agent.providers.chat_completions import build_payload as chat_completions_payload
 from src.model_context import estimate_text_tokens
+from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
+    _bash,
+    admin,
+    answering,
+    executor,
+    send_and_answer,
+    workspace,
+)
+from tests.chat_agent.test_chat_agent_route import _Request, _data_events, _sse_events, harness  # noqa: F401
+from tests.chat_agent.test_chat_agent_turn_record import _stop_while_an_ask_is_pending
 
 
 def test_estimated_output_tokens_use_the_shared_unicode_aware_estimate():
@@ -46,3 +55,33 @@ async def test_the_sessions_thinking_mode_reaches_the_chat_agent_request(harness
     await harness.send(_Request("agent"))
 
     assert harness.captured["provider_requests"][0]["reasoning"] == {"enabled": True}
+
+
+# --- P2: metrics while an ask waits, and on the row of a cancelled turn ------
+
+TURN_END_METRIC_KEYS = {"model", "input_tokens", "output_tokens", "usage_source", "context_length"}
+
+
+@pytest.mark.asyncio
+async def test_metrics_are_sent_when_an_ask_starts_waiting(harness, admin, executor, workspace):
+    store.set_chat_runtime("alice", store.RUNTIME_NEW)
+    harness.provider_rounds = [_bash("ls"), _sse_events(["Done."])]
+
+    body = await send_and_answer(
+        harness, _Request("agent", allow_bash="true", workspace=workspace), answering(harness, ("once",)),
+    )
+
+    kinds = [e.get("type") for e in _data_events(body)]
+    after_ask = kinds[kinds.index("ask_user") + 1]
+    assert after_ask == "metrics"
+    assert kinds.count("metrics") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cancelled_during_an_ask_keeps_its_metrics_on_the_row(harness, monkeypatch, tmp_path):
+    store.set_chat_runtime("alice", store.RUNTIME_NEW)
+    await _stop_while_an_ask_is_pending(harness, monkeypatch, tmp_path)
+
+    [row] = harness.saved
+    assert TURN_END_METRIC_KEYS <= row.metadata.keys()
+    assert row.metadata["input_tokens"] > 0

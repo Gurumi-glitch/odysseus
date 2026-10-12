@@ -315,6 +315,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         }
         writer.checkpoint()
 
+    def turn_metrics() -> Dict[str, Any]:
+        return usage.metrics(record, conversation, contexts[-1].context_length)
+
     steers = asks.SteerQueue(turn.session_id, turn.owner)
     try:
         # Before anything reads the history: the context builder, and the
@@ -414,9 +417,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     yield _event(event.event)
                 elif isinstance(event, ProviderError):
                     _finish_failed_turn(writer)
-                    yield _event({"type": "metrics", "data": usage.metrics(
-                        record, conversation, contexts[-1].context_length,
-                    )})
+                    yield _event({"type": "metrics", "data": turn_metrics()})
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
                     return
@@ -477,7 +478,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     if signal.stop:
                         ask = _Ask(turn, asks.repeat_guard_card(
                             turn.session_id, call["name"], call["arguments"], signal.streak,
-                        ))
+                        ), turn_metrics)
                         hold_ask(call, call["name"], call["arguments"], ask.card)
                         async for event in ask.events():
                             yield event
@@ -506,7 +507,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                             if permissions.policy_name(block.tool_type) == "manage_tasks" else None)
                     ask = _Ask(turn, asks.permission_card(
                         turn.session_id, block.tool_type, block.content, rule.text if rule else None, task,
-                    ))
+                    ), turn_metrics)
                     hold_ask(call, block.tool_type, block.content, ask.card)
                     async for event in ask.events():
                         yield event
@@ -539,7 +540,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         provenance = provenance.after(block.tool_type, block.content)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
-                        ask = _Ask(turn, asks.question_card(turn.session_id, question))
+                        ask = _Ask(turn, asks.question_card(turn.session_id, question), turn_metrics)
                         hold_ask(call, block.tool_type, block.content, ask.card)
                         async for event in ask.events():
                             yield event
@@ -619,7 +620,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             record.add_steers(unused)
         # The last round's text with its titles linked, once (spec #44, Stream events).
         yield _event({"type": "final_response", "content": record.round_texts[-1]})
-        metrics = record.metrics = usage.metrics(record, conversation, contexts[-1].context_length)
+        metrics = record.metrics = turn_metrics()
         message_id = writer.finish()
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
@@ -632,6 +633,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             if unused:
                 record.add_steers(unused)
             record.stop_reason = transcript.STOP_INTERRUPTED
+            # The stream is gone; the row is where the turn's usage survives.
+            record.metrics = turn_metrics()
             writer.finish()
         raise
     except Exception:
@@ -790,14 +793,17 @@ def _offered(upfront, catalog, conversation, surface, skills, invoked_tools):
 class _Ask:
     """One ask inside the turn: emit its card, wait for the answer, emit the outcome."""
 
-    def __init__(self, turn: ChatAgentTurn, card: dict) -> None:
+    def __init__(self, turn: ChatAgentTurn, card: dict, metrics: Callable[[], Dict[str, Any]]) -> None:
         self.turn = turn
         self.card = card
+        self.metrics = metrics
         self.reply: Optional[asks.Answer] = None
 
     async def events(self) -> AsyncIterator[str]:
         yield _event({"type": "ask_user", "data": self.card})
         if self.turn.interactive:
+            # The wait may outlast the stream; the browser shows usage so far.
+            yield _event({"type": "metrics", "data": self.metrics()})
             self.reply = await asks.wait(self.turn.session_id, self.turn.owner, self.card)
         else:
             self.reply = asks.NO_INTERACTIVE_USER
