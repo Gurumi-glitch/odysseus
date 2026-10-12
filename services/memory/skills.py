@@ -78,22 +78,27 @@ def _approval_policy(owner: Optional[str]) -> tuple[bool, float]:
     return bool(prefs.get("auto_approve_skills", True)), max(0.0, min(1.0, minimum))
 
 
+_USER_ONLY_MARK = "disable-model-invocation"
+
+
 def content_digest(skill: Dict) -> str:
     """Digest of what a user approves (ADR 0008).
 
     Owner, status, confidence, source and dates are left out: renames and
     audits rewrite them without changing what the skill tells the model.
     requires_toolsets is in: a usable skill unlocks those tools, so adding
-    one is a change the user has not approved.
+    one is a change the user has not approved. So is who may invoke it.
     """
     # emit_body renders the parsed sections the same way SKILL.md is written,
     # so the digest depends on content, not on the dict's key layout.
     body = emit_body(skill)
-    payload = json.dumps(
-        [skill.get("name") or "", skill.get("description") or "", body,
-         sorted(skill.get("requires_toolsets") or [])],
-        ensure_ascii=False,
-    )
+    fields = [skill.get("name") or "", skill.get("description") or "", body,
+              sorted(skill.get("requires_toolsets") or [])]
+    if skill.get("disable_model_invocation"):
+        # Appended only when set, so approvals of model-invocable skills
+        # stamped before the flag counted stay valid.
+        fields.append(_USER_ONLY_MARK)
+    payload = json.dumps(fields, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

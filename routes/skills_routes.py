@@ -2480,7 +2480,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         ok = skills_manager.update_skill(match.get("name"), updates, owner=user)
         if not ok:
             raise HTTPException(404, "Skill not found")
-        _record_user_approval(request, updates.get("name") or match.get("name"), publishing, user)
+        # The user-only flag is in the approval digest: the user's own toggle
+        # keeps an approval that still matched, never one an edit lapsed.
+        toggled = set(updates) == {"disable_model_invocation"} and bool(match.get("user_approved"))
+        _record_user_approval(request, updates.get("name") or match.get("name"), publishing or toggled, user)
         if not match.get("audit_verdict"):
             _fire_skill_added(user)
         return {"ok": True}

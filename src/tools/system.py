@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 # Skills management tool
 # ---------------------------------------------------------------------------
 
+# Who may invoke a skill is the user's call (ADR 0008): the Skills page toggle.
+_USER_ONLY_IS_THE_USERS = {
+    "error": "disable-model-invocation is set by the user on the Skills page; leave it unchanged.",
+    "exit_code": 1,
+}
+
+
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 
@@ -185,6 +192,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         match = next((s for s in existing if s.get("name") == name), None)
         if not match:
             return {"error": f"Skill {name!r} not found", "exit_code": 1}
+        if sk_new.disable_model_invocation != bool(match.get("disable_model_invocation")):
+            return dict(_USER_ONLY_IS_THE_USERS)
         if not sk_new.owner:
             sk_new.owner = match.get("owner") or owner
         ok = sm.update_skill(name, _skill_dump(sk_new), owner=owner)
@@ -212,6 +221,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             sk_new = Skill.from_markdown(new_md)
         except Exception as e:
             return {"error": f"Patched content is not valid SKILL.md: {e}", "exit_code": 1}
+        if sk_new.disable_model_invocation != Skill.from_markdown(md).disable_model_invocation:
+            return dict(_USER_ONLY_IS_THE_USERS)
         sk_new.name = slugify(sk_new.name or name)
         ok = sm.update_skill(name, _skill_dump(sk_new), owner=owner)
         return {"results": f"Patched skill `{sk_new.name}`."} if ok else {"error": "Patch update failed", "exit_code": 1}

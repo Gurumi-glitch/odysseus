@@ -7,6 +7,8 @@ import pytest
 
 import routes.chat_helpers as chat_helpers
 import routes.chat_routes as chat_routes
+import tests.chat_agent.test_skill_user_approval as skill_tests
+from routes.skills_routes import SkillUpdateRequest, setup_skills_routes
 import src.tool_execution as tool_execution
 from src.chat_agent import classifier, permissions, store
 from src.chat_agent.permissions import ALLOW, ASK, Provenance, Rules
@@ -22,6 +24,7 @@ from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixture
 from tests.chat_agent.test_chat_agent_auto_mode import _classifier_requests, _verdict
 from tests.chat_agent.test_chat_agent_route import _Request, _sse_events, _sse_tool_calls
 from tests.chat_agent.test_chat_agent_rules import _decide, _layers
+from tests.chat_agent.test_skill_user_approval import env  # noqa: F401 (fixture)
 
 # Far below the 30-minute ask timeout: an unexpected wait fails the test fast.
 NO_WAIT_SECONDS = 5
@@ -224,3 +227,58 @@ def test_the_classifier_sees_the_most_recent_history_within_its_budget():
     assert said[-2].startswith("29 ") and actions[-1]["arguments"].startswith("29\n")
     assert not said[0].startswith("0 ") and not actions[0]["arguments"].startswith("0\n")
     assert len(json.dumps(said[:-1])) <= budget and len(json.dumps(actions)) <= budget
+
+
+# --- L2: who may invoke a skill is part of what the user approved -----------
+
+
+def _page_toggle(sm, name, user_only):
+    put = skill_tests._handler(setup_skills_routes(sm), "/api/skills/{skill_id}", "PUT")
+    asyncio.run(put(skill_tests._request(), name, SkillUpdateRequest(disable_model_invocation=user_only)))
+
+
+def _user_only_approved_skill(sm):
+    name = skill_tests._add(sm)
+    _page_toggle(sm, name, True)
+    skill_tests._publish(sm, name)
+    assert skill_tests._skill(sm, name)["user_approved"]
+    return name
+
+
+@pytest.mark.parametrize("user_only", [True, False])
+def test_flipping_who_may_invoke_a_skill_lapses_its_approval(env, user_only):
+    sm, _prefs = env
+    name = skill_tests._add(sm)
+    _page_toggle(sm, name, not user_only)
+    skill_tests._publish(sm, name)
+
+    # Any write path other than the Skills page toggle.
+    sm.update_skill(name, {"disable_model_invocation": user_only}, owner=skill_tests.OWNER)
+
+    assert not skill_tests._skill(sm, name)["user_approved"]
+
+
+def test_the_skills_page_toggle_keeps_a_current_approval(env):
+    sm, _prefs = env
+    name = _user_only_approved_skill(sm)
+
+    _page_toggle(sm, name, False)
+
+    assert skill_tests._skill(sm, name)["user_approved"]
+
+
+def test_the_model_cannot_edit_who_may_invoke_a_skill(env):
+    sm, _prefs = env
+    name = _user_only_approved_skill(sm)
+    md = sm.read_skill_md(name, owner=skill_tests.OWNER)
+
+    patched = skill_tests._manage_skills({
+        "action": "patch", "name": name, "old_string": "disable-model-invocation: true\n", "new_string": "",
+    })
+    edited = skill_tests._manage_skills({
+        "action": "edit", "name": name, "content": md.replace("disable-model-invocation: true\n", ""),
+    })
+
+    assert "error" in patched and "error" in edited
+    after = skill_tests._skill(sm, name)
+    assert after["disable_model_invocation"] is True and after["user_approved"]
