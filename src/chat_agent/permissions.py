@@ -16,7 +16,7 @@ import logging
 import os
 import posixpath
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email.utils import getaddresses
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -170,6 +170,11 @@ class Decision:
     # An ask "Allow for this chat" may answer; False for asks only a fresh
     # answer each time may lift (see decide()).
     chat_scope: bool = True
+    # An ask auto mode's classifier may answer: not an explicit ask rule, a
+    # deny rule the matcher cannot rule out, or a protected action (ADR 0006).
+    auto: bool = False
+    # Who decided, when not the rules: "auto_mode" for a classifier denial.
+    by: str = ""
 
 
 @dataclass(frozen=True)
@@ -471,6 +476,11 @@ def _recipients(content: Any) -> Optional[List[str]]:
     return addresses
 
 
+def call_targets(content: Any) -> List[str]:
+    """The addresses and hosts a call's arguments send to, as the matcher reads them."""
+    return [*(_recipients(content) or ()), *(_hosts(content) or ())]
+
+
 def _combine(outcomes: List[str], *, allow: bool) -> str:
     """An allow covers a call when every part hits; a deny or ask hits on any
     part, and an unreadable part makes it unsure."""
@@ -594,7 +604,8 @@ def _raw_api_writes(tool: str, content: Any) -> bool:
 
 
 def is_sensitive(name: str, content: Any) -> bool:
-    tool = policy_name(name)
+    # Casefolded: a spelling the sets miss must not skip the ask (fail closed).
+    tool = policy_name(name).casefold()
     if tool in _SENSITIVE_TOOLS:
         return True
     capabilities = capabilities_for_action(tool, content)
@@ -679,7 +690,7 @@ def _task_delivery_protected(fields: Mapping[str, Any]) -> bool:
 def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> bool:
     """Actions auto mode never answers for the user (#68). A task edit, resume
     or run whose stored task cannot be read counts as protected."""
-    tool = policy_name(name)
+    tool = policy_name(name).casefold()
     if tool in _PROTECTED_TOOLS:
         return True
     if tool in _RAW_API_TOOLS:
@@ -719,13 +730,17 @@ class Provenance:
 
     external: bool = False
     private: bool = False
+    # Where the external content came from, for auto mode's classifier.
+    origins: Tuple[str, ...] = ()
 
     def after(self, name: str) -> "Provenance":
         """The provenance once a call to ``name`` has run."""
         tool = policy_name(name)
+        external = tool in _EXTERNAL_SOURCES or tool.startswith(_MCP_PREFIX)
         return Provenance(
-            external=self.external or tool in _EXTERNAL_SOURCES or tool.startswith(_MCP_PREFIX),
+            external=self.external or external,
             private=self.private or tool in _PRIVATE_SOURCES,
+            origins=self.origins + ((tool,) if external and tool not in self.origins else ()),
         )
 
     def after_history(self, rows: Iterable[Any]) -> "Provenance":
@@ -741,9 +756,12 @@ class Provenance:
             recorded = metadata.get(PROVENANCE_KEY)
             if isinstance(recorded, dict):
                 # A recorded leg only ever arms the gate, so a forged one costs an ask.
+                origins = recorded.get("origins") if isinstance(recorded.get("origins"), list) else []
                 provenance = Provenance(
                     external=provenance.external or bool(recorded.get("external")),
                     private=provenance.private or bool(recorded.get("private")),
+                    origins=provenance.origins + tuple(
+                        str(o) for o in origins if str(o) not in provenance.origins),
                 )
         return provenance
 
@@ -765,6 +783,7 @@ def decide(
     provenance: Provenance = Provenance(),
     owner: Optional[str] = None,
     workspace: Optional[str] = None,
+    auto_mode: bool = False,
 ) -> Decision:
     reason = layers.deny_reason(name, content) or _mcp_server_disabled_reason(name)
     if reason:
@@ -773,18 +792,23 @@ def decide(
     for rule, outcome in zip(rules.deny, deny):
         if outcome == HIT:
             return Decision(DENY, f"Denied by the user's permission rule {rule.text}.")
-    # Asks only the user's own answer each time may lift: an explicit ask
-    # rule, a deny rule the matcher cannot rule out, the egress gate, and
-    # protected actions. "Allow for this chat" is neither offered nor applied.
-    pinned = (
+    if auto_mode:
+        # Auto mode only adds checks: whole-tool shell allows would let every
+        # command past the classifier (ADR 0006).
+        rules = replace(rules, allow=tuple(rule for rule in rules.allow if rule.tool not in _SHELL_TOOLS))
+        session = [rule for rule in session if rule.tool not in _SHELL_TOOLS]
+    # Asks only the user may answer, every time.
+    user_only = (
         UNSURE in deny
         or any(_match(rule, name, content, allow=False, workspace=workspace) != MISS for rule in rules.ask)
-        or (provenance.external and provenance.private and _egress(name, content))
         or is_protected(name, content, owner=owner)
-        # A task's grants come from its prompt, so each one needs its own card.
+        # A task's grants come from its prompt and it runs unattended later,
+        # so each one needs the user's own answer.
         or (policy_name(name) == "manage_tasks"
             and _action_from_content("manage_tasks", content) in _TASK_ACTIONS_THAT_ASK)
     )
+    # Asks "Allow for this chat" never lifts: the above and the egress gate.
+    pinned = user_only or (provenance.external and provenance.private and _egress(name, content))
     asks = pinned or is_sensitive(name, content) or (
         posture(name, content) == ASK
         and not any(rule_covers(rule, name, content, workspace) for rule in rules.allow)
@@ -793,7 +817,7 @@ def decide(
         return Decision(ALLOW)
     if not pinned and any(rule_covers(rule, name, content, workspace) for rule in session):
         return Decision(ALLOW)
-    return Decision(ASK, chat_scope=not pinned)
+    return Decision(ASK, chat_scope=not pinned, auto=not user_only)
 
 
 def posture(name: str, content: Any) -> str:

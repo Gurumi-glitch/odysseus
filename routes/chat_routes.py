@@ -3086,6 +3086,10 @@ def setup_chat_routes(
                 skills_manager=skills_manager,
                 # Set by the composer's /name skill invocation (#66).
                 invoked_skill=str(form_data.get("invoked_skill") or "").strip(),
+                # The composer's auto mode toggle (#68), read from the form like
+                # interactive; the runtime checks the privilege and the turn.
+                auto_mode=str(form_data.get("auto_mode", "")).lower() == "true",
+                message=message,
                 candidates=fallback_candidates,
                 fallback_statuses=foreground_policy.eligible_statuses,
                 stick_route=lambda candidate: _persist_session_route(

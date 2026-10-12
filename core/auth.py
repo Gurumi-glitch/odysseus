@@ -29,6 +29,8 @@ DEFAULT_PRIVILEGES = {
     "can_use_research": True,
     "can_generate_images": True,
     "can_manage_memory": True,
+    # The composer's auto mode on the new chat runtime (#68).
+    "can_use_auto_mode": True,
     "max_messages_per_day": 0,
     "allowed_models": [],
     "allowed_models_restricted": False,

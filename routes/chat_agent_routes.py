@@ -8,7 +8,7 @@ from core.atomic_io import atomic_write_text
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import require_user
-from src.chat_agent import permissions, store
+from src.chat_agent import classifier, permissions, store
 from src.owner_identity import auth_disabled
 
 
@@ -72,6 +72,15 @@ def setup_chat_agent_routes() -> APIRouter:
         if "enabled" in body:
             store.set_instructions_enabled(user, bool(body["enabled"]))
         return _instructions(user)
+
+    @router.get("/auto_mode/{session_id}")
+    async def get_auto_mode(request: Request, session_id: str) -> dict:
+        """Whether auto mode is paused in this chat, for the composer icon on
+        load; a running turn reports changes as ``auto_mode`` events (#68)."""
+        if auth_disabled():
+            return {"available": False}
+        user = require_user(request)
+        return {"available": True, "paused": classifier.paused_in(user, session_id)}
 
     @router.get("/rules")
     async def get_rules(request: Request) -> dict:

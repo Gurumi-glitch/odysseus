@@ -34,7 +34,7 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, permissions, prompt, repeat_guard, result_events, store, tools, transcript, turn_context,
+    asks, classifier, permissions, prompt, repeat_guard, result_events, store, tools, transcript, turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
@@ -136,6 +136,11 @@ class ChatAgentTurn:
     # this turn (its text is already in the message; its tools load here).
     skills_manager: Any = None
     invoked_skill: str = ""
+    # The composer's auto mode toggle as sent (#68); the classifier module
+    # decides whether this user and turn may use it.
+    auto_mode: bool = False
+    # The user's message as sent, for auto mode's classifier.
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -309,7 +314,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # The open email preview is both external content and a private read (ADR 0002).
         provenance = permissions.Provenance(
             external=turn.active_email_open, private=turn.active_email_open,
+            origins=("active email preview",) if turn.active_email_open else (),
         ).after_history(getattr(turn.sess, "history", None) or ())
+        # Before the context builder saves this turn's user row.
+        auto = classifier.AutoMode.for_turn(turn)
+        if auto.state != classifier.OFF:
+            yield _event(auto.event())
         layers = permissions.build_deny_layers(
             owner=turn.owner,
             toggles=turn.toggles,
@@ -448,7 +458,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     else:
                         reminder = signal.reminder
                         decision = (permissions.Decision(permissions.ALLOW) if own_tool
-                                    else _gate(turn, call, block, layers, offered, rules, provenance))
+                                    else _gate(turn, call, block, layers, offered, rules, provenance, auto))
+                if decision.outcome == permissions.ASK and decision.auto and auto.active:
+                    verdict = await auto.judge(
+                        block.tool_type, block.content, chat_endpoint=endpoint,
+                        provenance=provenance, tool_events=record.tool_events,
+                    )
+                    if verdict is not None:
+                        decision = permissions.Decision(permissions.ALLOW) if verdict.allow else classifier.denial(verdict)
+                        if not auto.active:
+                            yield _event(auto.event())
                 if decision.outcome == permissions.ASK:
                     rule = permissions.session_rule(block.tool_type, block.content) if decision.chat_scope else None
                     task = (permissions.task_card(turn.owner, block.content)
@@ -462,6 +481,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     if ask.reply is None:
                         record.stop_reason = transcript.STOP_ASK_EXPIRED
                     decision = _permission_decision(turn, rule, ask.reply)
+                    if decision.outcome == permissions.ALLOW and auto.approved():
+                        yield _event(auto.event())
                 adapted = None
                 if decision.outcome == permissions.ALLOW:
                     tool, command = (call["name"], call["arguments"]) if own_tool else (block.tool_type, block.content)
@@ -506,8 +527,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         denied=decision.outcome != permissions.INVALID,
                     )
                 if adapted is None:
-                    yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
+                    output_event = _tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW)
                     tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
+                    if decision.by:
+                        # The card shows who denied it, live and on reload.
+                        output_event["denied_by"] = tool_event["denied_by"] = decision.by
+                    yield _event(output_event)
                 else:
                     for ui_event in adapted.events:
                         if ui_event["type"] == "web_sources":
@@ -743,6 +768,7 @@ class _Ask:
 def _gate(
     turn: ChatAgentTurn, call: Dict[str, Any], block: Any, layers: permissions.DenyLayers,
     offered: frozenset, rules: permissions.Rules, provenance: permissions.Provenance,
+    auto: classifier.AutoMode,
 ) -> permissions.Decision:
     """Admit only a tool this turn offered, then decide on the exact block the
     executor will run (the converter may rename it, e.g. a URL read_file)."""
@@ -758,7 +784,7 @@ def _gate(
     session = [permissions.rule_from_record(r) for r in store.session_rules(turn.owner, turn.session_id)]
     return permissions.decide(
         layers, block.tool_type, block.content, rules=rules, session=session, provenance=provenance,
-        owner=turn.owner, workspace=turn.toggles.workspace,
+        owner=turn.owner, workspace=turn.toggles.workspace, auto_mode=auto.on,
     )
 
 
