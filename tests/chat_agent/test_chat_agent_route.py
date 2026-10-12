@@ -89,7 +89,7 @@ def _sse_tool_calls(*calls, text=""):
 
 
 class _Harness:
-    def __init__(self, monkeypatch, tmp_path, *, chat_handler=None, chat_processor=None):
+    def __init__(self, monkeypatch, tmp_path, *, chat_handler=None, chat_processor=None, skills_manager=None):
         self.captured = {"legacy_agent": 0, "legacy_chat": 0, "provider_requests": []}
         self.saved = []
         self.provider_chunks = ["Hel", "lo!"]
@@ -214,7 +214,7 @@ class _Harness:
         router = chat_routes.setup_chat_routes(
             session_manager, chat_handler or SimpleNamespace(),
             chat_processor or SimpleNamespace(), SimpleNamespace(),
-            SimpleNamespace(), SimpleNamespace(),
+            SimpleNamespace(), SimpleNamespace(), skills_manager=skills_manager,
         )
         self.routes = {route.path: route.endpoint for route in router.routes}
         self.endpoint = self.routes["/api/chat_stream"]

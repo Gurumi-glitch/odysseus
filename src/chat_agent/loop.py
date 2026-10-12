@@ -138,6 +138,10 @@ class ChatAgentTurn:
     # False when nobody can answer an ask (interactive:false or an API token):
     # every ask then resolves at once as a denial.
     interactive: bool = True
+    # The route's SkillsManager, and the skill a /name invocation started
+    # this turn (its text is already in the message; its tools load here).
+    skills_manager: Any = None
+    invoked_skill: str = ""
 
 
 @dataclass(frozen=True)
@@ -358,6 +362,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             name for name in tools.upfront_tool_names()
             if name in layers.disabled and name not in reader_denied
         ]
+        skills = turn.skills_manager if upfront and turn.skills_manager is not None and tools.skills_enabled(
+            turn.owner, sess, turn.toggles.incognito,
+        ) else None
+        invoked_tools = () if turn.toggles.incognito else tools.invoked_skill_tools(
+            turn.skills_manager, turn.owner, turn.invoked_skill, catalog,
+        )
         document = turn_context.load_document(turn.owner, turn.active_document_id)
         conversation = await prompt.build_messages(
             build_context,
@@ -369,8 +379,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 document=document, email=turn.active_email,
                 approved_plan=turn.approved_plan, denied=layers.denied_names,
             ),
+            skill_index=prompt.skill_index_section(
+                skills.index_for(owner=turn.owner),
+                _setting_int("skill_index_max_chars", settings.DEFAULT_SETTINGS["skill_index_max_chars"]),
+            ) if skills is not None else "",
         )
-        tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
+        tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
         scope = tools.ExecutionScope(
             owner=turn.owner,
             session_id=turn.session_id,
@@ -424,10 +438,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             results = round_record["results"] = []
             round_outcomes = []
             for call in calls:
-                # tool_search is the runtime's own tool: it is answered here,
-                # never converted for the legacy executor.
-                searching = call["name"] == tools.TOOL_SEARCH and call["name"] in offered
-                block = None if searching else function_call_to_tool_block(call["name"], call["arguments"])
+                # tool_search and load_skill are the runtime's own tools: they
+                # are answered here, never converted for the legacy executor.
+                own_tool = call["name"] in (tools.TOOL_SEARCH, tools.LOAD_SKILL) and call["name"] in offered
+                block = None if own_tool else function_call_to_tool_block(call["name"], call["arguments"])
                 reminder = None
                 # The last card this call raised, stored on its tool event.
                 ask = None
@@ -457,7 +471,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                     else:
                         reminder = signal.reminder
-                        decision = (permissions.Decision(permissions.ALLOW) if searching
+                        decision = (permissions.Decision(permissions.ALLOW) if own_tool
                                     else _gate(turn, call, block, layers, offered, rules, provenance))
                 if decision.outcome == permissions.ASK:
                     rule = permissions.session_rule(block.tool_type, block.content)
@@ -472,14 +486,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     decision = _permission_decision(turn, rule, ask.reply)
                 adapted = None
                 if decision.outcome == permissions.ALLOW:
-                    tool, command = (call["name"], call["arguments"]) if searching else (block.tool_type, block.content)
+                    tool, command = (call["name"], call["arguments"]) if own_tool else (block.tool_type, block.content)
                     yield _event({
                         "type": "tool_start", "tool": tool,
-                        "command": command if searching else result_events.command_display(block),
+                        "command": command if own_tool else result_events.command_display(block),
                         "full_command": command.strip(), "round": len(record.rounds),
                         "call_id": call["call_id"],
                     })
-                    if searching:
+                    if own_tool and call["name"] == tools.LOAD_SKILL:
+                        outcome = tools.run_load_skill(call, skills, turn.owner, catalog)
+                    elif own_tool:
                         outcome = tools.run_search(call, catalog)
                     else:
                         async for item in _execute_with_progress(call["call_id"], block, scope, len(record.rounds)):
@@ -537,7 +553,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             if visual is not None:
                 conversation.append(visual)
             # Tools loaded by this round's tool_search join the next round.
-            tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
+            tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
             round_tools = tool_schemas
             if record.stop_reason == transcript.STOP_ASK_EXPIRED:
                 # Nobody is there to answer; keep the work done so far.
@@ -717,8 +733,11 @@ class _TurnUsage:
         return metrics
 
 
-def _offered(upfront, catalog, conversation, surface):
-    schemas = tools.offered_schemas(upfront, catalog, tools.loaded_names(conversation), surface)
+def _offered(upfront, catalog, conversation, surface, skills, invoked_tools):
+    schemas = tools.offered_schemas(
+        upfront, catalog, [*invoked_tools, *tools.loaded_names(conversation)], surface,
+        skills=skills is not None,
+    )
     return schemas, frozenset(tools.schema_name(schema) for schema in schemas)
 
 
