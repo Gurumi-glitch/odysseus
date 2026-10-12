@@ -12,8 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import aclosing
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import (
+    Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence,
+    Union,
+)
 
 # Relies on: _configured_model_tool_surface returns the per-model tool surface
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
@@ -33,10 +37,17 @@ from src.chat_agent.providers import (
     TextDelta,
     chat_completions,
     provider_key,
+    tool_output_text,
     xai_responses,
 )
 from src.chat_agent.routing import ComposerToggles
 from src import settings
+# Relied on: with persist=False maybe_compact never writes session history.
+# When it compacts it returns the system messages, then one summary message,
+# then the kept non-system messages; compaction_state["split_point"] is the
+# index into the non-system messages where the kept half starts.
+from src.context_compactor import maybe_compact
+from src.llm_core import LLMConfig
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -61,6 +72,27 @@ _NOT_RUN_REASONS = {
     transcript.STOP_REPEAT_GUARD: REPEAT_STOP_REASON,
     transcript.STOP_ASK_EXPIRED: ASK_EXPIRED_REASON,
 }
+# With no fallback configured, one retry on these (the legacy foreground
+# availability retry, spec #44 Providers).
+SINGLE_CANDIDATE_RETRY_STATUSES = frozenset({502, 503, 504, 529})
+
+
+@dataclass(frozen=True)
+class Candidate:
+    endpoint: Endpoint
+    # Its build_foreground_route_descriptors entry (endpoint_id,
+    # endpoint_label, endpoint_cost_tracked) for the legacy fallback event.
+    route: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Fallback:
+    """A fallback candidate produced output; the rest of the turn uses it."""
+
+    candidate: Candidate
+    # The request it answered, compacted when the history exceeded its window.
+    conversation: List[Dict[str, Any]]
+    event: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -79,6 +111,12 @@ class ChatAgentTurn:
     delegated_credential: bool
     active_email_open: bool
     client_runtime_context: Optional[Dict[str, Any]]
+    # The foreground candidate list, the session's own route first.
+    candidates: Sequence[Candidate]
+    # The foreground policy's eligible_statuses.
+    fallback_statuses: FrozenSet[int]
+    # Moves the session's stored model and endpoint (fallback is sticky).
+    stick_route: Callable[[Candidate], None]
     # The route's run_post_response_tasks bound to this request (memory and
     # skill extraction, webhook, auto-name); the loop adds the turn's results.
     after_turn: Optional[Callable[..., None]] = None
@@ -130,6 +168,117 @@ def _stream_round(
     )
 
 
+async def _round_with_fallback(
+    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+    tool_schemas: Sequence[Dict[str, Any]],
+) -> AsyncIterator[Union[RoundEvent, Fallback]]:
+    """One round on the turn's current candidate; a failure before any output
+    with an eligible status moves to the next candidate (spec #44 Providers).
+    A failure after output passes through: switching would repeat streamed text."""
+    candidates = turn.candidates
+    start = next(i for i, candidate in enumerate(candidates) if candidate.endpoint == endpoint)
+    failures: List[Dict[str, Any]] = []
+    reason = ""
+    for index in range(start, len(candidates)):
+        candidate = candidates[index]
+        request = conversation if index == start else await _fit_window(turn, candidate.endpoint, conversation)
+        retry_left = len(candidates) == 1
+        while True:
+            failure = None
+            committed = False
+            held: List[RoundEvent] = []
+            provider = provider_key(candidate.endpoint.url)
+            async with aclosing(_stream_round(turn, provider, candidate.endpoint, request, tool_schemas)) as events:
+                async for event in events:
+                    if not committed:
+                        if isinstance(event, ProviderError):
+                            failure = event
+                            break
+                        if isinstance(event, TextDelta) and not event.text.strip():
+                            held.append(event)
+                            continue
+                        committed = True
+                        if index != start:
+                            turn.stick_route(candidate)
+                            yield Fallback(candidate, request, _fallback_event(
+                                candidates[0], candidate, index, reason, failures,
+                            ))
+                        for event_held in held:
+                            yield event_held
+                    yield event
+            if failure is None:
+                return
+            if retry_left and failure.status in SINGLE_CANDIDATE_RETRY_STATUSES:
+                retry_left = False
+                logger.warning("chat_agent: retrying %s after pre-output HTTP %s",
+                               candidate.endpoint.model, failure.status)
+                await asyncio.sleep(LLMConfig.RETRY_DELAY)
+                continue
+            break
+        if failure.status not in turn.fallback_statuses or index == len(candidates) - 1:
+            yield failure
+            return
+        logger.warning("chat_agent: %s failed before output (HTTP %s); trying the next fallback",
+                       candidate.endpoint.model, failure.status)
+        reason = reason or failure.message
+        failures.append({"candidate_index": index, "model": candidate.endpoint.model, "status": failure.status})
+
+
+def _fallback_event(
+    selected: Candidate, answered: Candidate, index: int, reason: str, failures: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The legacy ``fallback`` event (llm_core.stream_llm_with_fallback)."""
+    return {
+        "type": "fallback",
+        "selected_model": selected.endpoint.model,
+        "answered_by": answered.endpoint.model,
+        "selected_endpoint_id": selected.route.get("endpoint_id"),
+        "selected_endpoint_label": selected.route.get("endpoint_label"),
+        "selected_endpoint_cost_tracked": selected.route.get("endpoint_cost_tracked"),
+        "answered_by_endpoint_id": answered.route.get("endpoint_id"),
+        "answered_by_endpoint_label": answered.route.get("endpoint_label"),
+        "answered_by_endpoint_cost_tracked": answered.route.get("endpoint_cost_tracked"),
+        "candidate_index": index,
+        "reason": reason,
+        "failures": failures,
+    }
+
+
+async def _fit_window(
+    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Compact once when the history exceeds the fallback's window, with the
+    existing compaction until #67. Request-local: the next turn's context
+    builder compacts the stored history at the (now sticky) fallback window."""
+    view = [{"role": message["role"], "content": _plain_text(message)} for message in conversation]
+    state: Dict[str, Any] = {}
+    compacted_view, _, compacted = await maybe_compact(
+        turn.sess, endpoint.url, endpoint.model, view, endpoint.headers,
+        owner=turn.owner, persist=False, compaction_state=state,
+    )
+    if not compacted:
+        return conversation
+    system = [message for message in conversation if message["role"] == "system"]
+    rest = [message for message in conversation if message["role"] != "system"]
+    split = state["split_point"]
+    # A kept tool result needs its call: start the kept half at the call's round.
+    while split > 0 and rest[split]["role"] == "tool":
+        split -= 1
+    return [*system, compacted_view[len(system)], *rest[split:]]
+
+
+def _plain_text(message: Dict[str, Any]) -> Any:
+    """What the legacy compactor can measure and summarize: rounds as text."""
+    if "blocks" in message:
+        return "\n".join(
+            block["text"] if block["type"] == "text" else f"{block['name']}({block['arguments']})"
+            for block in message["blocks"] if block["type"] in ("text", "tool_call")
+        )
+    if message["role"] == "tool":
+        return tool_output_text(message)
+    return message.get("content") or ""
+
+
 def _round_record(end: RoundEnd) -> Dict[str, Any]:
     if end.usage is None:
         return {"blocks": end.blocks}
@@ -139,7 +288,7 @@ def _round_record(end: RoundEnd) -> Dict[str, Any]:
 async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield _event({"type": "turn_mode", "mode": "agent", "auto_escalated": turn.auto_escalated})
     sess = turn.sess
-    endpoint = Endpoint(sess.endpoint_url, sess.model, sess.headers)
+    endpoint = turn.candidates[0].endpoint
     provider = provider_key(endpoint.url)
     record = transcript.TurnRecord(provider=provider, model=endpoint.model)
     writer = transcript.TurnWriter(sess, turn.session_id, record, incognito=turn.toggles.incognito)
@@ -174,15 +323,19 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         surface = _configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
         )
-        tool_schemas = tools.upfront_schemas(layers.denied_names, surface)
-        offered = frozenset(tools.schema_name(schema) for schema in tool_schemas)
+        upfront = tools.upfront_schemas(layers.denied_names, surface)
+        # Non-admins never see MCP tools (spec #44, managed deny layer).
+        catalog = tools.deferred_catalog(
+            layers.denied_names, include_mcp=not layers.hide_all_mcp,
+        ) if upfront else []
         unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
         conversation = await prompt.build_messages(
             build_context,
-            [tools.unavailable_line(unavailable)] if tool_schemas else [],
+            [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
             toggles=turn.toggles,
         )
+        tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
         scope = tools.ExecutionScope(
             owner=turn.owner,
             session_id=turn.session_id,
@@ -197,8 +350,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         while True:
             end = None
             streamed.clear()
-            async for event in _stream_round(turn, provider, endpoint, conversation, round_tools):
-                if isinstance(event, ProviderError):
+            async for event in _round_with_fallback(turn, endpoint, conversation, round_tools):
+                if isinstance(event, Fallback):
+                    endpoint, conversation = event.candidate.endpoint, event.conversation
+                    record.provider, record.model = provider_key(endpoint.url), endpoint.model
+                    yield _event(event.event)
+                elif isinstance(event, ProviderError):
                     _finish_failed_turn(writer)
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
@@ -219,7 +376,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = round_record["results"] = []
             for call in calls:
-                block = function_call_to_tool_block(call["name"], call["arguments"])
+                # tool_search is the runtime's own tool: it is answered here,
+                # never converted for the legacy executor.
+                searching = call["name"] == tools.TOOL_SEARCH and call["name"] in offered
+                block = None if searching else function_call_to_tool_block(call["name"], call["arguments"])
                 reminder = None
                 # The last card this call raised, stored on its tool event.
                 ask = None
@@ -249,7 +409,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                     else:
                         reminder = signal.reminder
-                        decision = _gate(call, block, layers, offered)
+                        decision = (permissions.Decision(permissions.ALLOW) if searching
+                                    else _gate(call, block, layers, offered))
                 if decision.outcome == permissions.ASK and session_rules.allows(
                     turn.owner, turn.session_id, block.tool_type, block.content,
                 ):
@@ -266,12 +427,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         record.stop_reason = transcript.STOP_ASK_EXPIRED
                     decision = _permission_decision(turn, rule, ask.reply)
                 if decision.outcome == permissions.ALLOW:
+                    tool, command = (call["name"], call["arguments"]) if searching else (block.tool_type, block.content)
                     yield _event({
-                        "type": "tool_start", "tool": block.tool_type, "command": block.content,
-                        "full_command": block.content, "round": len(record.rounds),
+                        "type": "tool_start", "tool": tool, "command": command,
+                        "full_command": command, "round": len(record.rounds),
                         "call_id": call["call_id"],
                     })
-                    outcome = await tools.execute(call["call_id"], block, scope)
+                    if searching:
+                        outcome = tools.run_search(call, catalog)
+                    else:
+                        outcome = await tools.execute(call["call_id"], block, scope)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
@@ -301,6 +466,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 # Per call, not per round: a restart must not mark a call
                 # that already ran as cancelled (it would replay as not run).
                 writer.checkpoint()
+            # Tools loaded by this round's tool_search join the next round.
+            tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
+            round_tools = tool_schemas
             if record.stop_reason == transcript.STOP_ASK_EXPIRED:
                 # Nobody is there to answer; keep the work done so far.
                 break
@@ -382,6 +550,11 @@ def _after_turn(
             owner=turn.owner, session_id=turn.session_id, sess=turn.sess,
             assistant_content=content, metadata=record.metadata(), message_id=message_id,
         )
+
+
+def _offered(upfront, catalog, conversation, surface):
+    schemas = tools.offered_schemas(upfront, catalog, tools.loaded_names(conversation), surface)
+    return schemas, frozenset(tools.schema_name(schema) for schema in schemas)
 
 
 class _Ask:

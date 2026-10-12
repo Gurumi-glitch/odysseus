@@ -172,7 +172,8 @@ def _digest(content: Any, agent_v2: Dict[str, Any]) -> Optional[str]:
     return hmac.new(key, payload.encode("utf-8"), sha256).hexdigest()
 
 
-def _signed(content: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+def signed_metadata(content: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp ``agent_v2.content_digest`` for this content; the writer's seal."""
     agent_v2 = metadata["agent_v2"]
     agent_v2.pop("content_digest", None)
     digest = _digest(content, agent_v2)
@@ -228,7 +229,7 @@ class TurnWriter:
             content = self.record.content()
             _append_incognito_message(
                 self.session_id, "assistant", content,
-                _signed(content, self._metadata(in_progress=False)),
+                signed_metadata(content, self._metadata(in_progress=False)),
             )
             return None
         self._write(in_progress=False)
@@ -249,7 +250,7 @@ class TurnWriter:
 
     def _write(self, *, in_progress: bool) -> None:
         content = self.record.content()
-        metadata = _signed(content, self._metadata(in_progress=in_progress))
+        metadata = signed_metadata(content, self._metadata(in_progress=in_progress))
         if self.message is None:
             self.message = ChatMessage("assistant", content, metadata=metadata)
             # Relies on: Session.add_message persists through the session
@@ -309,7 +310,7 @@ def sweep_interrupted_turns() -> int:
             metadata.pop("in_progress")
             metadata["stop_reason"] = STOP_INTERRUPTED
             metadata["stopped"] = True
-            row.meta_data = json.dumps(_signed(row.content, metadata))
+            row.meta_data = json.dumps(signed_metadata(row.content, metadata))
             swept += 1
         db.commit()
     finally:
