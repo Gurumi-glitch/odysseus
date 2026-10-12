@@ -30,7 +30,7 @@ from src.chat_agent.providers import (
     xai_responses,
 )
 from src.chat_agent.routing import ComposerToggles
-from src.settings import get_setting
+from src import settings
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -77,7 +77,7 @@ def _error_event(message: str, status: Optional[int] = None) -> str:
 def _setting_int(key: str, default: int) -> int:
     # settings.json can be hand-edited past the admin endpoint's validation.
     try:
-        return int(get_setting(key, default))
+        return int(settings.get_setting(key, default))
     except (TypeError, ValueError):
         return default
 
@@ -124,7 +124,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             privileges=turn.privileges,
             delegated_credential=turn.delegated_credential,
             active_email_open=turn.active_email_open,
-            global_disabled_tools=get_setting("disabled_tools", []),
+            global_disabled_tools=settings.get_setting("disabled_tools", []),
         )
         surface = _configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,

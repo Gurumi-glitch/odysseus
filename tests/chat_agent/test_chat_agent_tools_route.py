@@ -295,3 +295,42 @@ async def test_per_model_compact_surface_strips_descriptions(harness, db):
     from src.agent_tools import FUNCTION_TOOL_SCHEMAS
     full = next(t for t in FUNCTION_TOOL_SCHEMAS if t["function"]["name"] == "manage_notes")
     assert len(json.dumps(notes)) < len(json.dumps(full))
+
+
+def _settings(monkeypatch, values):
+    import src.settings as settings
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: values.get(key, default))
+
+
+@pytest.mark.asyncio
+async def test_round_cap_stops_a_looping_model(harness, monkeypatch, db):
+    _settings(monkeypatch, {"agent_max_rounds": 2})
+    note = ("manage_notes", {"action": "list"})
+    harness.provider_rounds = [_sse_tool_calls(note), _sse_tool_calls(note), _sse_tool_calls(note)]
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert {"type": "rounds_exhausted", "rounds": 2} in _data_events(body)
+    assert len(harness.captured["provider_requests"]) == 2
+    [row] = harness.saved
+    assert len(row.metadata["agent_v2"]["rounds"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_call_cap_stops_the_turn_and_answers_every_call(harness, monkeypatch, db):
+    _settings(monkeypatch, {"agent_max_tool_calls": 1})
+    harness.provider_rounds = [_sse_tool_calls(
+        ("manage_notes", {"action": "add", "title": "one"}),
+        ("manage_notes", {"action": "add", "title": "two"}),
+    )]
+
+    _, body = await harness.send(_Request("agent"))
+
+    events = _data_events(body)
+    assert {"type": "budget_exceeded", "kind": "tool_calls", "limit": 1, "used": 1} in events
+    assert [o["exit_code"] for o in _tool_events(events, "tool_output")] == [0, 126]
+    assert len(harness.captured["provider_requests"]) == 1
+    with db() as session:
+        assert [n.title for n in session.query(database.Note)] == ["one"]
+    [row] = harness.saved
+    assert [r["call_id"] for r in row.metadata["agent_v2"]["rounds"][0]["results"]] == ["call_0", "call_1"]
