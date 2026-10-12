@@ -151,15 +151,19 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         surface = _configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
         )
-        tool_schemas = tools.upfront_schemas(layers.denied_names, surface)
-        offered = frozenset(tools.schema_name(schema) for schema in tool_schemas)
+        upfront = tools.upfront_schemas(layers.denied_names, surface)
+        # Non-admins never see MCP tools (spec #44, managed deny layer).
+        catalog = tools.deferred_catalog(
+            layers.denied_names, include_mcp=not layers.hide_all_mcp,
+        ) if upfront else []
         unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
         conversation = await prompt.build_messages(
             turn.build_context,
-            [tools.unavailable_line(unavailable)] if tool_schemas else [],
+            [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
             toggles=turn.toggles,
         )
+        tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
         scope = tools.ExecutionScope(
             owner=turn.owner,
             session_id=turn.session_id,
@@ -190,7 +194,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = []
             for call in calls:
-                block = function_call_to_tool_block(call["name"], call["arguments"])
+                # tool_search is the runtime's own tool: it is answered here,
+                # never converted for the legacy executor.
+                searching = call["name"] == tools.TOOL_SEARCH and call["name"] in offered
+                block = None if searching else function_call_to_tool_block(call["name"], call["arguments"])
                 reminder = None
                 # The last card this call raised, stored on its tool event.
                 ask = None
@@ -219,7 +226,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                     else:
                         reminder = signal.reminder
-                        decision = _gate(call, block, layers, offered)
+                        decision = (permissions.Decision(permissions.ALLOW) if searching
+                                    else _gate(call, block, layers, offered))
                 if decision.outcome == permissions.ASK and session_rules.allows(
                     turn.owner, turn.session_id, block.tool_type, block.content,
                 ):
@@ -235,12 +243,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         record.stop_reason = transcript.STOP_ASK_EXPIRED
                     decision = _permission_decision(turn, rule, ask.reply)
                 if decision.outcome == permissions.ALLOW:
+                    tool, command = (call["name"], call["arguments"]) if searching else (block.tool_type, block.content)
                     yield _event({
-                        "type": "tool_start", "tool": block.tool_type, "command": block.content,
-                        "full_command": block.content, "round": len(record.rounds),
+                        "type": "tool_start", "tool": tool, "command": command,
+                        "full_command": command, "round": len(record.rounds),
                         "call_id": call["call_id"],
                     })
-                    outcome = await tools.execute(call["call_id"], block, scope)
+                    if searching:
+                        outcome = tools.run_search(call, catalog)
+                    else:
+                        outcome = await tools.execute(call["call_id"], block, scope)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
@@ -266,6 +278,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 results.append(envelope)
                 conversation.append({"role": "tool", **envelope})
             round_record["results"] = results
+            # Tools loaded by this round's tool_search join the next round.
+            tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
+            round_tools = tool_schemas
             if record.stop_reason == transcript.STOP_ASK_EXPIRED:
                 # Nobody is there to answer; keep the work done so far.
                 break
@@ -298,6 +313,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
     yield "data: [DONE]\n\n"
+
+
+def _offered(upfront, catalog, conversation, surface):
+    schemas = tools.offered_schemas(upfront, catalog, tools.loaded_names(conversation), surface)
+    return schemas, frozenset(tools.schema_name(schema) for schema in schemas)
 
 
 class _Ask:
