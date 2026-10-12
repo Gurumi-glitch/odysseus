@@ -21,6 +21,7 @@ STOP_MAX_ROUNDS = "max_rounds"
 STOP_BUDGET = "budget"
 STOP_INTERRUPTED = "interrupted"
 STOP_REPEAT_GUARD = "repeat_guard"
+STOP_ASK_EXPIRED = "ask_expired"
 
 
 @dataclass

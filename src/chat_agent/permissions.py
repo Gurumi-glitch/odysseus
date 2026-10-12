@@ -133,12 +133,6 @@ _LOOSENING_ON_TOGGLES = frozenset({"web", "search", "websearch", "web_search",
 _NOBODY_TOGGLES = frozenset({"incognito", "private"})
 _TOGGLE_ON_VALUES = frozenset({"on", "true", "1", "yes", "enable", "enabled"})
 
-APPROVAL_PENDING_REASON = (
-    "This action needs your approval; approvals arrive soon on this runtime, "
-    "so it was not run."
-)
-
-
 @dataclass(frozen=True)
 class Decision:
     outcome: str
@@ -231,7 +225,7 @@ def decide(layers: DenyLayers, name: str, content: Any) -> Decision:
     if reason:
         return Decision(DENY, reason)
     if posture(name, content) == ASK:
-        return Decision(ASK, APPROVAL_PENDING_REASON)
+        return Decision(ASK)
     return Decision(ALLOW)
 
 
