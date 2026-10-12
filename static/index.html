@@ -1696,6 +1696,26 @@
             </div>
             <div id="set-chatRulesMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);margin-top:8px;"></div>
           </div>
+          <div class="admin-card admin-only" id="set-classifierCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Auto Mode Classifier</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Model that answers permission asks while auto mode is on in the new runtime. Leave both empty to judge with the chat's own model. A user who may not use this model is judged by their chat model instead.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Endpoint</label>
+                <select id="set-classifierEndpoint" class="settings-select">
+                  <option value="">Same as chat</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Model</label>
+                <span class="adm-model-logo" id="set-classifierModel-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
+                <select id="set-classifierModel" class="settings-select">
+                  <option value="">Same as chat</option>
+                </select>
+              </div>
+              <div id="set-classifierMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);margin-top:2px;"></div>
+            </div>
+          </div>
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Image Generation<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-imgEnabledToggle"><span class="admin-slider"></span></label></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Configure which model to use for image generation.</div>

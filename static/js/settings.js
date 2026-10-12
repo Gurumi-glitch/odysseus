@@ -972,6 +972,69 @@ async function initSearchSettings() {
   }
 }
 
+/* ── Auto Mode Classifier (AI tab) ── */
+// Global classifier_endpoint_id + classifier_model (#68). Both empty means
+// the chat's own model judges; an endpoint without a model resolves to
+// nothing on the server, so the status says to pick one.
+async function initClassifierModel() {
+  var epSel = el('set-classifierEndpoint');
+  var modelSel = el('set-classifierModel');
+  var msg = el('set-classifierMsg');
+  if (!epSel || !modelSel) return;
+  var endpoints = [];
+
+  try {
+    endpoints = await _fetchModelEndpoints();
+    _fillEndpointSelect(epSel, endpoints, epSel.value, true);
+  } catch (e) { console.warn('Failed to load endpoints for the classifier', e); }
+
+  function refreshModels(selectedModel) {
+    var ep = endpoints.find(function(e) { return e.id === epSel.value; });
+    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+  }
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.classifier_endpoint_id) epSel.value = settings.classifier_endpoint_id;
+    refreshModels(settings.classifier_model || '');
+  } catch (e) { console.warn('Failed to load classifier settings', e); }
+
+  function showStatus() {
+    if (!epSel.value) {
+      msg.textContent = "Using the chat's model";
+      msg.style.color = 'var(--fg)';
+    } else if (!modelSel.value) {
+      msg.textContent = 'Pick a model';
+      msg.style.color = 'var(--red)';
+    } else {
+      msg.textContent = epSel.options[epSel.selectedIndex].textContent + ' / ' + modelSel.value.split('/').pop();
+      msg.style.color = 'var(--fg)';
+    }
+  }
+  showStatus();
+
+  async function saveClassifier() {
+    try {
+      await _postSettings({
+        classifier_endpoint_id: epSel.value,
+        classifier_model: modelSel.value,
+      });
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      setTimeout(showStatus, 2000);
+    } catch (e) { msg.textContent = e.status === 403 ? 'Admin access is required to change these settings.' : 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+
+  epSel.addEventListener('change', function() { refreshModels(''); saveClassifier(); });
+  modelSel.addEventListener('change', saveClassifier);
+
+  _registerAiEndpointRefresh(function(eps) {
+    endpoints = eps;
+    _fillEndpointSelect(epSel, endpoints, epSel.value, true);
+    refreshModels(modelSel.value);
+  });
+}
+
 /* ── Deep Research Model (AI tab) ── */
 async function initResearchSettings() {
   var epSel = el('set-researchEndpoint');
@@ -1772,6 +1835,7 @@ function initAll() {
   initSearchSettings();
   initResearchSettings();
   initResearchSearchSettings();
+  initClassifierModel();
   initAgentSettings();
   initAppearance();
   initShortcuts();
