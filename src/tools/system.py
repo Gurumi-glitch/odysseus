@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Who may invoke a skill is the user's call (ADR 0008): the Skills page toggle.
-_USER_ONLY_IS_THE_USERS = {
+_USER_ONLY_FLAG_REFUSED = {
     "error": "disable-model-invocation is set by the user on the Skills page; leave it unchanged.",
     "exit_code": 1,
 }
@@ -65,10 +65,11 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     name = (args.get("name") or args.get("skill_id") or "").strip()
 
     # User-only skills are started with /name by the user and never shown to the model (#44).
-    user_only = {s["name"] for s in sm.load(owner=owner) if s.get("disable_model_invocation")}
+    skills = sm.load(owner=owner)
+    user_only = {s["name"] for s in skills if s.get("disable_model_invocation")}
 
     if action in ("list", "index"):
-        all_skills = [s for s in sm.load(owner=owner) if s["name"] not in user_only]
+        all_skills = [s for s in skills if s["name"] not in user_only]
         if not all_skills:
             return {"results": "No skills yet. Create one with action='add'."}
         published = [s for s in all_skills if s.get("status") == "published"]
@@ -188,12 +189,11 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         except Exception as e:
             return {"error": f"Could not parse content as SKILL.md: {e}", "exit_code": 1}
         sk_new.name = slugify(sk_new.name or name)
-        existing = sm.load(owner=owner)
-        match = next((s for s in existing if s.get("name") == name), None)
+        match = next((s for s in skills if s.get("name") == name), None)
         if not match:
             return {"error": f"Skill {name!r} not found", "exit_code": 1}
         if sk_new.disable_model_invocation != bool(match.get("disable_model_invocation")):
-            return dict(_USER_ONLY_IS_THE_USERS)
+            return dict(_USER_ONLY_FLAG_REFUSED)
         if not sk_new.owner:
             sk_new.owner = match.get("owner") or owner
         ok = sm.update_skill(name, _skill_dump(sk_new), owner=owner)
@@ -222,7 +222,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         except Exception as e:
             return {"error": f"Patched content is not valid SKILL.md: {e}", "exit_code": 1}
         if sk_new.disable_model_invocation != Skill.from_markdown(md).disable_model_invocation:
-            return dict(_USER_ONLY_IS_THE_USERS)
+            return dict(_USER_ONLY_FLAG_REFUSED)
         sk_new.name = slugify(sk_new.name or name)
         ok = sm.update_skill(name, _skill_dump(sk_new), owner=owner)
         return {"results": f"Patched skill `{sk_new.name}`."} if ok else {"error": "Patch update failed", "exit_code": 1}
@@ -230,8 +230,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if action == "publish":
         if not name:
             return {"error": "name is required for publish", "exit_code": 1}
-        all_skills = sm.load(owner=owner)
-        match = next((s for s in all_skills if s.get("name") == name), None)
+        match = next((s for s in skills if s.get("name") == name), None)
         if not match:
             return {"error": f"Skill {name!r} not found", "exit_code": 1}
         updates = {"status": "published"}
@@ -251,7 +250,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         query = (args.get("query") or "").strip()
         if not query:
             return {"error": "query is required for search", "exit_code": 1}
-        results = sm.get_relevant_skills(query, sm.load(owner=owner), max_items=5)
+        results = sm.get_relevant_skills(query, skills, max_items=5)
         if not results:
             return {"results": "No matching skills found."}
         lines = []

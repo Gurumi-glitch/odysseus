@@ -108,10 +108,9 @@ def test_a_protected_action_is_never_lifted_by_a_session_rule():
     assert (decision.outcome, decision.chat_scope) == (ASK, False)
 
 
-def test_a_sensitive_action_may_be_allowed_for_this_chat():
-    send = _email("mom@example.com")
-    assert _decision("send_email", send).chat_scope is True
-    assert _decide("send_email", send, session=["send_email(to:mom@example.com)"]) == ALLOW
+def test_a_sensitive_action_never_offers_allow_for_this_chat():
+    # Spec #44 user story 35: sensitive actions always ask.
+    assert _decision("send_email", _email("mom@example.com")).chat_scope is False
 
 
 def test_a_task_ask_is_answered_per_card():

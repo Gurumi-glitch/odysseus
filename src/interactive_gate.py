@@ -8,9 +8,12 @@ user opening Odysseus, Cookbook, email, documents, notes, or other panels.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 import os
 import time
+
+logger = logging.getLogger(__name__)
 
 
 _ACTIVE_REQUESTS = 0
@@ -150,10 +153,12 @@ def _has_active_chat_stream() -> bool:
     # one open question from stalling background work for everyone (#56).
     try:
         from src import agent_runs
-        runs = getattr(agent_runs, "_RUNS", {}) or {}
-    except Exception:
+    except ImportError:
+        logger.warning("agent_runs unavailable; detached runs not checked", exc_info=True)
         runs = {}
-    awaiting = {sid for sid, run in runs.items() if getattr(run, "awaiting_user", False)}
+    else:
+        runs = agent_runs.snapshot_runs()
+    awaiting = {sid for sid, run in runs.items() if run.awaiting_user}
     try:
         from routes import chat_routes as _chat_routes
         active_streams = getattr(_chat_routes, "_active_streams", {}) or {}
@@ -162,8 +167,8 @@ def _has_active_chat_stream() -> bool:
     except Exception:
         pass
     return any(
-        getattr(run, "status", None) == "running" and sid not in awaiting
-        for sid, run in list(runs.items())
+        run.status == "running" and sid not in awaiting
+        for sid, run in runs.items()
     )
 
 

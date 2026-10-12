@@ -132,8 +132,17 @@ def test_app_api_reads_follow_the_rules():
 
 def test_a_session_rule_lifts_an_ask_but_never_a_deny():
     assert _decide("bash", "ls -la", session=["bash"]) == ALLOW
-    assert _decide("send_email", _email("mom@example.com"), session=["send_email(to:mom@example.com)"]) == ALLOW
     assert _decide("bash", "ls", session=["bash"], deny=["bash"]) == DENY
+
+
+@pytest.mark.parametrize(("name", "content", "session"), [
+    ("send_email", _email("mom@example.com"), "send_email(to:mom@example.com)"),
+    ("mcp__email__send_email", _email("mom@example.com"), "send_email"),
+    ("manage_notes", json.dumps({"action": "delete", "id": "1"}), "manage_notes(action:delete)"),
+])
+def test_sensitive_actions_ask_again_after_allow_for_this_chat(name, content, session):
+    decision = _decision(name, content, session=[session])
+    assert (decision.outcome, decision.chat_scope) == (ASK, False)
 
 
 @pytest.mark.parametrize(("name", "content", "protected"), [

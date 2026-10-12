@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from src import agent_runs
+from src.chat_agent.store import owner_key
 
 ASK_TIMEOUT_SECONDS = 30 * 60
 
@@ -66,11 +67,6 @@ class _Pending:
 
 
 _PENDING: Dict[Tuple[str, str, str], _Pending] = {}
-
-
-def owner_key(owner: str) -> str:
-    # strip().lower() is how AuthManager keys usernames (same as store.py).
-    return str(owner or "").strip().lower()
 
 
 def _run_id(session_id: str) -> str:

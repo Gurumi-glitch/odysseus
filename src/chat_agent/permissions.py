@@ -262,17 +262,23 @@ def _plan_mode_mcp_writes() -> set:
     return set(qualified)
 
 
+def mcp_server(name: str) -> str:
+    """The server id of an mcp__<server>__<tool> name, else ""."""
+    parts = name.split("__", 2)
+    return parts[1] if len(parts) == 3 and parts[0] == "mcp" else ""
+
+
 def _is_custom_mcp(name: str) -> bool:
-    return name.startswith("mcp__") and not name.startswith("mcp__email__")
+    return name.startswith("mcp__") and not name.startswith(_EMAIL_MCP_PREFIX)
 
 
 def _mcp_server_disabled_reason(name: str) -> Optional[str]:
     # Checked per call, not per turn: a tool loaded this turn stays offered
     # until the turn ends, even after the admin disables it on its server.
-    parts = name.split("__", 2)
-    if not _is_custom_mcp(name) or len(parts) != 3:
+    server = mcp_server(name)
+    if not server or not _is_custom_mcp(name):
         return None
-    if parts[2] in _load_mcp_disabled_map().get(parts[1], ()):
+    if name[len(f"mcp__{server}__"):] in _load_mcp_disabled_map().get(server, ()):
         return f"Tool '{name}' is disabled on its MCP server."
     return None
 
@@ -303,6 +309,7 @@ _RECIPIENT_TOOLS = frozenset({"send_email"})
 _KIND_WORDS = {DOMAIN: "domain:", ACTION: "action:", RECIPIENT: "to:"}
 _RULE_TEXT = re.compile(r"^([A-Za-z0-9_\-]+)(?:\((.*)\))?$", re.S)
 _HTTP_SCHEMES = frozenset({"http", "https"})
+_EMAIL_MCP_PREFIX = "mcp__email__"
 _PATH_GLOBSTAR = "**"
 
 # The outcome of matching one rule against one call.
@@ -315,8 +322,8 @@ def policy_name(name: str) -> str:
     """One spelling per tool for rules and the sensitive/protected sets: the
     bare email name for any casing of ``mcp__email__``."""
     name = str(name or "")
-    if name.casefold().startswith("mcp__email__"):
-        return name[len("mcp__email__"):].casefold()
+    if name.casefold().startswith(_EMAIL_MCP_PREFIX):
+        return name[len(_EMAIL_MCP_PREFIX):].casefold()
     return canonical_tool(name)
 
 
@@ -935,9 +942,14 @@ def decide(
         or (policy_name(name) == "manage_tasks"
             and _action_from_content("manage_tasks", content) in _TASK_ACTIONS_THAT_ASK)
     )
-    # Asks "Allow for this chat" never lifts: the above and the egress gate.
-    pinned = user_only or (provenance.external and provenance.private and _egress(name, content))
-    asks = pinned or is_sensitive(name, content) or (
+    # Asks "Allow for this chat" never lifts: the above, sensitive actions
+    # ("always ask", spec #44) and the egress gate.
+    pinned = (
+        user_only
+        or is_sensitive(name, content)
+        or (provenance.external and provenance.private and _egress(name, content))
+    )
+    asks = pinned or (
         posture(name, content) == ASK
         and not any(rule_covers(rule, name, content, workspace) for rule in rules.allow)
     )

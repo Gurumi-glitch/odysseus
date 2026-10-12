@@ -33,7 +33,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
-from src.chat_agent.permissions import task_args
+from src.chat_agent.permissions import mcp_server, task_args
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
 from src.agent_loop import _allow_visual_tool_evidence_for_model
@@ -172,12 +172,6 @@ def deferred_catalog(denied: Iterable[str], *, include_mcp: bool) -> List[Dict[s
     return catalog
 
 
-def mcp_server(name: str) -> str:
-    """The server id of an mcp__<server>__<tool> name, else ""."""
-    parts = name.split("__", 2)
-    return parts[1] if len(parts) == 3 and parts[0] == "mcp" else ""
-
-
 def catalog_section(catalog: Sequence[Dict[str, Any]]) -> str:
     if not catalog:
         return ""
@@ -236,10 +230,12 @@ def offered_schemas(
     if not upfront:
         return []
     by_name = {schema_name(schema): schema for schema in catalog}
-    extra = [TOOL_SEARCH_SCHEMA] if catalog else []
-    extra += [LOAD_SKILL_SCHEMA] if skills else []
-    extra += [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
-    return upfront + _apply_tool_surface_to_schemas(extra, surface)
+    own = [TOOL_SEARCH_SCHEMA] if catalog else []
+    own += [LOAD_SKILL_SCHEMA] if skills else []
+    # The model searched for these to learn how to call them, so they keep
+    # their full descriptions on the compact surface too (spec #44).
+    searched = [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
+    return upfront + _apply_tool_surface_to_schemas(own, surface) + searched
 
 
 def skills_enabled(owner: str, sess: Any, incognito: bool) -> bool:
