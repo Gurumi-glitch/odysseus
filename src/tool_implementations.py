@@ -17,7 +17,6 @@ from src.tool_utils import get_mcp_manager  # re-exported: tests patch src.tool_
 from src.tools.system import (  # noqa: F401
     do_manage_skills, _skill_dump, do_manage_tasks,
     do_api_call, do_app_api,
-    _APP_API_BLOCKLIST_PREFIXES, _APP_API_BLOCKLIST_METHOD_PATH,
 )
 # Admin manage_* tools (endpoints/mcp/webhooks/tokens/settings) live in
 # src/agent_tools/admin_tools after the upstream registry migration (#3629).

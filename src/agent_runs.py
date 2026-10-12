@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event", "runtime")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event", "runtime", "awaiting_user")
 
     def __init__(self, runtime: str = "legacy") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
@@ -40,6 +40,9 @@ class _Run:
         # Which chat runtime drives this run; sent as X-Odysseus-Runtime so the
         # browser routes sends, steers and answers to it (spec #44).
         self.runtime: str = runtime
+        # A chat_agent ask is waiting on the user; the background gate skips
+        # such runs so one open question doesn't stall the instance (#56).
+        self.awaiting_user: bool = False
 
 
 _RUNS: Dict[str, _Run] = {}

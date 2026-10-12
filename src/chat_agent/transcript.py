@@ -1,7 +1,7 @@
 """Write a turn's assistant row: ``metadata.agent_v2`` plus legacy projections.
 
-``agent_v2`` is the runtime's replay source (ADR 0007); ``content`` and
-``round_texts`` are projections legacy readers keep using. This ticket writes
+``agent_v2`` is the runtime's replay source (ADR 0007); ``content``,
+``round_texts`` and ``tool_events`` are projections legacy readers keep using. This ticket writes
 the row once at turn end; per-round checkpointing comes in #57.
 """
 
@@ -15,6 +15,15 @@ from core.models import ChatMessage
 from src.chat_agent.routing import CHAT_AGENT
 
 
+# Why a turn ended early (metadata.stop_reason; #65 renders it). A turn that
+# ends because the model stopped calling tools has none.
+STOP_MAX_ROUNDS = "max_rounds"
+STOP_BUDGET = "budget"
+STOP_INTERRUPTED = "interrupted"
+STOP_REPEAT_GUARD = "repeat_guard"
+STOP_ASK_EXPIRED = "ask_expired"
+
+
 @dataclass
 class TurnRecord:
     provider: str
@@ -23,6 +32,9 @@ class TurnRecord:
     # Each round: {"blocks": [...]} plus "usage" when the provider reported it
     # (compaction reads it, #67). Block shapes: src/chat_agent/providers/__init__.py.
     rounds: List[Dict[str, Any]] = field(default_factory=list)
+    # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
+    tool_events: List[Dict[str, Any]] = field(default_factory=list)
+    stop_reason: Optional[str] = None
 
     @property
     def round_texts(self) -> List[str]:
@@ -40,12 +52,17 @@ class TurnRecord:
         }
 
     def metadata(self) -> dict:
-        return {
+        metadata = {
             "runtime": CHAT_AGENT,
             "agent_v2": self.agent_v2(),
             "round_texts": list(self.round_texts),
             "model": self.model,
         }
+        if self.tool_events:
+            metadata["tool_events"] = list(self.tool_events)
+        if self.stop_reason:
+            metadata["stop_reason"] = self.stop_reason
+        return metadata
 
     def content(self) -> str:
         return "\n\n".join(text for text in self.round_texts if text)

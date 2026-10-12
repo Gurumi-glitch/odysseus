@@ -39,6 +39,69 @@ export async function initAgentSettings() {
     });
   }
 
+  var insCard = el('set-chatInstructionsCard');
+  var insToggle = el('set-chatInstructionsToggle');
+  var insText = el('set-chatInstructionsText');
+  var insPath = el('set-chatInstructionsPath');
+  var insCount = el('set-chatInstructionsCount');
+  var insSave = el('set-chatInstructionsSave');
+  var insMsg = el('set-chatInstructionsMsg');
+  if (insText) {
+    var insMax = 0;
+
+    function showInstructions(data) {
+      insToggle.checked = !!data.enabled;
+      insText.value = data.content || '';
+      insPath.textContent = data.path || '';
+      insMax = data.max_chars || 0;
+      countInstructions();
+    }
+
+    function countInstructions() {
+      var n = insText.value.length;
+      insCount.textContent = insMax ? n + ' / ' + insMax : String(n);
+      // The server refuses anything over max_chars (400); say so before the click.
+      insCount.style.color = insMax && n > insMax ? 'var(--red)' : '';
+    }
+
+    async function putInstructions(body, okText) {
+      try {
+        var res = await fetch('/api/chat_agent/instructions', {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) throw new Error(data.detail || 'Failed to save');
+        showInstructions(data);
+        insMsg.textContent = okText; insMsg.style.color = 'var(--fg)';
+        return true;
+      } catch (e) {
+        insMsg.textContent = e.message || 'Failed to save'; insMsg.style.color = 'var(--red)';
+        return false;
+      }
+    }
+
+    try {
+      var insRes = await fetch('/api/chat_agent/instructions', { credentials: 'same-origin' });
+      var ins = await insRes.json();
+      if (!insRes.ok) throw new Error(ins.detail || 'Failed to load');
+      if (ins.available) showInstructions(ins);
+      else insCard.style.display = 'none';
+    } catch (e) { insMsg.textContent = e.message || 'Failed to load'; insMsg.style.color = 'var(--red)'; }
+
+    insText.addEventListener('input', countInstructions);
+    insSave.addEventListener('click', function() {
+      putInstructions({ content: insText.value }, 'Saved. Applies from your next message.');
+    });
+    insToggle.addEventListener('change', async function() {
+      var wanted = insToggle.checked;
+      var ok = await putInstructions({ enabled: wanted }, wanted ? 'Instructions on.' : 'Instructions off.');
+      // Keep the switch honest: a refused save leaves the server state unchanged.
+      if (!ok) insToggle.checked = !wanted;
+    });
+  }
+
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');

@@ -6,12 +6,26 @@ Session.add_message stamping ``_db_id`` is pinned by
 tests/test_session_manager_persist_guard.py.
 """
 
+import json
+
 import pytest
 
-from src.agent_loop import _agent_route_tool_mode
+from src.agent_loop import _agent_route_tool_mode, _apply_tool_surface_to_schemas
+from src.agent_runtime.authority import active_request_authority
+from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.chat_agent.providers import Endpoint
 from src.chat_agent.providers.chat_completions import build_payload
 from src.endpoint_resolver import normalize_base
+from src.mcp_manager import McpManager
+from src.tool_capabilities import (
+    _action_from_content,
+    tool_result_is_successful,
+    tool_result_was_denied,
+)
+from src.tool_execution import format_tool_result
+from src.tool_policy import WEB_ACCESS_TOOL_NAMES
+from src.tool_schemas import function_call_to_tool_block
+from src.turn_contract import canonical_tool
 from src.llm_core import (
     _detect_provider,
     _format_upstream_error,
@@ -129,3 +143,79 @@ async def test_maybe_compact_without_persist_returns_system_summary_then_kept_ha
     assert result[0] is system
     assert result[1]["role"] == "system" and "summary text" in result[1]["content"]
     assert result[2:] == turns[state["split_point"]:]
+
+
+# --- #50: tools, permissions and the execution wrapper ---------------------
+
+
+def test_native_email_call_becomes_the_email_mcp_block_and_bad_args_none():
+    block = function_call_to_tool_block("send_email", json.dumps({"to": "a@b.c", "subject": "s", "body": "b"}))
+    assert block.tool_type == "mcp__email__send_email"
+    assert canonical_tool(block.tool_type) == "send_email"
+    assert function_call_to_tool_block("web_search", "{}") is None
+
+
+def test_tool_surface_none_sends_nothing_and_compact_shrinks_schemas():
+    assert _apply_tool_surface_to_schemas(FUNCTION_TOOL_SCHEMAS, "none") == []
+    compact = _apply_tool_surface_to_schemas(FUNCTION_TOOL_SCHEMAS, "compact")
+    assert len(compact) == len(FUNCTION_TOOL_SCHEMAS)
+    assert len(json.dumps(compact)) < len(json.dumps(FUNCTION_TOOL_SCHEMAS))
+
+
+def test_no_request_authority_is_bound_outside_the_legacy_decorators():
+    assert active_request_authority() is None
+
+
+def test_result_classification_and_model_text():
+    assert tool_result_is_successful({"output": "ok", "exit_code": 0})
+    assert not tool_result_is_successful({"error": "HTTP 404", "exit_code": 1})
+    assert tool_result_was_denied({"error": "x", "blocked": True, "failure_kind": "resource_identity_denied"})
+    assert not tool_result_was_denied({"error": "HTTP 404", "exit_code": 1})
+    assert "HTTP 404" in format_tool_result("web_fetch: x", {"error": "web_fetch: x: HTTP 404", "exit_code": 1})
+
+
+def test_manage_tasks_action_includes_the_implicit_create():
+    assert _action_from_content("manage_tasks", json.dumps({"task": "news"})) == "create"
+    assert _action_from_content("manage_notes", json.dumps({"action": "create"})) == "add"
+
+
+def test_web_access_names_are_the_spec_web_family():
+    assert WEB_ACCESS_TOOL_NAMES == {"web_search", "web_fetch", "get_weather", "youtube_tool", "private_browser"}
+
+
+def test_plan_mode_blocked_mcp_returns_qualified_write_names_second():
+    manager = McpManager()
+    manager._tools = {"github": [
+        {"name": "create_issue", "annotations": {"readOnlyHint": False}},
+        {"name": "list_issues", "annotations": {"readOnlyHint": True}},
+    ]}
+    _, qualified = manager.plan_mode_blocked_mcp()
+    assert qualified == {"mcp__github__create_issue"}
+
+
+@pytest.mark.asyncio
+async def test_finish_flag_belongs_to_the_running_run_and_a_replacement_starts_clear():
+    import asyncio
+
+    from src import agent_runs
+
+    release = asyncio.Event()
+
+    async def waiting_run():
+        await release.wait()
+        yield "data: [DONE]\n\n"
+
+    session = "pin-finish-session"
+    first = agent_runs.start(session, waiting_run())
+    await asyncio.sleep(0)
+    assert not agent_runs.should_finish(session)
+    assert agent_runs.request_finish(session, first.run_id)
+    assert agent_runs.should_finish(session)
+
+    second = agent_runs.start(session, waiting_run())
+    await asyncio.sleep(0)
+    assert not agent_runs.should_finish(session)
+
+    release.set()
+    await second.task
+    assert not agent_runs.should_finish(session)

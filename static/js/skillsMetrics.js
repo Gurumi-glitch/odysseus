@@ -38,10 +38,9 @@ export function skillNeedsAudit(sk) {
   return !(sk && sk.audit_verdict);
 }
 
-export function skillIsProven(sk, approvalThreshold = 0.85) {
-  if (!sk) return false;
-  if (sk.source === 'builtin') return sk.status === 'published';
-  const conf = Number(sk.confidence || 0);
+export function skillIsProven(sk) {
+  if (!skillIsApproved(sk)) return false;
+  if (sk.source === 'builtin') return true;
   const baseline = String(sk.baseline_verdict || '').toLowerCase();
   const savedTurns = skillSavedTurnsValue(sk);
   const savedCallsRaw = auditNumber(sk, 'saved_tool_calls');
@@ -50,51 +49,41 @@ export function skillIsProven(sk, approvalThreshold = 0.85) {
   const necessity = necessityKind(sk);
   if (necessity === 'duplicate' || necessity === 'irrelevant') return false;
   if (baseline === 'worse') return false;
-  if (baseline === 'same' && usefulness < 0.5 && savedTurns <= 0 && savedCalls <= 0) return false;
-  return sk.status === 'published' && sk.audit_verdict === 'pass' && conf >= approvalThreshold;
+  return !(baseline === 'same' && usefulness < 0.5 && savedTurns <= 0 && savedCalls <= 0);
 }
 
-export function skillIsApproved(sk, approvalThreshold = 0.85) {
-  if (!sk || sk.status !== 'published') return false;
-  if (sk.necessity?.necessary === false) return false;
-  return sk.source === 'builtin' || (sk.audit_verdict === 'pass' && Number(sk.confidence || 0) >= approvalThreshold);
+// `state` is computed by GET /api/skills from the one usability predicate
+// (services.memory.skills.is_usable, #49); the page never re-derives it.
+export function skillIsApproved(sk) {
+  return !!sk && sk.state === 'published';
 }
 
-export function skillNeedsReview(sk, approvalThreshold = 0.85) {
-  if (!sk) return false;
-  if (sk.source === 'builtin') return false;
-  // Baseline efficiency is evidence, not an extra approval gate. A skill
-  // must not show both Approved and Draft merely because it saves no turns.
-  // Unaudited skills keep their separate Queued state.
-  return !!sk.audit_verdict && !skillIsApproved(sk, approvalThreshold);
-}
-
-export function skillsSummaryMetrics(skills, approvalThreshold = 0.85) {
+export function skillsSummaryMetrics(skills) {
   const list = Array.isArray(skills) ? skills : [];
   const total = list.length;
-  const approved = list.filter(sk => skillIsApproved(sk, approvalThreshold)).length;
-  const proven = list.filter(sk => skillIsProven(sk, approvalThreshold)).length;
+  const approved = list.filter(skillIsApproved).length;
+  const proven = list.filter(skillIsProven).length;
   const needsAudit = list.filter(skillNeedsAudit).length;
   const audited = list.filter(sk => !!sk?.audit_verdict).length;
-  const review = list.filter(sk => skillNeedsReview(sk, approvalThreshold)).length;
-  const drafts = list.filter(sk => (sk?.status || 'draft') === 'draft').length;
-  const binned = list.filter(sk => sk?.status === 'binned').length;
+  const awaitingAudit = list.filter(sk => sk?.state === 'awaiting_audit').length;
+  const drafts = list.filter(sk => sk?.state === 'draft').length;
+  const binned = list.filter(sk => sk?.state === 'binned').length;
   const savedTurns = list.reduce((sum, sk) => sum + Math.max(0, skillSavedTurnsValue(sk)), 0);
-  return { total, approved, proven, needsAudit, audited, review, drafts, binned, savedTurns };
+  return { total, approved, proven, needsAudit, audited, awaitingAudit, drafts, binned, savedTurns };
 }
 
-export function filterSkillsByQuickFilter(skills, quickFilter, approvalThreshold = 0.85) {
+export function filterSkillsByQuickFilter(skills, quickFilter) {
   const list = Array.isArray(skills) ? skills : [];
   if (quickFilter === 'all') return list;
-  if (quickFilter === 'approved') return list.filter(sk => sk.source !== 'builtin' && skillIsApproved(sk, approvalThreshold));
+  if (quickFilter === 'approved') return list.filter(sk => sk.source !== 'builtin' && skillIsApproved(sk));
   if (quickFilter === 'builtin') return list.filter(sk => sk.source === 'builtin');
-  if (quickFilter === 'draft') return list.filter(sk => sk.source !== 'builtin' && !skillIsApproved(sk, approvalThreshold));
-  if (quickFilter === 'proven') return list.filter(sk => skillIsProven(sk, approvalThreshold));
+  if (quickFilter === 'draft') return list.filter(sk => sk.source !== 'builtin' && !skillIsApproved(sk));
+  if (quickFilter === 'proven') return list.filter(skillIsProven);
   if (quickFilter === 'audited') return list.filter(sk => !!sk?.audit_verdict);
   if (quickFilter === 'saved') return list.filter(sk => skillSavedTurnsValue(sk) > 0);
   if (quickFilter === 'unaudited') return list.filter(skillNeedsAudit);
-  if (quickFilter === 'review') return list.filter(sk => skillNeedsReview(sk, approvalThreshold));
-  if (quickFilter === 'drafts') return list.filter(sk => (sk?.status || 'draft') === 'draft');
-  if (quickFilter === 'binned') return list.filter(sk => sk?.status === 'binned');
+  if (quickFilter === 'awaiting') return list.filter(sk => sk?.state === 'awaiting_audit');
+  if (quickFilter === 'drafts') return list.filter(sk => sk?.state === 'draft');
+  if (quickFilter === 'binned') return list.filter(sk => sk?.state === 'binned');
   return list;
 }
