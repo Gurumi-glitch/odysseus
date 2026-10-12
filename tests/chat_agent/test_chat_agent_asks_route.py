@@ -17,7 +17,7 @@ import src.tool_execution as tool_execution
 import src.tool_security as tool_security
 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
 from src import interactive_gate
-from src.chat_agent import asks, session_rules
+from src.chat_agent import asks, permissions, store
 from tests.chat_agent.test_chat_agent_route import (
     _Harness,
     _Request,
@@ -37,11 +37,6 @@ def harness(monkeypatch, tmp_path):
     # The ask endpoint answers as whoever the request is signed in as.
     monkeypatch.setattr(chat_routes, "effective_user", lambda request: request.state.current_user)
     return harness
-
-
-@pytest.fixture(autouse=True)
-def fresh_session_rules(monkeypatch):
-    monkeypatch.setattr(session_rules, "_RULES", {})
 
 
 @pytest.fixture
@@ -195,9 +190,9 @@ async def test_allow_for_this_chat_covers_the_command_prefix_in_this_chat_only(
     assert asked == ["ls", "ls; rm -rf /tmp/x"]
     assert "bash(ls:*)" in _events(body, "ask_user")[0]["data"]["options"][1]["description"]
     assert executor == ["ls", "ls -la"]
-    assert session_rules.allows("alice", "session-1", "bash", "ls /etc")
-    assert not session_rules.allows("alice", "session-2", "bash", "ls")
-    assert not session_rules.allows("bob", "session-1", "bash", "ls")
+    assert store.session_rules("alice", "session-1") == [permissions.Rule("bash", "prefix", "ls").record()]
+    assert store.session_rules("alice", "session-2") == []
+    assert store.session_rules("bob", "session-1") == []
 
 
 @pytest.mark.asyncio

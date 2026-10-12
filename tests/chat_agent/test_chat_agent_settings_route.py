@@ -96,3 +96,68 @@ async def test_switch_is_unavailable_when_auth_is_disabled(monkeypatch, _store_d
         await _endpoint("PUT")(_request(None), {"chat_runtime": "new"})
     assert exc.value.status_code == 403
     assert not _store_dir.exists()
+
+
+def _rules_endpoint(method):
+    router = setup_chat_agent_routes()
+    return next(
+        route.endpoint for route in router.routes
+        if route.path == "/api/chat_agent/rules" and method in route.methods
+    )
+
+
+@pytest.mark.asyncio
+async def test_rules_are_saved_normalized_per_user():
+    saved = await _rules_endpoint("PUT")(_request(), {"rules": {
+        "allow": ["bash(git:*)", "mcp__email__send_email", "bash(git:*)"],
+        "deny": ["web_fetch(domain:Evil.com)"],
+    }})
+
+    assert saved == {"available": True, "rules": {
+        "allow": ["bash(git:*)", "send_email"], "ask": [], "deny": ["web_fetch(domain:evil.com)"],
+    }}
+    assert await _rules_endpoint("GET")(_request()) == saved
+    assert (await _rules_endpoint("GET")(_request("bob")))["rules"] == {"allow": [], "ask": [], "deny": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"rules": {"allow": ["web_search(domain:x.com)"]}},
+    {"rules": {"allow": "bash"}},
+    {"rules": {"always": ["bash"]}},
+    {"rules": ["bash"]},
+])
+async def test_rules_outside_the_table_are_refused_and_nothing_is_written(body, _store_dir):
+    with pytest.raises(HTTPException) as exc:
+        await _rules_endpoint("PUT")(_request(), body)
+    assert exc.value.status_code == 400
+    assert not _store_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_rules_write_refuses_tool_loopback(_store_dir):
+    with pytest.raises(HTTPException) as exc:
+        await _rules_endpoint("PUT")(
+            _request(headers={INTERNAL_TOOL_HEADER: INTERNAL_TOOL_TOKEN}), {"rules": {"allow": ["bash"]}},
+        )
+    assert exc.value.status_code == 403
+    assert not _store_dir.exists()
+
+
+def test_flipping_the_runtime_drops_session_rules_and_keeps_user_rules():
+    store.set_chat_runtime("alice", store.RUNTIME_NEW)
+    store.set_user_rules("alice", {"allow": ["bash"]})
+    store.add_session_rule("alice", "s1", ["bash", "prefix", "ls"])
+
+    store.set_chat_runtime("alice", store.RUNTIME_NEW)
+    assert store.session_rules("alice", "s1") == [["bash", "prefix", "ls"]]
+    store.set_chat_runtime("alice", store.RUNTIME_LEGACY)
+
+    assert store.session_rules("alice", "s1") == []
+    assert store.user_rules("alice")["allow"] == ["bash"]
+
+
+def test_deleting_a_user_removes_their_rules():
+    store.set_user_rules("alice", {"allow": ["bash"]})
+    store.delete_owner("alice")
+    assert store.user_rules("alice") == {"allow": [], "ask": [], "deny": []}
