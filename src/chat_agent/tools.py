@@ -33,6 +33,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
+from src.chat_agent.permissions import task_prompt
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
 from src.agent_loop import _allow_visual_tool_evidence_for_model
@@ -243,6 +244,9 @@ class ExecutionScope:
     # The open editor document: document tools without an explicit id edit
     # this one, never the owner's most recent document in another chat.
     active_document_id: Optional[str] = None
+    # This call is a manage_tasks create/edit the user approved on its own
+    # card (Allow once), so the task may carry its prompt's grants.
+    approved_task: bool = False
 
 
 @dataclass
@@ -330,11 +334,11 @@ def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bo
 _TASK_SEALING_ACTIONS = frozenset({"create", "edit"})
 
 
-def _task_prompt_grants(block: Any, owner: str) -> Tuple[OperationGrant, ...]:
-    """An admitted task create/edit was approved by the user, so the task is
+def _task_prompt_grants(block: Any, scope: ExecutionScope) -> Tuple[OperationGrant, ...]:
+    """A task create/edit the user approved on a card showing its prompt is
     sealed as if created from the UI: the per-call authority is the ceiling
     seal_task_authority intersects with, and it gains the prompt's grants (#40)."""
-    if block.tool_type != "manage_tasks":
+    if not scope.approved_task or block.tool_type != "manage_tasks":
         return ()
     if _action_from_content(block.tool_type, block.content) not in _TASK_SEALING_ACTIONS:
         return ()
@@ -342,11 +346,11 @@ def _task_prompt_grants(block: Any, owner: str) -> Tuple[OperationGrant, ...]:
         args = json.loads(block.content)
     except (TypeError, ValueError):
         return ()
-    # do_manage_tasks reads the prompt from these fields, in this order.
-    prompt = (args.get("prompt") or args.get("task") or args.get("description")) if isinstance(args, dict) else None
-    if not isinstance(prompt, str) or not prompt.strip():
+    # The same prompt the card showed (permissions.task_card).
+    prompt = task_prompt(args) if isinstance(args, dict) else ""
+    if not prompt.strip():
         return ()
-    return create_request_authority(prompt, owner=owner).grants
+    return create_request_authority(prompt, owner=scope.owner).grants
 
 
 async def execute(
@@ -361,7 +365,7 @@ async def execute(
     # accounts such as "straße" and "strasse".
     authority = RequestAuthority(
         uuid4().hex, authority_owner(scope.owner), scope.session_id, scope.workspace or "",
-        (OperationGrant(canonical_tool(block.tool_type)), *_task_prompt_grants(block, scope.owner)),
+        (OperationGrant(canonical_tool(block.tool_type)), *_task_prompt_grants(block, scope)),
     )
     if scope.client_runtime_context is not None:
         authority = replace(authority, backend_resources=seal_backends(

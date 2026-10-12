@@ -46,10 +46,10 @@ def db(tmp_path, monkeypatch):
     return factory
 
 
-def _scope(workspace=None, owner="Alice"):
+def _scope(workspace=None, owner="Alice", approved_task=False):
     return tools.ExecutionScope(
         owner=owner, session_id="session-1", workspace=workspace,
-        client_runtime_context=None, denied_names=frozenset(),
+        client_runtime_context=None, denied_names=frozenset(), approved_task=approved_task,
     )
 
 
@@ -142,8 +142,11 @@ async def test_an_approved_task_is_sealed_with_its_prompt_grants_like_a_ui_creat
     expected = {g.tool for g in create_request_authority(prompt, owner="alice").grants}
     assert "web_search" in expected
 
-    created = await _call("manage_tasks", {"action": "create", "name": "news", "prompt": prompt,
-                                           "schedule": "daily", "scheduled_time": "08:00"}, _scope(owner="alice"))
+    task = {"action": "create", "prompt": prompt, "schedule": "daily", "scheduled_time": "08:00"}
+    approved = await _call("manage_tasks", {**task, "name": "news"}, _scope(owner="alice", approved_task=True))
+    # Admitted any other way (a session rule, later auto mode): no prompt grants.
+    unapproved = await _call("manage_tasks", {**task, "name": "news-2"}, _scope(owner="alice"))
 
-    assert created.ok, created.result
+    assert approved.ok and unapproved.ok
     assert _sealed_tools(db, "news") == expected
+    assert _sealed_tools(db, "news-2") == set()

@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from contextlib import aclosing
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import (
     Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence,
     Union,
@@ -330,7 +330,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         caps = read_caps()
         rules = permissions.Rules.from_lists(store.user_rules(turn.owner))
         # The open email preview is both external content and a private read (ADR 0002).
-        provenance = permissions.Provenance(external=turn.active_email_open, private=turn.active_email_open)
+        provenance = permissions.Provenance(
+            external=turn.active_email_open, private=turn.active_email_open,
+        ).after_history(getattr(turn.sess, "history", None) or ())
         layers = permissions.build_deny_layers(
             owner=turn.owner,
             toggles=turn.toggles,
@@ -457,9 +459,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         decision = (permissions.Decision(permissions.ALLOW) if searching
                                     else _gate(turn, call, block, layers, offered, rules, provenance))
                 if decision.outcome == permissions.ASK:
-                    rule = permissions.session_rule(block.tool_type, block.content)
+                    rule = permissions.session_rule(block.tool_type, block.content) if decision.chat_scope else None
+                    task = (permissions.task_card(turn.owner, block.content)
+                            if permissions.policy_name(block.tool_type) == "manage_tasks" else None)
                     ask = _Ask(turn, asks.permission_card(
-                        turn.session_id, block.tool_type, block.content, rule.text,
+                        turn.session_id, block.tool_type, block.content, rule.text if rule else None, task,
                     ))
                     hold_ask(call, block.tool_type, block.content, ask.card)
                     async for event in ask.events():
@@ -479,7 +483,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     if searching:
                         outcome = tools.run_search(call, catalog)
                     else:
-                        async for item in _execute_with_progress(call["call_id"], block, scope, len(record.rounds)):
+                        # Only a task the user approved on its own card gets its prompt's grants.
+                        approved = (ask is not None and ask.card["ask_kind"] == asks.PERMISSION
+                                    and ask.reply is not None and ask.reply.decision == asks.ONCE)
+                        call_scope = replace(scope, approved_task=approved)
+                        async for item in _execute_with_progress(call["call_id"], block, call_scope, len(record.rounds)):
                             if isinstance(item, tools.ToolOutcome):
                                 outcome = item
                             else:
@@ -751,18 +759,19 @@ def _gate(
     session = [permissions.rule_from_record(r) for r in store.session_rules(turn.owner, turn.session_id)]
     return permissions.decide(
         layers, block.tool_type, block.content, rules=rules, session=session, provenance=provenance,
+        owner=turn.owner, workspace=turn.toggles.workspace,
     )
 
 
 def _permission_decision(
-    turn: ChatAgentTurn, rule: permissions.Rule, reply: Optional[asks.Answer],
+    turn: ChatAgentTurn, rule: Optional[permissions.Rule], reply: Optional[asks.Answer],
 ) -> permissions.Decision:
     if reply is None:
         return permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
     if reply.decision == asks.DENY:
         reason = "Denied by the user."
         return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
-    if reply.decision == asks.CHAT:
+    if reply.decision == asks.CHAT and rule is not None:
         store.add_session_rule(turn.owner, turn.session_id, rule.record())
     return permissions.Decision(permissions.ALLOW)
 
