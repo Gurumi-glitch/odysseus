@@ -345,6 +345,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         tool_calls_used = 0
         guard = repeat_guard.RepeatGuard()
         round_tools = tool_schemas
+        # Tool images live for one round: the next request shows them, the one
+        # after drops them, so frames never pile up in the request.
+        visual = None
         while True:
             end = None
             async for event in _round_with_fallback(turn, endpoint, conversation, round_tools):
@@ -368,6 +371,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 break
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = []
+            round_outcomes = []
             for call in calls:
                 # tool_search is the runtime's own tool: it is answered here,
                 # never converted for the legacy executor.
@@ -447,6 +451,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
                 record.tool_events.append(tool_event)
                 record.link_sources.append({**outcome.result, **tool_event})
+                round_outcomes.append(outcome)
                 envelope = outcome.envelope()
                 if reminder:
                     # The reminder is for the model only; the tool card keeps the output.
@@ -454,6 +459,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 results.append(envelope)
                 conversation.append({"role": "tool", **envelope})
             round_record["results"] = results
+            conversation = [message for message in conversation if message is not visual]
+            visual = tools.visual_evidence([o.result for o in round_outcomes], endpoint.model)
+            if visual is not None:
+                conversation.append(visual)
             # Tools loaded by this round's tool_search join the next round.
             tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
             round_tools = tool_schemas

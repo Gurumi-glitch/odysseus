@@ -13,8 +13,11 @@ from sqlalchemy.orm import sessionmaker
 
 from core import database
 import src.database as src_database
+import routes.chat_routes as chat_routes
 import src.settings as settings
+import src.tool_security as tool_security
 from src.agent_loop import PLAN_MODE_DIRECTIVE
+from src.chat_agent import tools as chat_agent_tools
 from src.chat_agent import turn_context
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE
 from tests.chat_agent.test_chat_agent_route import (
@@ -194,7 +197,137 @@ async def test_note_title_in_the_answer_is_a_link(harness, db):
     [row] = harness.saved
     assert row.content == f"Added {link}."
     assert row.metadata["round_texts"][-1] == f"Added {link}."
-    # The model's own words stay unchanged for replay.
+    # The model's own words stay unchanged for replay (ADR 0007).
     assert row.metadata["agent_v2"]["rounds"][-1]["blocks"] == [
         {"type": "text", "text": "Added **dinner time with mom**."},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("language", "content", "expected"), [
+    ("markdown", "<!-- pdf_form_source upload_id=\"" + "a" * 32 + "\" -->\n- **Name:** ",
+     turn_context.PDF_FORM_GUIDANCE),
+    ("email", "To: bob@example.com\nSubject: Re: hi\n---\nThanks!", turn_context.EMAIL_DRAFT_GUIDANCE),
+])
+async def test_form_and_email_draft_documents_get_their_own_mode(harness, db, language, content, expected):
+    _add_document(db, "doc-open", content, session_id="session-1",
+                  updated_at=datetime.now(timezone.utc).replace(tzinfo=None), language=language)
+    harness.provider_rounds = [_sse_events(["Ok."])]
+
+    await harness.send(_Request("agent", message="fill it", active_doc_id="doc-open",
+                                active_doc_state="visible"))
+
+    [payload] = harness.captured["provider_requests"]
+    current = _current_message(payload)
+    assert expected in current
+    assert turn_context.DOCUMENT_GUIDANCE not in current
+
+
+@pytest.mark.asyncio
+async def test_someone_elses_document_id_is_ignored(harness, db):
+    with db() as session:
+        session.add(database.Document(id="doc-bob", title="bob", current_content="Bob's secret",
+                                      owner="bob"))
+        session.commit()
+    harness.provider_rounds = [_sse_events(["Ok."])]
+
+    await harness.send(_Request("agent", message="read it", active_doc_id="doc-bob",
+                                active_doc_state="visible"))
+
+    [payload] = harness.captured["provider_requests"]
+    assert "Bob's secret" not in _current_message(payload)
+
+
+@pytest.mark.asyncio
+async def test_uploads_and_an_attached_image_reach_the_model(harness, monkeypatch):
+    fake = chat_routes.build_chat_context
+
+    async def with_uploads(*args, **kwargs):
+        ctx = await fake(*args, **kwargs)
+        ctx.uploaded_files = [{"id": "up-1", "name": "report.pdf", "mime": "application/pdf",
+                               "path": "/data/uploads/up-1.pdf"}]
+        ctx.preprocessed.attachment_meta = [{"id": "img-1", "mime": "image/png"}]
+        return ctx
+
+    monkeypatch.setattr(chat_routes, "build_chat_context", with_uploads)
+    harness.provider_rounds = [_sse_events(["Ok."])]
+
+    await harness.send(_Request("agent", message="make the sky purple"))
+
+    [payload] = harness.captured["provider_requests"]
+    current = _current_message(payload)
+    assert "name=report.pdf" in current and "path=/data/uploads/up-1.pdf" in current
+    assert "edit_image" in current and "odysseus://attachment/img-1" in current
+
+
+@pytest.mark.asyncio
+async def test_picked_workspace_brings_the_workspace_coding_rules(harness, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+    workspace = tmp_path / "app"
+    workspace.mkdir()
+    harness.provider_rounds = [_sse_events(["Ok."])]
+
+    await harness.send(_Request("agent", message="fix the tests", workspace=str(workspace)))
+
+    [payload] = harness.captured["provider_requests"]
+    assert f"Active workspace: `{workspace}`" in _current_message(payload)
+    assert "Workspace coding mode" not in payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("runtime_row", "carried"), [(False, True), (True, False)])
+async def test_email_ids_from_legacy_rows_carry_over_runtime_rows_replay_them(harness, runtime_row, carried):
+    metadata = {"tool_events": [{
+        "tool": "mcp", "command": "mcp__email__list_emails {}", "exit_code": 0,
+        "output": "UID: 314 From: carol@example.com Subject: Lunch",
+    }]}
+    if runtime_row:
+        metadata["agent_v2"] = {"rounds": [{"blocks": [{"type": "text", "text": "You have 1 email."}]}]}
+    harness.context.history = [
+        {"role": "user", "content": "check mail"},
+        {"role": "assistant", "content": "You have 1 email.", "metadata": metadata},
+    ]
+    harness.provider_rounds = [_sse_events(["Ok."])]
+
+    await harness.send(_Request("agent", message="read the first one"))
+
+    [payload] = harness.captured["provider_requests"]
+    assert ("UID: 314" in _current_message(payload)) is carried
+
+
+def _image_parts(payload):
+    return [
+        part for message in payload["messages"] if isinstance(message.get("content"), list)
+        for part in message["content"] if part.get("type") == "image_url"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_images_reach_the_next_round_only(harness, monkeypatch):
+    results = iter([
+        {"output": "frame grid", "images": [
+            {"mimeType": "image/png", "data": f"frame{index}"} for index in range(5)
+        ]},
+        {"output": "plain text"},
+    ])
+
+    async def executor(block, **kwargs):
+        return f"{block.tool_type}: x", next(results)
+
+    monkeypatch.setattr(chat_agent_tools, "execute_tool_block", executor)
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+    harness.provider_rounds = [
+        _sse_tool_calls(("read_file", {"path": "/tmp/clip.mp4"})),
+        _sse_tool_calls(("read_file", {"path": "/tmp/notes.txt"})),
+        _sse_events(["The clip shows a cat."]),
+    ]
+
+    await harness.send(_Request("agent", message="what is in the clip?"))
+
+    first, second, third = harness.captured["provider_requests"]
+    assert _image_parts(first) == []
+    urls = [part["image_url"]["url"] for part in _image_parts(second)]
+    # Evenly spaced frames, capped (servers reject more than a few images).
+    assert urls == [f"data:image/png;base64,frame{index}" for index in (0, 2, 4)]
+    assert second["messages"][-1]["role"] == "user"
+    assert _image_parts(third) == []

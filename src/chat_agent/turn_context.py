@@ -46,8 +46,8 @@ from src.clean_agent_preview import active_email_context_message
 from src.email_task_intent import email_style_context
 # Relies on: returns "" when no integration is enabled.
 from src.integrations import get_integrations_prompt
-# Relies on: a non-empty upload id only for a document rendered from a
-# fillable PDF (its pdf_form_source front matter).
+# Relies on: a non-empty upload id only for a document rendered from a PDF
+# (pdf_form_source or pdf_source front matter), as legacy's form mode.
 from src.pdf_form_doc import find_source_upload_id
 from src.prompt_security import untrusted_context_message
 from src import settings

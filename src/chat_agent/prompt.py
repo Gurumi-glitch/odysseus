@@ -3,8 +3,9 @@
 Order: one system message (route preset/persona system messages, the
 behaviour section, then the runtime's sections such as the unavailable-tools
 line) -> the instructions block (user role, rebuilt every turn) -> history ->
-the current user message carrying this turn's context (memory, RAG,
-date/time).
+the current user message carrying this turn's context (what is open and
+asked for, see turn_context; then memory, RAG, date/time). Nothing that
+changes per turn enters the system message, so it stays byte-identical.
 """
 
 from __future__ import annotations

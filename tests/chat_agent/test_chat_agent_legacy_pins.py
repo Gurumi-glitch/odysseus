@@ -219,3 +219,83 @@ async def test_finish_flag_belongs_to_the_running_run_and_a_replacement_starts_c
     release.set()
     await second.task
     assert not agent_runs.should_finish(session)
+
+
+# --- Turn context helpers (ticket #59) ---
+
+
+def test_empty_plan_workspace_and_uploads_add_nothing():
+    from src.agent_loop import _uploaded_files_context_message, _workspace_coding_rules, build_active_plan_note
+
+    assert build_active_plan_note("  ") == ""
+    assert _workspace_coding_rules(None) == ""
+    assert _uploaded_files_context_message([]) is None
+
+
+def test_backend_runtime_context_is_untrusted_or_absent():
+    from src.agent_loop import _backend_runtime_context_message
+
+    message = _backend_runtime_context_message()
+    assert message is None or (message["role"] == "user" and message["metadata"]["trusted"] is False)
+
+
+def test_compact_email_draft_keeps_headers_and_the_users_text():
+    from src.agent_loop import _compact_email_draft_context
+
+    raw = ("To: bob@example.com\nSubject: Re: hi\n---\nThanks!\n\n"
+           "---------- Previous message ----------\n" + "x" * 5000)
+    compact = _compact_email_draft_context(raw)
+    assert compact.startswith("To: bob@example.com\nSubject: Re: hi\n---\nThanks!")
+    assert len(compact) < len(raw)
+
+
+def test_email_reader_message_needs_a_uid():
+    from src.clean_agent_preview import active_email_context_message
+
+    assert active_email_context_message({"folder": "INBOX"}) is None
+    message = active_email_context_message({"uid": "9", "account": "work"})
+    assert message["metadata"]["trusted"] is False and "Message UID: 9" in message["content"]
+
+
+def test_integrations_prompt_is_empty_without_enabled_integrations(monkeypatch):
+    import src.integrations as integrations
+
+    monkeypatch.setattr(integrations, "load_integrations", lambda: [{"id": "a", "enabled": False}])
+    assert integrations.get_integrations_prompt() == ""
+
+
+def test_pdf_source_markers_mark_form_documents():
+    from src.pdf_form_doc import find_source_upload_id
+
+    upload = "b" * 32
+    assert find_source_upload_id(f'<!-- pdf_form_source upload_id="{upload}" -->') == upload
+    assert find_source_upload_id(f'<!-- pdf_source upload_id="{upload}" -->') == upload
+    assert find_source_upload_id("plain text") is None
+
+
+def test_guide_only_detection_reads_the_users_own_words():
+    from src.tool_policy import detect_guide_only_turn
+
+    assert detect_guide_only_turn("don't use tools, just explain")
+    assert detect_guide_only_turn("use the tools you need") is None
+
+
+def test_visual_evidence_is_off_only_for_text_only_qwen_routers():
+    from src.agent_loop import _allow_visual_tool_evidence_for_model
+
+    assert _allow_visual_tool_evidence_for_model("x-ai/grok-4.1-fast")
+    assert not _allow_visual_tool_evidence_for_model("qwen38-tool-router")
+
+
+def test_linkify_helpers_link_titles_from_successful_tool_events():
+    from src.chat_agent.transcript import linkify
+
+    events = [
+        {"tool": "mcp", "command": "mcp__email__list_emails {}", "exit_code": 0,
+         "output": "1. **Lunch plans**\n   UID: 77"},
+        {"tool": "manage_calendar", "exit_code": 0, "output": "",
+         "events": [{"uid": "ev-1", "summary": "Dentist visit"}]},
+        {"tool": "manage_notes", "exit_code": 1, "error": True, "note_id": "n1", "note_title": "Failed note"},
+    ]
+    text = linkify("Lunch plans\nDentist visit\nFailed note", events)
+    assert text == "[Lunch plans](#email-77)\n[Dentist visit](#event-ev-1)\nFailed note"
