@@ -150,6 +150,34 @@ test('history: stop reasons — max_rounds offers Continue as a new turn, interr
   } finally { await page.close(); }
 });
 
+test('history: a stopped chat_agent row never offers the legacy Resume (the merge-last-assistant path); a legacy row still does', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(([meta, content]) => {
+      // The generic (single-bubble) renderer path the bare and legacy rows take; the harness only wires the rounds path.
+      Object.assign(window, { stripToolBlocks: x => x, _renderAssistantBody: x => markdownModule.processWithThinking(x) });
+      const render = (text, metadata) => {
+        document.querySelector('#chat-history').replaceChildren();
+        addMessage('assistant', text, 'test', metadata);
+        return {
+          markers: [...document.querySelectorAll('.stopped-indicator')].map(n => n.querySelector('span').textContent),
+          resume: document.querySelectorAll('.resume-btn').length,
+        };
+      };
+      return {
+        // What transcript.TurnWriter stores for an interrupted turn: stop_reason plus the legacy `stopped` marker.
+        stored: render(content, { ...meta, stop_reason: 'interrupted', stopped: true }),
+        // The same marker on a chat_agent row with no rounds to replay falls through to the generic renderer.
+        bare: render('Half', { _fromHistory: true, runtime: 'chat_agent', stop_reason: 'interrupted', stopped: true }),
+        legacy: render('Half', { _fromHistory: true, stopped: true }),
+      };
+    }, [threeRounds, content]);
+    assert.deepEqual(result.stored, { markers: ['[Message interrupted]'], resume: 0 });
+    assert.deepEqual(result.bare, { markers: ['[Message interrupted]'], resume: 0 });
+    assert.deepEqual(result.legacy, { markers: ['[Message interrupted]'], resume: 1 });
+  } finally { await page.close(); }
+});
+
 test('history: a Shorter/Simpler rewrite (chosen variant) replaces the last round after a reload', async () => {
   const page = await setup();
   try {
