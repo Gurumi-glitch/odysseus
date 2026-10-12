@@ -182,6 +182,17 @@ def _history_display_content(content: Any) -> Any:
     return content
 
 
+def _display_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Message metadata as the history view returns it: without ``agent_v2``.
+
+    The turn record is the chat_agent runtime's replay source (ADR 0007); the
+    browser renders its projections and never needs the record itself.
+    """
+    if "agent_v2" not in metadata:
+        return metadata
+    return {key: value for key, value in metadata.items() if key != "agent_v2"}
+
+
 def _merge_continue_rows_to_delete(db_messages, db1, db2):
     """DB rows to delete when merging the last two assistant messages.
 
@@ -271,6 +282,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 meta = json.loads(m.meta_data) or {}
             except (json.JSONDecodeError, ValueError):
                 meta = {}
+        meta = _display_metadata(meta)
         meta["_db_id"] = m.id
         if m.timestamp and "timestamp" not in meta:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
@@ -343,7 +355,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     continue
                 entry = {"role": msg.role, "content": strip_tui_local_context(_history_display_content(msg.content))}
                 if msg.metadata:
-                    entry["metadata"] = msg.metadata
+                    entry["metadata"] = _display_metadata(msg.metadata)
                 history_dict.append(entry)
             elif isinstance(msg, dict):
                 if msg.get("metadata", {}).get("hidden"):
@@ -353,7 +365,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "content": strip_tui_local_context(_history_display_content(msg.get("content", ""))),
                 }
                 if msg.get("metadata"):
-                    entry["metadata"] = msg["metadata"]
+                    entry["metadata"] = _display_metadata(msg["metadata"])
                 history_dict.append(entry)
 
         # Fallback: load from DB if in-memory renders empty. Display only —
@@ -640,7 +652,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         _verify_session_owner(request, session_id)
         try:
             body = await request.json()
-            meta_update = body.get("metadata", {})
+            meta_update = sanitize_client_message_metadata(body.get("metadata")) or {}
             session = session_manager.get_session(session_id)
 
             # Update in-memory

@@ -114,6 +114,8 @@ class _Harness:
             name="test",
             history=[],
             add_message=add_message,
+            # The writer mutates the saved message in place, so saved[] stays current.
+            update_message=lambda message: True,
         )
         session_manager = SimpleNamespace(
             get_session=lambda session_id: self.session,

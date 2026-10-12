@@ -324,6 +324,54 @@ class SessionManager:
         finally:
             db.close()
 
+    def update_message(self, session_id: str, message: ChatMessage) -> bool:
+        """Rewrite one persisted message in place: its DB row and cached entry.
+
+        The row is the one ``message.metadata["_db_id"]`` names. A writer that
+        checkpoints one message several times (the chat_agent turn record)
+        uses this instead of appending a new row each time. Returns False when
+        the row is gone (deleted or truncated meanwhile).
+        """
+        metadata = message.metadata or {}
+        msg_id = metadata.get("_db_id")
+        if not msg_id:
+            return False
+        db = SessionLocal()
+        try:
+            db_message = db.query(DbChatMessage).filter(
+                DbChatMessage.id == msg_id,
+                DbChatMessage.session_id == session_id,
+            ).first()
+            if db_message is None:
+                return False
+            db_message.content = persistable_message_content(message.content, metadata)
+            # Mirrors _persist_message, which serializes before stamping _db_id.
+            stored = {key: value for key, value in metadata.items() if key != "_db_id"}
+            db_message.meta_data = json.dumps(stored) if stored else None
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session is not None:
+                _now = datetime.now(timezone.utc)
+                db_session.last_accessed = _now
+                db_session.last_message_at = _now
+            db.commit()
+        except Exception as e:
+            logger.error(f"Error updating message: {e}")
+            db.rollback()
+            return False
+        finally:
+            db.close()
+
+        cached = self.sessions.get(session_id)
+        if cached is not None:
+            for index, entry in enumerate(cached.history):
+                entry_meta = entry.metadata if isinstance(entry, ChatMessage) else (
+                    entry.get("metadata") if isinstance(entry, dict) else None
+                )
+                if isinstance(entry_meta, dict) and entry_meta.get("_db_id") == msg_id:
+                    cached.history[index] = message
+                    break
+        return True
+
     def truncate_messages(self, session_id: str, keep_count: int) -> bool:
         """Truncate session history, keeping only the first `keep_count` messages."""
         session = self.get_session(session_id)

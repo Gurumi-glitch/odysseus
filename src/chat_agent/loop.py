@@ -117,6 +117,9 @@ class ChatAgentTurn:
     fallback_statuses: FrozenSet[int]
     # Moves the session's stored model and endpoint (fallback is sticky).
     stick_route: Callable[[Candidate], None]
+    # The route's run_post_response_tasks bound to this request (memory and
+    # skill extraction, webhook, auto-name); the loop adds the turn's results.
+    after_turn: Optional[Callable[..., None]] = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +291,25 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     endpoint = turn.candidates[0].endpoint
     provider = provider_key(endpoint.url)
     record = transcript.TurnRecord(provider=provider, model=endpoint.model)
+    writer = transcript.TurnWriter(sess, turn.session_id, record, incognito=turn.toggles.incognito)
+    contexts = []
+
+    async def build_context(**flags):
+        # Keeps the context so the row projects what the route resolved.
+        contexts.append(await turn.build_context(**flags))
+        return contexts[-1]
+
+    streamed: List[str] = []
+
+    def hold_ask(call: Dict[str, Any], tool: str, command: str, card: dict) -> None:
+        # The card is on the row before anyone can answer it, so a restart
+        # while it waits can mark it expired.
+        record.pending_ask = {
+            "round": len(record.rounds), "model": endpoint.model, "tool": tool, "command": command,
+            "status": "pending", "call_id": call["call_id"], "ask_user": card,
+        }
+        writer.checkpoint()
+
     try:
         caps = read_caps()
         layers = permissions.build_deny_layers(
@@ -308,7 +330,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         ) if upfront else []
         unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
         conversation = await prompt.build_messages(
-            turn.build_context,
+            build_context,
             [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
             toggles=turn.toggles,
@@ -321,32 +343,38 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             client_runtime_context=turn.client_runtime_context,
             denied_names=layers.denied_names,
         )
+        record.context = _context_projections(contexts[-1])
         tool_calls_used = 0
         guard = repeat_guard.RepeatGuard()
         round_tools = tool_schemas
         while True:
             end = None
+            streamed.clear()
             async for event in _round_with_fallback(turn, endpoint, conversation, round_tools):
                 if isinstance(event, Fallback):
                     endpoint, conversation = event.candidate.endpoint, event.conversation
                     record.provider, record.model = provider_key(endpoint.url), endpoint.model
                     yield _event(event.event)
                 elif isinstance(event, ProviderError):
+                    _finish_failed_turn(writer)
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
                     return
                 if isinstance(event, TextDelta):
+                    streamed.append(event.text)
                     yield _event({"delta": event.text})
                 elif isinstance(event, RoundEnd):
                     end = event
+            streamed.clear()
             round_record = _round_record(end)
             record.rounds.append(round_record)
+            writer.checkpoint()
             calls = [b for b in end.blocks if b["type"] == "tool_call"]
             if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
                 # Finish's tool-less round is the turn's last.
                 break
             conversation.append({"role": "assistant", "blocks": end.blocks})
-            results = []
+            results = round_record["results"] = []
             for call in calls:
                 # tool_search is the runtime's own tool: it is answered here,
                 # never converted for the legacy executor.
@@ -370,6 +398,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         ask = _Ask(turn, asks.repeat_guard_card(
                             turn.session_id, call["name"], call["arguments"], signal.streak,
                         ))
+                        hold_ask(call, call["name"], call["arguments"], ask.card)
                         async for event in ask.events():
                             yield event
                         if ask.reply is None:
@@ -391,6 +420,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     ask = _Ask(turn, asks.permission_card(
                         turn.session_id, block.tool_type, block.content, rule.label,
                     ))
+                    hold_ask(call, block.tool_type, block.content, ask.card)
                     async for event in ask.events():
                         yield event
                     if ask.reply is None:
@@ -410,6 +440,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
+                        hold_ask(call, block.tool_type, block.content, ask.card)
                         async for event in ask.events():
                             yield event
                         if ask.reply is None:
@@ -424,6 +455,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 tool_event = outcome.tool_event(len(record.rounds), endpoint.model)
                 if ask is not None:
                     tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
+                record.pending_ask = None
                 record.tool_events.append(tool_event)
                 envelope = outcome.envelope()
                 if reminder:
@@ -431,7 +463,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     envelope["content"] += reminder
                 results.append(envelope)
                 conversation.append({"role": "tool", **envelope})
-            round_record["results"] = results
+                # Per call, not per round: a restart must not mark a call
+                # that already ran as cancelled (it would replay as not run).
+                writer.checkpoint()
             # Tools loaded by this round's tool_search join the next round.
             tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
             round_tools = tool_schemas
@@ -456,17 +490,66 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
-        message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
+        message_id = writer.finish()
+        _after_turn(turn, record, contexts[-1], message_id, tool_calls_used)
+    except (asyncio.CancelledError, GeneratorExit):
+        # Stop: keep the completed blocks and the text streamed so far; partial
+        # reasoning is dropped and unfinished calls get cancelled results.
+        if streamed:
+            record.rounds.append({"blocks": [{"type": "text", "text": "".join(streamed)}]})
+        if record.rounds:
+            record.stop_reason = transcript.STOP_INTERRUPTED
+            writer.finish()
+        raise
     except Exception:
         # A crash ends the turn visibly; it never falls back to legacy, which
         # could run side effects twice (ADR 0005).
         logger.exception("chat_agent turn failed for session %s", turn.session_id)
+        _finish_failed_turn(writer)
         yield _error_event("The chat agent runtime failed on this turn. See the server log.")
         yield "data: [DONE]\n\n"
         return
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
     yield "data: [DONE]\n\n"
+
+
+def _finish_failed_turn(writer: transcript.TurnWriter) -> None:
+    """A row already checkpointed must not stay ``in_progress`` after an error."""
+    if writer.started:
+        writer.record.stop_reason = transcript.STOP_ERROR
+        writer.finish()
+
+
+def _context_projections(ctx: Any) -> Dict[str, Any]:
+    """What save_assistant_response projects from the route's context."""
+    return {
+        "character_name": ctx.preset.character_name,
+        "web_sources": ctx.web_sources,
+        "rag_sources": ctx.rag_sources,
+        "memories_used": ctx.used_memories,
+    }
+
+
+def _after_turn(
+    turn: ChatAgentTurn, record: transcript.TurnRecord, ctx: Any, message_id: Optional[str], tool_calls: int,
+) -> None:
+    """Post-response tasks and the SFT trace, once per completed turn."""
+    content = record.content()
+    if turn.after_turn is not None:
+        turn.after_turn(
+            full_response=content, last_metrics=None, uprefs=ctx.uprefs,
+            character_name=ctx.preset.character_name,
+            agent_rounds=len(record.rounds), agent_tool_calls=tool_calls,
+        )
+    if not turn.toggles.incognito:
+        # Relies on: _append_sft_trace_record writes only for owners with SFT
+        # capture enabled and never raises.
+        from routes.chat_helpers import _append_sft_trace_record
+        _append_sft_trace_record(
+            owner=turn.owner, session_id=turn.session_id, sess=turn.sess,
+            assistant_content=content, metadata=record.metadata(), message_id=message_id,
+        )
 
 
 def _offered(upfront, catalog, conversation, surface):
