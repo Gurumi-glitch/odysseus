@@ -243,12 +243,6 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/api",
-    tags=["sessions"],
-    dependencies=[Depends(require_chat_api_token_scope)],
-)
-
 def _current_user_is_admin(request: Request, user: str | None) -> bool:
     if is_delegated_credential(request):
         return False
@@ -396,6 +390,13 @@ def setup_session_routes(
     skills_manager=None,
 ):
     """Setup session routes with the provided manager and config"""
+    # Built per call: a module-level router kept every earlier call's
+    # endpoints, closed over that call's session manager.
+    router = APIRouter(
+        prefix="/api",
+        tags=["sessions"],
+        dependencies=[Depends(require_chat_api_token_scope)],
+    )
 
     REQUEST_TIMEOUT = config.get("REQUEST_TIMEOUT", 20)
     SESSION_MODEL_VALIDATION_TIMEOUT = min(float(REQUEST_TIMEOUT or 20), 3.0)

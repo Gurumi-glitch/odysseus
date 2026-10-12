@@ -9,7 +9,6 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import APIRouter
 
 import routes.session_routes as session_routes
 from src import agent_runs
@@ -100,8 +99,6 @@ def delete_route(monkeypatch, harness):
     monkeypatch.setattr(session_routes, "effective_user", lambda request: "alice")
     monkeypatch.setattr(session_routes, "SessionLocal", _EmptyDb)
     monkeypatch.setattr("routes.chat_helpers.remove_session_sft_trace_rows", lambda *a: None)
-    # setup_session_routes registers on a module-level router; start clean.
-    monkeypatch.setattr(session_routes, "router", APIRouter(prefix="/api", tags=["sessions"]))
     router = session_routes.setup_session_routes(manager, {})
     endpoints = {(route.path, method): route.endpoint for route in router.routes for method in route.methods}
     return SimpleNamespace(endpoints=endpoints, seen=seen)

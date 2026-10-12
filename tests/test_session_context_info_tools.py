@@ -7,8 +7,6 @@ def test_context_info_reports_delegated_admin_as_restricted(monkeypatch):
     import routes.session_routes as routes
     monkeypatch.setattr(routes, '_verify_session_owner', lambda *args: None)
     monkeypatch.setattr('src.tool_security.blocked_tools_for_owner', lambda owner: set())
-    from fastapi import APIRouter
-    monkeypatch.setattr(routes, 'router', APIRouter(prefix='/api'))
     session = SimpleNamespace(endpoint_url='', model='', cwd='')
     router = routes.setup_session_routes(SimpleNamespace(get_session=lambda sid: session), {})
     endpoint = next(route.endpoint for route in router.routes if route.path == '/api/session/{session_id}/context_info')
