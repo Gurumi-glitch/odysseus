@@ -24,9 +24,9 @@ upstream's `src/agent_runtime/` and never edits the legacy loop
 
 | Module | Job | Status |
 |---|---|---|
-| `store.py` | Per-user JSON store `CHAT_AGENT_DIR/<percent-encoded casefolded user>.json` (confined). Holds `chat_runtime: legacy\|new`. Rules, session rules and rename/delete hooks join here. | #48 (switch only) |
+| `store.py` | Per-user JSON store `CHAT_AGENT_DIR/<percent-encoded lowercased user>.json` (confined). Holds `chat_runtime: legacy\|new` and `instructions_enabled`. Owns the user instruction folder `INSTRUCTIONS_DIR/<same name>/` (`confine()`d). `rename_owner` / `delete_owner` are called from the user rename/delete routes. Rules and session rules join here. | #48, #52 |
 | `routing.py` | `ComposerToggles` snapshot; `choose_runtime(TurnFacts)` → `legacy` or `chat_agent`. | #48 |
-| `prompt.py` | Calls the route's context builder with `prefetch=False, agent_mode=False` (no URL/web/YouTube prefetch, no legacy skills index) and assembles: one system message (route system messages, then the behaviour section) → history → current user message carrying the turn context (memory, RAG, date/time). | #48 (minimal) |
+| `prompt.py` | Calls the route's context builder with `prefetch=False, agent_mode=False` (no URL/web/YouTube prefetch, no legacy skills index) and assembles: one system message (route system messages, then the behaviour section) → instructions block (user role: user folder unless disabled, then workspace ancestors up to home, `AGENTS.md` + `CLAUDE.md`, 12k chars each, labelled by path; none in Nobody mode) → history → current user message carrying the turn context (memory, RAG, date/time). | #48, #52 |
 | `loop.py` | `ChatAgentTurn` + `run_chat_agent_turn`: emits `turn_mode`, `delta`, `message_saved`, `event: error`, `[DONE]`. A crash ends the turn with a visible error; it never falls back to legacy. | #48 (one round, no tools) |
 | `providers/__init__.py` | Canonical conversation and block shapes both adapters serialize (`text`, `tool_call`, `reasoning` tagged with provider+model, tool-result envelope `{call_id, ok, content, error}`); `provider_key(url)` (`"xai"` for x.ai hosts, else `_detect_provider`); round events `TextDelta`, `RoundEnd(blocks, usage)`, `ProviderError`. | #51 |
 | `providers/xai_responses.py` | xAI Responses: `store:false`, `prompt_cache_key` = chat id, `include: reasoning.encrypted_content`; each output item kept on its block as `item` and replayed unchanged; reasoning only to the same model; a 400 on replayed reasoning retries once without it; usage incl. cached tokens. | #51 |
@@ -35,7 +35,7 @@ upstream's `src/agent_runtime/` and never edits the legacy loop
 | `permissions.py`, `classifier.py`, `tools.py`, `result_events.py`, `asks.py` | Not yet built. | #50–#68 |
 
 Control-plane route: `routes/chat_agent_routes.py`
-(`GET/PUT /api/chat_agent/settings`). `require_interactive_user` refuses
+(`GET/PUT /api/chat_agent/settings`, `GET/PUT /api/chat_agent/instructions`). Context info (`GET /api/session/{sid}/context_info?cwd=`) lists the loaded instruction files as `instructions: [{path, truncated}]`. `require_interactive_user` refuses
 auth-disabled instances, internal-tool loopback and bearer tokens; reuse it for
 the ask/steer/rules routes.
 

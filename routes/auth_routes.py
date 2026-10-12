@@ -14,6 +14,7 @@ from pathlib import Path
 
 from core.atomic_io import atomic_write_json, atomic_write_text
 from core.auth import AuthManager, RESERVED_USERNAMES, SetAdminResult, TOKEN_TTL
+from src.chat_agent import store as chat_agent_store
 from src.constants import DEEP_RESEARCH_DIR, MEMORY_FILE, PASSWORD_MIN_LENGTH, SKILLS_DIR
 from src.rate_limiter import RateLimiter
 from src.settings_scrub import scrub_settings
@@ -605,6 +606,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         except Exception as e:
             logger.warning("Failed to rename skills owner references %s -> %s: %s", old_username, new_username, e)
 
+        # chat_agent store (runtime switch, permission rules) and the user's
+        # instruction folder are keyed by username on disk.
+        try:
+            chat_agent_store.rename_owner(old_username, new_username)
+        except Exception as e:
+            logger.error("Failed to move chat_agent data %s -> %s: %s", old_username, new_username, e)
+
         # The in-memory session cache (session_manager.sessions) stores each
         # session's owner at load time. Without this patch the renamed user's
         # sessions are invisible on the next /api/sessions call because
@@ -700,6 +708,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise
         if not ok:
             raise HTTPException(400, "Cannot delete user")
+        # A re-created account with this name must not inherit allow rules
+        # or instruction files.
+        try:
+            chat_agent_store.delete_owner(body.username)
+        except Exception as e:
+            logger.error("Failed to remove chat_agent data of %s: %s", body.username, e)
         # delete_user removes the user's ApiToken rows, but the bearer-auth
         # middleware serves from an in-memory prefix->token cache that only
         # rebuilds when flagged dirty. Without this, a deleted user's already

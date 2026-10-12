@@ -24,6 +24,7 @@ from src.session_image_cleanup import _generated_image_path_for_cleanup, session
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
+from src.chat_agent import prompt as chat_agent_prompt, store as chat_agent_store
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -369,6 +370,22 @@ def _pick_endpoint_for_sort(owner=None):
     if url and model:
         return url, model, headers
     return None, None, None
+
+
+def _context_info_instruction_files(request: Request, owner: str | None, cwd: str | None) -> list[dict]:
+    """Instruction files the chat_agent runtime loads for this composer workspace."""
+    if chat_agent_store.chat_runtime(owner) != chat_agent_store.RUNTIME_NEW:
+        return []
+    # Relies on: the chat route's resolver returns "" for non-admin callers and
+    # the vetted backend path otherwise, so the list matches what a turn loads.
+    from routes.chat_routes import _resolve_request_workspace
+
+    workspace, _rejected = _resolve_request_workspace(request, cwd)
+    return [
+        {"path": item.path, "truncated": item.truncated}
+        for item in chat_agent_prompt.instruction_files(owner, workspace)
+    ]
+
 
 def setup_session_routes(
     session_manager: SessionManager,
@@ -1608,6 +1625,7 @@ def setup_session_routes(
 
         _host_paths_visible = owner_is_admin_or_single_user(owner)
         agents_md = _context_info_agents_md_inventory(cwd) if _host_paths_visible else []
+        instructions = _context_info_instruction_files(request, owner, cwd)
         # Workspace visibility: lets the TUI answer "can the backend actually
         # see this directory?" (mounted vs bridge-only) without probing.
         from src.workspace_paths import backend_workspace_path, workspace_mount_pairs
@@ -1642,6 +1660,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }
@@ -1654,6 +1673,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }
@@ -1663,6 +1683,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }
