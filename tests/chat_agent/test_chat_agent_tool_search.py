@@ -10,7 +10,7 @@ import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_utils as tool_utils
 from core import database
-from src.chat_agent import session_rules, transcript
+from src.chat_agent import transcript
 from src.chat_agent.tools import TOOL_SEARCH, TOOL_SEARCH_MAX_SCHEMAS
 from src.mcp_manager import McpManager
 from tests.chat_agent.test_chat_agent_asks_route import answering, send_and_answer
@@ -135,7 +135,6 @@ async def test_a_custom_mcp_tool_is_callable_after_search(harness, admin, mcp, d
     monkeypatch.setattr(tool_execution, "owner_is_admin_or_single_user", lambda owner: True)
     # The ask endpoint answers as whoever the request is signed in as.
     monkeypatch.setattr(chat_routes, "effective_user", lambda request: request.state.current_user)
-    monkeypatch.setattr(session_rules, "_RULES", {})
     _search_then_call_issue_lister(harness)
 
     # Custom MCP tools ask by default (spec #44 default posture).

@@ -34,7 +34,7 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, permissions, prompt, repeat_guard, result_events, session_rules, tools, transcript, turn_context,
+    asks, permissions, prompt, repeat_guard, result_events, store, tools, transcript, turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
@@ -331,6 +331,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
 
     try:
         caps = read_caps()
+        rules = permissions.Rules.from_lists(store.user_rules(turn.owner))
+        # The open email preview is both external content and a private read (ADR 0002).
+        provenance = permissions.Provenance(external=turn.active_email_open, private=turn.active_email_open)
         layers = permissions.build_deny_layers(
             owner=turn.owner,
             toggles=turn.toggles,
@@ -338,6 +341,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             delegated_credential=turn.delegated_credential,
             active_email_open=turn.active_email_open,
             global_disabled_tools=settings.get_setting("disabled_tools", []),
+            rules=rules,
         )
         surface = _configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
@@ -454,15 +458,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     else:
                         reminder = signal.reminder
                         decision = (permissions.Decision(permissions.ALLOW) if searching
-                                    else _gate(call, block, layers, offered))
-                if decision.outcome == permissions.ASK and session_rules.allows(
-                    turn.owner, turn.session_id, block.tool_type, block.content,
-                ):
-                    decision = permissions.Decision(permissions.ALLOW)
+                                    else _gate(turn, call, block, layers, offered, rules, provenance))
                 if decision.outcome == permissions.ASK:
-                    rule = session_rules.rule_for(block.tool_type, block.content)
+                    rule = permissions.session_rule(block.tool_type, block.content)
                     ask = _Ask(turn, asks.permission_card(
-                        turn.session_id, block.tool_type, block.content, rule.label,
+                        turn.session_id, block.tool_type, block.content, rule.text,
                     ))
                     hold_ask(call, block.tool_type, block.content, ask.card)
                     async for event in ask.events():
@@ -492,6 +492,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                             prior_tool_events=record.tool_events,
                         )
                         outcome.model_text = adapted.model_text
+                        provenance = provenance.after(block.tool_type)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
                         ask = _Ask(turn, asks.question_card(turn.session_id, question))
@@ -739,7 +740,8 @@ class _Ask:
 
 
 def _gate(
-    call: Dict[str, Any], block: Any, layers: permissions.DenyLayers, offered: frozenset,
+    turn: ChatAgentTurn, call: Dict[str, Any], block: Any, layers: permissions.DenyLayers,
+    offered: frozenset, rules: permissions.Rules, provenance: permissions.Provenance,
 ) -> permissions.Decision:
     """Admit only a tool this turn offered, then decide on the exact block the
     executor will run (the converter may rename it, e.g. a URL read_file)."""
@@ -751,11 +753,15 @@ def _gate(
         return permissions.Decision(
             permissions.INVALID, f"{call['name']}: the arguments are not valid for this tool.",
         )
-    return permissions.decide(layers, block.tool_type, block.content)
+    # Read per call: "Allow for this chat" earlier in this turn applies at once.
+    session = [permissions.rule_from_record(r) for r in store.session_rules(turn.owner, turn.session_id)]
+    return permissions.decide(
+        layers, block.tool_type, block.content, rules=rules, session=session, provenance=provenance,
+    )
 
 
 def _permission_decision(
-    turn: ChatAgentTurn, rule: session_rules.SessionRule, reply: Optional[asks.Answer],
+    turn: ChatAgentTurn, rule: permissions.Rule, reply: Optional[asks.Answer],
 ) -> permissions.Decision:
     if reply is None:
         return permissions.Decision(permissions.DENY, ASK_EXPIRED_REASON)
@@ -765,7 +771,7 @@ def _permission_decision(
         reason = "Denied by the user."
         return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
     if reply.decision == asks.CHAT:
-        session_rules.grant(turn.owner, turn.session_id, rule)
+        store.add_session_rule(turn.owner, turn.session_id, rule.record())
     return permissions.Decision(permissions.ALLOW)
 
 

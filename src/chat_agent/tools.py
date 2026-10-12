@@ -20,6 +20,9 @@ from uuid import uuid4
 # {server_id: set of server-local tool names}.
 from src.agent_loop import _apply_tool_surface_to_schemas, _load_mcp_disabled_map
 from src.agent_runtime.authority import OperationGrant, RequestAuthority, _owner as authority_owner
+# Relies on: create_request_authority(prompt, owner=...) carries the grants a
+# task created from the UI is sealed with (seal_task_authority, no parent).
+from src.agent_runtime.authority import create_request_authority
 # Relies on: seal_backends seals the backends the listed tools may reach from
 # the client runtime context, as create_request_authority does.
 from src.agent_runtime.remote_resources import seal_backends
@@ -28,7 +31,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 # NO_TOOL_SECURITY_CONTEXT and an explicit authority, applies no taint gate and
 # intersects with no parent authority when none is bound.
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
-from src.tool_capabilities import tool_result_is_successful, tool_result_was_denied
+from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
@@ -323,6 +326,29 @@ def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bo
     return ToolOutcome(call["call_id"], tool, command, STATUS_FAILED, EXIT_FAILED, reason)
 
 
+# manage_tasks actions that seal the task's authority from its prompt.
+_TASK_SEALING_ACTIONS = frozenset({"create", "edit"})
+
+
+def _task_prompt_grants(block: Any, owner: str) -> Tuple[OperationGrant, ...]:
+    """An admitted task create/edit was approved by the user, so the task is
+    sealed as if created from the UI: the per-call authority is the ceiling
+    seal_task_authority intersects with, and it gains the prompt's grants (#40)."""
+    if block.tool_type != "manage_tasks":
+        return ()
+    if _action_from_content(block.tool_type, block.content) not in _TASK_SEALING_ACTIONS:
+        return ()
+    try:
+        args = json.loads(block.content)
+    except (TypeError, ValueError):
+        return ()
+    # do_manage_tasks reads the prompt from these fields, in this order.
+    prompt = (args.get("prompt") or args.get("task") or args.get("description")) if isinstance(args, dict) else None
+    if not isinstance(prompt, str) or not prompt.strip():
+        return ()
+    return create_request_authority(prompt, owner=owner).grants
+
+
 async def execute(
     call_id: str, block: Any, scope: ExecutionScope,
     progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
@@ -335,7 +361,7 @@ async def execute(
     # accounts such as "straße" and "strasse".
     authority = RequestAuthority(
         uuid4().hex, authority_owner(scope.owner), scope.session_id, scope.workspace or "",
-        (OperationGrant(canonical_tool(block.tool_type)),),
+        (OperationGrant(canonical_tool(block.tool_type)), *_task_prompt_grants(block, scope.owner)),
     )
     if scope.client_runtime_context is not None:
         authority = replace(authority, backend_resources=seal_backends(

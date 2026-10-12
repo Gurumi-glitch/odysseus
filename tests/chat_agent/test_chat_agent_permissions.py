@@ -24,7 +24,7 @@ def _layers(admin=True, delegated=False, privileges=None, email_open=False,
     return permissions.build_deny_layers(
         owner="alice", toggles=_toggles(**toggles), privileges=privileges or {},
         delegated_credential=delegated, active_email_open=email_open,
-        global_disabled_tools=global_disabled or [],
+        global_disabled_tools=global_disabled or [], rules=permissions.Rules(),
     )
 
 

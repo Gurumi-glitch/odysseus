@@ -10,11 +10,13 @@ the waiting run.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from src import agent_runs
+from src.turn_contract import canonical_tool
 
 ASK_TIMEOUT_SECONDS = 30 * 60
 
@@ -122,10 +124,38 @@ def _approval_card(kind: str, session_id: str, question: str, description: str,
     }
 
 
+# A scheduled task can deliver unattended, so its card spells out what it
+# runs, when, on what trigger and where results go (#40).
+_TASK_CARD_FIELDS = (
+    ("task_id", "Task"), ("name", "Name"), ("prompt", "Prompt"), ("task", "Prompt"),
+    ("description", "Prompt"), ("task_type", "Type"), ("action_name", "Built-in action"),
+    ("schedule", "Schedule"), ("scheduled_time", "Time (UTC)"), ("scheduled_date", "Date"),
+    ("weekdays", "Weekdays"), ("day_of_month", "Day of month"), ("cron_expression", "Cron"),
+    ("trigger_type", "Trigger"), ("trigger_event", "Trigger event"), ("trigger_count", "Every N events"),
+    ("output_target", "Delivers to"),
+)
+_TASK_DEFAULT_TARGET = "session"
+
+
+def _task_details(content: str) -> str:
+    try:
+        args = json.loads(content)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    lines = [f"{label}: {args[key]}" for key, label in _TASK_CARD_FIELDS if args.get(key) not in (None, "")]
+    if "output_target" not in args and args.get("action", "create") == "create":
+        lines.append(f"Delivers to: {_TASK_DEFAULT_TARGET}")
+    return "\n".join(lines)
+
+
 def permission_card(session_id: str, tool: str, content: str, rule: str) -> dict:
+    description = "The agent wants to run this action and needs your approval."
+    if canonical_tool(tool) == "manage_tasks" and _task_details(content):
+        description += "\n" + _task_details(content)
     return _approval_card(
-        PERMISSION, session_id, "Allow this action?",
-        "The agent wants to run this action and needs your approval.",
+        PERMISSION, session_id, "Allow this action?", description,
         [
             {"label": "Allow once", "value": ONCE,
              "description": "Run this action now; ask again next time."},
