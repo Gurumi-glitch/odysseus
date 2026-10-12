@@ -925,14 +925,47 @@
 		},
 		{
 			"names": [
-				"clone",
-				"mount",
-				"pivot_root",
-				"umount2",
+				"clone"
+			],
+			"action": "SCMP_ACT_ALLOW",
+			"args": [
+				{
+					"index": 0,
+					"value": 2114060288,
+					"valueTwo": 805437440,
+					"op": "SCMP_CMP_MASKED_EQ"
+				}
+			],
+			"comment": "Odysseus #47: bubblewrap's sandbox clone, namespace bits exactly NEWNS|NEWUSER|NEWPID (strace of the containment argv). Same mask as Docker's clone rule; s390 passes flags in arg 1, so it is excluded.",
+			"excludes": {
+				"arches": [
+					"s390",
+					"s390x"
+				]
+			}
+		},
+		{
+			"names": [
 				"unshare"
 			],
 			"action": "SCMP_ACT_ALLOW",
-			"comment": "Odysseus (fork #47): bubblewrap builds the bash/python sandbox in its own user namespace; Docker otherwise grants these only with CAP_SYS_ADMIN. Measured minimal set for bubblewrap 0.12 under Docker 29.9.0; clone3 and setns are not needed."
+			"args": [
+				{
+					"index": 0,
+					"value": 268435456,
+					"op": "SCMP_CMP_EQ"
+				}
+			],
+			"comment": "Odysseus #47: bubblewrap's second unshare(CLONE_NEWUSER) inside the sandbox; no other flag combination is allowed."
+		},
+		{
+			"names": [
+				"mount",
+				"pivot_root",
+				"umount2"
+			],
+			"action": "SCMP_ACT_ALLOW",
+			"comment": "Odysseus #47: bubblewrap builds the sandbox root (tmpfs, binds, proc, pivot_root, detach old root). Not argument-filterable (paths and fstypes are pointers); the kernel still demands CAP_SYS_ADMIN in the caller's user namespace, which only exists inside a namespace the clone/unshare rules above let bubblewrap create."
 		}
 	]
 }

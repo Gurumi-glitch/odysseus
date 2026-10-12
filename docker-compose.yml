@@ -31,7 +31,8 @@ services:
       - "host.docker.internal:host-gateway"
     # Agent bash/python run only inside bubblewrap (src/containment.py), which
     # needs a user namespace and a fresh /proc that Docker's defaults block (fork #47).
-    # The profile is Docker's default plus clone/unshare/mount/umount2/pivot_root;
+    # The profile is Docker's default plus clone/unshare limited to bwrap's exact
+    # namespace flags and mount/umount2/pivot_root (per-rule reasons in the JSON);
     # systempaths=unconfined because the kernel won't mount procfs over masked /proc.
     security_opt:
       - seccomp=./docker/seccomp-odysseus.json
