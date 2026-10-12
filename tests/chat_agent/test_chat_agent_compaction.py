@@ -18,8 +18,11 @@ import routes.chat_routes as chat_routes
 import src.context_compactor as context_compactor
 import src.search.content as search_content
 from core.models import ChatMessage
+from src import agent_runs
 from src.chat_agent import transcript
+from src.chat_agent.permissions import Provenance
 from src.chat_agent.providers import Endpoint, RoundEnd, Usage, chat_completions
+from tests.chat_agent.test_chat_agent_turn_record import manager  # noqa: F401 (fixture)
 from tests.chat_agent.test_chat_agent_route import (
     _Harness,
     _Request,
@@ -32,7 +35,7 @@ from tests.chat_agent.test_chat_agent_route import (
 
 WINDOW = 1_000
 LOW_THRESHOLD = 50
-SUMMARY = "SUMMARY: the user checked mail and fetched two pages."
+SUMMARY = "SUMMARY: the user checked mail and planned two steps."
 
 
 def _usage_chunk(input_tokens, output_tokens=20, **extra):
@@ -133,6 +136,7 @@ def chat(monkeypatch, tmp_path):
     monkeypatch.setattr(context_compactor, "get_setting", lambda key, default=None: (
         LOW_THRESHOLD if key == "auto_compact_threshold_percent" else default
     ))
+    # Only reached if the egress gate let a fetch through.
     monkeypatch.setattr(search_content, "fetch_webpage_content",
                         lambda url, **kw: {"success": True, "content": f"page at {url}"})
     harness.summaries = []
@@ -168,17 +172,18 @@ async def _turn(chat, monkeypatch, message, rounds, **form):
     return _data_events(body), chat.captured["provider_requests"][sent:]
 
 
-def _fetch(url, input_tokens):
+def _plan(step, input_tokens):
+    """A turn with one call (update_plan: no egress, so no ask) and its answer."""
     return [
-        _with_usage(_sse_tool_calls(("web_fetch", {"url": url})), input_tokens),
-        _with_usage(_sse_events([f"Read {url}."]), input_tokens + 40),
+        _with_usage(_sse_tool_calls(("update_plan", {"plan": f"- [ ] {step}"})), input_tokens),
+        _with_usage(_sse_events([f"Planned {step}."]), input_tokens + 40),
     ]
 
 
 async def _two_turns(chat, monkeypatch):
     """Turn 1 stays small; turn 2's last round crosses the threshold."""
-    await _turn(chat, monkeypatch, "first question", _fetch("https://one.example/", 100))
-    await _turn(chat, monkeypatch, "second question", _fetch("https://two.example/", 700))
+    await _turn(chat, monkeypatch, "first question", _plan("step one", 100))
+    await _turn(chat, monkeypatch, "second question", _plan("step two", 700))
 
 
 def _orphan_tool_results(messages):
@@ -207,7 +212,7 @@ async def test_long_chat_compacts_at_a_turn_boundary_with_no_orphan_tool_output(
     assert _orphan_tool_results(messages) == []
     text = json.dumps(messages)
     assert SUMMARY in text
-    assert "first question" not in text and "https://one.example/" not in text
+    assert "first question" not in text and "step one" not in text
     # The kept turn replays whole: its call, its result, its answer.
     assert [m["role"] for m in messages] == [
         "system", "system", "user", "assistant", "tool", "assistant", "user",
@@ -234,3 +239,87 @@ async def test_the_egress_gate_stays_armed_after_compaction(chat, monkeypatch):
     assert card["ask_kind"] == "permission"
     [output] = [e for e in events if e.get("type") == "tool_output"]
     assert output["exit_code"] == 126
+
+
+# --- The popover and the Compact button on a runtime chat ---------------------
+
+POPOVER_WINDOW = 100_000
+
+
+def _runtime_row(text, input_tokens, output_tokens=1_000):
+    """A saved new-runtime turn whose provider reported this usage."""
+    record = transcript.TurnRecord(provider="openrouter", model="m")
+    record.rounds = [{"blocks": [{"type": "text", "text": text}], "usage": {
+        "input_tokens": input_tokens, "cached_input_tokens": input_tokens // 2,
+        "output_tokens": output_tokens, "reasoning_tokens": 0,
+    }}]
+    content = record.content()
+    return ChatMessage("assistant", content, metadata=transcript.signed_metadata(content, record.metadata()))
+
+
+@pytest.fixture
+def popover(manager, monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from fastapi.testclient import TestClient
+
+    from routes import session_routes
+    from routes.history import history_routes
+
+    monkeypatch.setattr("src.model_context.get_context_length", lambda url, model: POPOVER_WINDOW)
+    # app.py's order: the session routes come first, so their
+    # /api/session/{id}/compact is the one the Compact button reaches.
+    monkeypatch.setattr(session_routes, "router", APIRouter(prefix="/api", tags=["sessions"]))
+    app = FastAPI()
+    app.include_router(session_routes.setup_session_routes(manager, {}))
+    app.include_router(history_routes.setup_history_routes(manager))
+    manager.client = TestClient(app)
+    return manager
+
+
+def _context_percent(manager):
+    response = manager.client.get("/api/session/s1/context")
+    assert response.status_code == 200
+    return response.json()["context_percent"]
+
+
+def test_popover_shows_the_usage_the_provider_reported(popover):
+    popover.replace_messages("s1", [ChatMessage("user", "hello"), _runtime_row("Hi.", 50_000)])
+
+    # The next request holds the last one's input plus its reply: 51%.
+    assert abs(_context_percent(popover) - 51.0) <= 5.1
+
+
+def test_compact_button_on_an_idle_runtime_chat_keeps_provenance_and_drops_stale_usage(popover, monkeypatch):
+    async def summarize(*args, **kwargs):
+        return "earlier turns"
+
+    monkeypatch.setattr("src.llm_core.llm_call_async", summarize)
+    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", lambda *a, **k: (None, None, None))
+    popover.replace_messages("s1", [
+        ChatMessage("user", "check my mail"),
+        ChatMessage("assistant", "One email from Bob.", metadata={"tool_events": [
+            {"tool": "mcp__email__read_email", "status": "done"},
+        ]}),
+        ChatMessage("user", "q1"), _runtime_row("a1", 60_000),
+        ChatMessage("user", "q2"), _runtime_row("a2", 70_000),
+        ChatMessage("user", "q3"), _runtime_row("a3", 80_000),
+    ])
+    assert _context_percent(popover) > 80
+
+    response = popover.client.post("/api/session/s1/compact")
+
+    assert response.status_code == 200
+    history = popover.get_session("s1").history
+    assert [m.content for m in history[1:]] == ["q2", "a2", "q3", "a3"]
+    # The gate stays armed though the mail-reading row is gone.
+    gate = Provenance().after_history(history)
+    assert gate.external and gate.private
+    # Kept runtime turns still replay; their old usage no longer drives the popover.
+    assert transcript.trusted_rounds(history[2].to_dict())
+    assert _context_percent(popover) < 5
+
+
+def test_compact_button_refuses_during_an_active_run(popover, monkeypatch):
+    monkeypatch.setattr(agent_runs, "is_active", lambda session_id: True)
+
+    assert popover.client.post("/api/session/s1/compact").status_code == 409
