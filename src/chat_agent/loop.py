@@ -27,7 +27,9 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # session's registered run is running and Finish was requested for it; a run
 # that replaces it starts with the flag clear.
 from src import agent_runs
-from src.chat_agent import asks, permissions, prompt, repeat_guard, session_rules, tools, transcript
+from src.chat_agent import (
+    asks, permissions, prompt, repeat_guard, session_rules, tools, transcript, turn_context,
+)
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
@@ -117,6 +119,12 @@ class ChatAgentTurn:
     fallback_statuses: FrozenSet[int]
     # Moves the session's stored model and endpoint (fallback is sticky).
     stick_route: Callable[[Candidate], None]
+    # What the browser has open: the reader's email (uid/folder/account and
+    # cached subject/from/preview), the visible editor tab's document id, and
+    # the approved plan it sends back while that plan runs.
+    active_email: Optional[Dict[str, str]] = None
+    active_document_id: str = ""
+    approved_plan: str = ""
     # The route's run_post_response_tasks bound to this request (memory and
     # skill extraction, webhook, auto-name); the loop adds the turn's results.
     after_turn: Optional[Callable[..., None]] = None
@@ -328,12 +336,24 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         catalog = tools.deferred_catalog(
             layers.denied_names, include_mcp=not layers.hide_all_mcp,
         ) if upfront else []
-        unavailable = [name for name in tools.upfront_tool_names() if name in layers.disabled]
+        # The reader's denials come and go with the open email, so the turn
+        # context names them; the system prompt stays the same across turns.
+        reader_denied = permissions.EMAIL_READER_DENIED if turn.active_email_open else frozenset()
+        unavailable = [
+            name for name in tools.upfront_tool_names()
+            if name in layers.disabled and name not in reader_denied
+        ]
+        document = turn_context.load_document(turn.owner, turn.active_document_id)
         conversation = await prompt.build_messages(
             build_context,
             [tools.unavailable_line(unavailable), tools.catalog_section(catalog)] if upfront else [],
             owner=turn.owner,
             toggles=turn.toggles,
+            model=endpoint.model,
+            open_items=turn_context.OpenItems(
+                document=document, email=turn.active_email,
+                approved_plan=turn.approved_plan, denied=layers.denied_names,
+            ),
         )
         tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
         scope = tools.ExecutionScope(
@@ -342,11 +362,15 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             workspace=turn.toggles.workspace,
             client_runtime_context=turn.client_runtime_context,
             denied_names=layers.denied_names,
+            active_document_id=document.id if document is not None else None,
         )
         record.context = _context_projections(contexts[-1])
         tool_calls_used = 0
         guard = repeat_guard.RepeatGuard()
         round_tools = tool_schemas
+        # Tool images live for one round: the next request shows them, the one
+        # after drops them, so frames never pile up in the request.
+        visual = None
         while True:
             end = None
             streamed.clear()
@@ -375,6 +399,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 break
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = round_record["results"] = []
+            round_outcomes = []
             for call in calls:
                 # tool_search is the runtime's own tool: it is answered here,
                 # never converted for the legacy executor.
@@ -457,6 +482,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     tool_event["ask_user"] = asks.resolved_card(ask.card, ask.reply)
                 record.pending_ask = None
                 record.tool_events.append(tool_event)
+                record.link_sources.append({**outcome.result, **tool_event})
+                round_outcomes.append(outcome)
                 envelope = outcome.envelope()
                 if reminder:
                     # The reminder is for the model only; the tool card keeps the output.
@@ -466,6 +493,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 # Per call, not per round: a restart must not mark a call
                 # that already ran as cancelled (it would replay as not run).
                 writer.checkpoint()
+            conversation = [message for message in conversation if message is not visual]
+            visual = tools.visual_evidence([o.result for o in round_outcomes], endpoint.model)
+            if visual is not None:
+                conversation.append(visual)
             # Tools loaded by this round's tool_search join the next round.
             tool_schemas, offered = _offered(upfront, catalog, conversation, surface)
             round_tools = tool_schemas
@@ -490,6 +521,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
+        # The last round's text with its titles linked, once (spec #44, Stream events).
+        yield _event({"type": "final_response", "content": record.round_texts[-1]})
         message_id = writer.finish()
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used)
     except (asyncio.CancelledError, GeneratorExit):

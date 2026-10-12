@@ -30,6 +30,10 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
+# Relies on: False only for the legacy text-only Qwen tool routers, which
+# reject image parts.
+from src.agent_loop import _allow_visual_tool_evidence_for_model
+from src.prompt_security import untrusted_context_message
 # get_mcp_manager: the process-wide MCP manager, None before startup.
 from src.tool_utils import get_mcp_manager
 
@@ -233,6 +237,9 @@ class ExecutionScope:
     workspace: Optional[str]
     client_runtime_context: Optional[Dict[str, Any]]
     denied_names: frozenset
+    # The open editor document: document tools without an explicit id edit
+    # this one, never the owner's most recent document in another chat.
+    active_document_id: Optional[str] = None
 
 
 @dataclass
@@ -274,6 +281,40 @@ class ToolOutcome:
         return event
 
 
+# Some OpenAI-compatible servers reject a request with more than three images
+# (legacy _append_tool_results, ODYSSEUS_MAX_VISUAL_EVIDENCE_FRAMES default).
+VISUAL_EVIDENCE_MAX_FRAMES = 3
+
+
+def visual_evidence(results: Sequence[Dict[str, Any]], model: str) -> Optional[Dict[str, Any]]:
+    """The first image-bearing result of a round as one user message for the
+    next round, frames evenly spaced; None when there is nothing to show."""
+    if not _allow_visual_tool_evidence_for_model(model):
+        return None
+    for result in results:
+        images = [
+            image for image in result.get("images") or ()
+            if isinstance(image, dict) and isinstance(image.get("data"), str) and image["data"]
+            and str(image.get("mimeType") or image.get("mime_type") or "").startswith("image/")
+        ]
+        if images:
+            break
+    else:
+        return None
+    if len(images) > VISUAL_EVIDENCE_MAX_FRAMES:
+        last = len(images) - 1
+        images = [images[round(i * last / (VISUAL_EVIDENCE_MAX_FRAMES - 1))]
+                  for i in range(VISUAL_EVIDENCE_MAX_FRAMES)]
+    message = untrusted_context_message("tool visual evidence", "Visual evidence returned by tool execution.")
+    message["content"] = [{"type": "text", "text": message["content"]}, *(
+        {"type": "image_url", "image_url": {
+            "url": f"data:{image.get('mimeType') or image.get('mime_type')};base64,{image['data']}",
+        }}
+        for image in images
+    )]
+    return message
+
+
 def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bool) -> ToolOutcome:
     """A call the gate did not run: denied, or failed for unusable arguments."""
     tool, command = (block.tool_type, block.content) if block is not None else (call["name"], call["arguments"])
@@ -306,6 +347,7 @@ async def execute(call_id: str, block: Any, scope: ExecutionScope) -> ToolOutcom
         exact_approval=None,
         client_runtime_context=scope.client_runtime_context,
         request_authority=authority,
+        active_document_id=scope.active_document_id,
     )
     if tool_result_is_successful(result):
         status, exit_code = STATUS_DONE, EXIT_DONE

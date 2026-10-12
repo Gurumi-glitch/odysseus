@@ -21,6 +21,16 @@ from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
 from core.models import ChatMessage
+# Relies on: each takes the answer text and tool events shaped like legacy
+# tool_events ("tool", "output", success per tool_result_is_successful, plus
+# note_id/note_title and calendar "events" when the tool returned them), and
+# returns the text with the matching titles turned into #note-/#email-/#event-
+# links, leaving lines that already hold such a link alone.
+from src.agent_loop import (
+    _linkify_calendar_titles_from_tool_events,
+    _linkify_email_titles_from_tool_events,
+    _linkify_note_titles_from_tool_events,
+)
 from src.attachment_refs import persistable_message_content
 from src.chat_agent import tools
 from src.chat_agent.asks import RESOLVED_EXPIRED
@@ -62,6 +72,9 @@ class TurnRecord:
     # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
     tool_events: List[Dict[str, Any]] = field(default_factory=list)
     stop_reason: Optional[str] = None
+    # Each run call's result fields merged under its tool event: the ids the
+    # final text's note, email and calendar titles link to. Not persisted.
+    link_sources: List[Dict[str, Any]] = field(default_factory=list)
     # Context the route resolved for this turn, projected as save_assistant_response
     # does: character_name, web_sources, rag_sources, memories_used.
     context: Dict[str, Any] = field(default_factory=dict)
@@ -71,10 +84,15 @@ class TurnRecord:
 
     @property
     def round_texts(self) -> List[str]:
-        return [
+        """Each round's text; the last one with its titles linked (what
+        final_response shows). agent_v2 keeps the model's own words."""
+        texts = [
             "".join(block["text"] for block in r["blocks"] if block["type"] == "text")
             for r in self.rounds
         ]
+        if texts:
+            texts[-1] = linkify(texts[-1], self.link_sources)
+        return texts
 
     def agent_v2(self) -> dict:
         return {
@@ -117,6 +135,13 @@ class TurnRecord:
             self.tool_events.append(self.pending_ask)
             self.pending_ask = None
         close_open_calls(self.rounds, self.tool_events, reason, ask_cause, self.model)
+
+
+def linkify(text: str, sources: List[Dict[str, Any]]) -> str:
+    """Link note, email and calendar titles the turn's tools returned."""
+    text = _linkify_note_titles_from_tool_events(text, sources)
+    text = _linkify_email_titles_from_tool_events(text, sources)
+    return _linkify_calendar_titles_from_tool_events(text, sources)
 
 
 def close_open_calls(
