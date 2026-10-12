@@ -124,3 +124,26 @@ async def test_owners_that_casefold_alike_stay_separate_accounts(db):
     assert "strasse's note" not in listed.model_text
     with db() as session:
         assert {n.owner for n in session.query(database.Note)} == {"strasse"}
+
+
+def _sealed_tools(db, name):
+    with db() as session:
+        task = session.query(database.ScheduledTask).filter_by(name=name).one()
+        return {grant["tool"] for grant in json.loads(task.request_authority_json)["authority"]["grants"]}
+
+
+@pytest.mark.asyncio
+async def test_an_approved_task_is_sealed_with_its_prompt_grants_like_a_ui_created_one(db, monkeypatch):
+    monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
+    # Relies on: create_request_authority(prompt) is what a task created from
+    # the UI is sealed with (seal_task_authority with no parent authority).
+    from src.agent_runtime.authority import create_request_authority
+    prompt = "Search the web for AI news"
+    expected = {g.tool for g in create_request_authority(prompt, owner="alice").grants}
+    assert "web_search" in expected
+
+    created = await _call("manage_tasks", {"action": "create", "name": "news", "prompt": prompt,
+                                           "schedule": "daily", "scheduled_time": "08:00"}, _scope(owner="alice"))
+
+    assert created.ok, created.result
+    assert _sealed_tools(db, "news") == expected

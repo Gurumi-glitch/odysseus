@@ -1,20 +1,31 @@
-"""Permission gate of the chat_agent runtime: deny layers, then default posture.
+"""Permission gate of the chat_agent runtime (spec #44, Permissions; ADR 0001, 0002).
 
-Deny layers (spec #44, Permissions) are hard limits user rules can never
-override. Every call they do not deny gets the default posture: ``allow``
-runs, ``ask`` needs the user. Rules, session rules, the protected set, the
-egress gate and auto mode join in later tickets (#62, #68).
+Order: deny layers (hard limits user rules never override), the user's deny
+and ask rules, the sensitive set and the egress gate (asks no allow rule
+lifts), the user's allow rules, then the default posture. A session rule
+("Allow for this chat") lifts any ask and never a deny. Auto mode (#68)
+replaces asks that are not protected.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import glob
+import json
+import logging
+import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 # Relies on: _load_mcp_disabled_map reads every server's disabled_tools from
 # the database on each call, as {server_id: set of server-local tool names}.
 from src.agent_loop import _load_mcp_disabled_map
 from src.chat_agent.routing import ComposerToggles
+from src.chat_agent.store import RULE_LISTS
+# Relies on: _is_email_output_target is the predicate the scheduler routes a
+# task's output_target to email by (email, email:..., or a bare address).
+from src.task_scheduler import TaskScheduler
 # get_mcp_manager: the process-wide MCP manager, None before startup.
 from src.tool_utils import get_mcp_manager
 # Each helper below is relied on as:
@@ -42,6 +53,8 @@ from src.tool_capabilities import (
 # "shell_files" is what legacy denies when can_use_bash is off.
 from src.tool_policy import WEB_ACCESS_TOOL_NAMES, web_search_enabled_for_turn
 from src.turn_contract import FAMILY_TOOLS, canonical_tool
+
+logger = logging.getLogger(__name__)
 
 ALLOW = "allow"
 ASK = "ask"
@@ -175,6 +188,7 @@ def build_deny_layers(
     delegated_credential: bool,
     active_email_open: bool,
     global_disabled_tools: Any,
+    rules: "Rules",
 ) -> DenyLayers:
     hidden = set(blocked_tools_for_owner(owner))
     # Non-admins never see MCP tools (managed deny, #38); built-in email is
@@ -200,6 +214,8 @@ def build_deny_layers(
         disabled |= _NOBODY_DENIED
     if active_email_open:
         disabled |= EMAIL_READER_DENIED
+    # A bare deny rule removes the tool from context; a scoped one is decided per call.
+    disabled |= {rule.tool for rule in rules.deny if rule.kind == ANY}
 
     return DenyLayers(
         hidden=frozenset(hidden),
@@ -234,26 +250,369 @@ def _mcp_server_disabled_reason(name: str) -> Optional[str]:
     return None
 
 
-def decide(layers: DenyLayers, name: str, content: Any) -> Decision:
+# --- Rules: `tool` or `tool(specifier)` (spec #44, Permissions; #25) ---------
+
+ANY = "any"
+PREFIX = "prefix"
+# An exact command for shell tools; for any other tool the whole call, which
+# only "Allow for this chat" saves (the rule syntax cannot spell it).
+EXACT = "exact"
+PATH = "path"
+DOMAIN = "domain"
+ACTION = "action"
+RECIPIENT = "recipient"
+
+_SHELL_TOOLS = frozenset({"bash", "host_shell"})
+_PREFIX_TOOLS = _SHELL_TOOLS | {"python"}
+_PATH_TOOLS = frozenset({"read_file", "write_file", "edit_file"})
+_RECIPIENT_TOOLS = frozenset({"send_email"})
+# The specifier word each scoped kind is written with.
+_KIND_WORDS = {DOMAIN: "domain:", ACTION: "action:", RECIPIENT: "to:"}
+_PREFIX_SUFFIX = ":*"
+# Command substitution and redirection can run or write past an allowed
+# prefix, so a command using them is never covered by a prefix allow.
+_UNSCOPABLE_SHELL = re.compile(r"`|\$\(|<\(|>")
+_SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|&\n]")
+# A deny or ask rule also looks inside substitutions and subshells.
+_SHELL_SEPARATORS_DEEP = re.compile(r"&&|\|\||\$\(|[;|&\n`()<>]")
+_RULE_TEXT = re.compile(r"^([A-Za-z0-9_\-]+)(?:\((.*)\))?$", re.S)
+
+
+@dataclass(frozen=True)
+class Rule:
+    tool: str
+    kind: str = ANY
+    value: str = ""
+
+    @property
+    def text(self) -> str:
+        """The rule as written, also the "Allow for this chat" card label."""
+        if self.kind == ANY:
+            return self.tool
+        if self.kind == PREFIX:
+            return f"{self.tool}({self.value}{_PREFIX_SUFFIX})"
+        if self.kind in _KIND_WORDS:
+            return f"{self.tool}({_KIND_WORDS[self.kind]}{self.value})"
+        if self.kind == EXACT and self.tool not in _PREFIX_TOOLS:
+            return f"this exact {self.tool} call"
+        return f"{self.tool}({self.value})"
+
+    def record(self) -> List[str]:
+        """The store's form: EXACT rules of non-shell tools have no text form."""
+        return [self.tool, self.kind, self.value]
+
+
+def rule_from_record(record: Any) -> Rule:
+    tool, kind, value = record
+    return Rule(str(tool), str(kind), str(value))
+
+
+def parse_rule(text: str) -> Rule:
+    """A rule as written in the Settings editor; ValueError outside the table."""
+    match = _RULE_TEXT.match(str(text or "").strip())
+    if not match:
+        raise ValueError(f"Not a rule: {text!r}. Write tool or tool(specifier).")
+    tool, spec = canonical_tool(match.group(1)), match.group(2)
+    if spec is None:
+        return Rule(tool)
+    spec = spec.strip()
+    if not spec:
+        raise ValueError(f"Empty specifier in {text!r}.")
+    if tool in _PREFIX_TOOLS:
+        prefix = spec[:-len(_PREFIX_SUFFIX)].strip() if spec.endswith(_PREFIX_SUFFIX) else ""
+        return Rule(tool, PREFIX, prefix) if prefix else Rule(tool, EXACT, spec)
+    if tool in _PATH_TOOLS:
+        return Rule(tool, PATH, spec)
+    kind = (DOMAIN if tool == "web_fetch" else ACTION if tool.startswith("manage_")
+            else RECIPIENT if tool in _RECIPIENT_TOOLS else None)
+    if kind is None:
+        raise ValueError(f"{tool} takes no specifier; write the bare name.")
+    word = _KIND_WORDS[kind]
+    value = spec[len(word):].strip() if spec.startswith(word) else ""
+    if not value:
+        raise ValueError(f"{tool} takes {word}<pattern>, not {spec!r}.")
+    # Actions compare as the executor normalizes them; hosts and addresses ignore case.
+    return Rule(tool, kind, value.replace("-", "_").casefold() if kind == ACTION else value.lower())
+
+
+@dataclass(frozen=True)
+class Rules:
+    """The user's persistent rules (Settings editor, #64)."""
+
+    allow: Tuple[Rule, ...] = ()
+    ask: Tuple[Rule, ...] = ()
+    deny: Tuple[Rule, ...] = ()
+
+    @classmethod
+    def from_lists(cls, lists: Mapping[str, Iterable[str]]) -> "Rules":
+        """Rules as the store keeps them; one unreadable entry never voids the rest."""
+        parsed = {}
+        for name in RULE_LISTS:
+            parsed[name] = []
+            for text in lists.get(name) or ():
+                try:
+                    parsed[name].append(parse_rule(text))
+                except ValueError:
+                    logger.warning("chat_agent: ignoring unreadable %s rule %r", name, text)
+        return cls(**{name: tuple(rules) for name, rules in parsed.items()})
+
+
+
+def _args(content: Any) -> dict:
+    try:
+        parsed = json.loads(content) if isinstance(content, str) else content
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _command(tool: str, content: Any) -> str:
+    # bash and python blocks carry the raw text; host_shell blocks carry JSON.
+    return str(_args(content).get("command") or "") if tool == "host_shell" else str(content or "")
+
+
+def _shell_parts(tool: str, command: str, *, deep: bool) -> List[str]:
+    if tool == "python":
+        return [command.strip()] if command.strip() else []
+    separators = _SHELL_SEPARATORS_DEEP if deep else _SHELL_SEPARATORS
+    return [part.strip() for part in separators.split(command) if part.strip()]
+
+
+def _path(content: Any) -> str:
+    args = _args(content)
+    if args:
+        return str(args.get("path") or "")
+    # read_file: a bare path; write_file with a body: "<path>\n<content>".
+    return str(content or "").split("\n", 1)[0].strip()
+
+
+def _hosts(content: Any) -> List[str]:
+    args = _args(content)
+    urls = args.get("urls") if isinstance(args.get("urls"), list) else [args.get("url")]
+    urls = [url.get("url") if isinstance(url, dict) else url for url in urls]
+    return [str(urlsplit(str(url or "")).hostname or "") for url in urls]
+
+
+def _recipients(content: Any) -> List[str]:
+    args = _args(content)
+    found = []
+    for key in ("to", "cc", "bcc"):
+        value = args.get(key) or ""
+        items = value if isinstance(value, list) else str(value).split(",")
+        found += [str(item).strip().lower() for item in items if str(item).strip()]
+    return found
+
+
+def _values(rule: Rule, tool: str, content: Any, *, deep: bool) -> List[str]:
+    """What a scoped rule is matched against in this call."""
+    if rule.kind == PREFIX:
+        command = _command(tool, content)
+        if not deep and tool in _SHELL_TOOLS and _UNSCOPABLE_SHELL.search(command):
+            return []
+        return _shell_parts(tool, command, deep=deep)
+    if rule.kind == EXACT:
+        return [_command(tool, content) if tool in _PREFIX_TOOLS else str(content or "")]
+    if rule.kind == PATH:
+        return [_path(content)]
+    if rule.kind == DOMAIN:
+        return _hosts(content)
+    if rule.kind == ACTION:
+        return [_action_from_content(tool, content) or ""]
+    if rule.kind == RECIPIENT:
+        return _recipients(content)
+    return []
+
+
+def _value_matches(rule: Rule, value: str) -> bool:
+    if rule.kind == PREFIX:
+        # "git" covers "git log" and "git", never "gitk".
+        return re.match(re.escape(rule.value) + r"(?![\w.\-])", value) is not None
+    if rule.kind == EXACT:
+        return value.strip() == rule.value.strip()
+    return bool(value) and fnmatch.fnmatchcase(value, rule.value)
+
+
+def _matches(rule: Rule, name: str, content: Any, *, every: bool) -> bool:
+    """``every``: an allow covers a call only when every part matches; a deny
+    or ask hits when any part does."""
+    tool = canonical_tool(name)
+    if rule.tool != tool:
+        return False
+    if rule.kind == ANY:
+        return True
+    values = _values(rule, tool, content, deep=not every)
+    if not values:
+        return False
+    hits = [_value_matches(rule, value) for value in values]
+    return all(hits) if every else any(hits)
+
+
+def rule_covers(rule: Rule, name: str, content: Any) -> bool:
+    """Whether an allow rule (or a session rule) admits this call."""
+    return _matches(rule, name, content, every=True)
+
+
+def session_rule(name: str, content: Any) -> Rule:
+    """The rule "Allow for this chat" saves for this call: its narrowest scope."""
+    tool = canonical_tool(name)
+    candidate = None
+    if tool in _SHELL_TOOLS:
+        firsts = {part.split()[0] for part in _shell_parts(tool, _command(tool, content), deep=False)}
+        if len(firsts) == 1:
+            candidate = Rule(tool, PREFIX, firsts.pop())
+    elif tool in _PATH_TOOLS and _path(content):
+        candidate = Rule(tool, PATH, glob.escape(_path(content)))
+    elif tool == "web_fetch" and len(set(_hosts(content))) == 1:
+        candidate = Rule(tool, DOMAIN, glob.escape(_hosts(content)[0]))
+    elif tool.startswith("manage_") and _action_from_content(tool, content):
+        candidate = Rule(tool, ACTION, _action_from_content(tool, content))
+    elif tool in _RECIPIENT_TOOLS and len(_recipients(content)) == 1:
+        candidate = Rule(tool, RECIPIENT, glob.escape(_recipients(content)[0]))
+    elif tool.startswith(_MCP_PREFIX):
+        candidate = Rule(tool)
+    if candidate is not None and rule_covers(candidate, tool, content):
+        return candidate
+    return Rule(tool, EXACT, _command(tool, content) if tool in _PREFIX_TOOLS else str(content or ""))
+
+
+# --- Sensitive and protected sets --------------------------------------------
+
+# Always ask, whatever the allow rules say (spec #44, Sensitive).
+_SENSITIVE_TOOLS = frozenset({
+    "send_email", "reply_to_email", "bulk_email", "delete_email", "unsubscribe_email",
+    "block_sender", "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
+    "manage_tokens", "vault_unlock", "vault_get",
+})
+# Ask even in auto mode (spec #44, Protected).
+_PROTECTED_TOOLS = frozenset({
+    "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
+    "vault_unlock", "vault_get", "bulk_email",
+})
+_RAW_API_TOOLS = frozenset({"app_api", "api_call"})
+_READ_METHOD = "GET"
+# Task triggers that fire from outside the user's session (#40).
+_WEBHOOK_TRIGGER = "webhook"
+_EMAIL_TRIGGER_EVENT = "email_received"
+_MCP_PREFIX = "mcp__"
+
+
+def _raw_api_writes(tool: str, content: Any) -> bool:
+    """A non-GET app_api / api_call; arguments it cannot read count as a write."""
+    raw = str(content or "").strip()
+    args = _args(raw)
+    if not args:
+        if tool == "api_call" and not raw.startswith("{"):
+            # The executor's line form: "integration\nMETHOD path\nbody".
+            words = (raw.split("\n") + [""])[1].split()
+            return bool(words) and words[0].upper() != _READ_METHOD
+        return bool(raw) and raw != "{}"
+    if tool == "app_api" and str(args.get("action") or "call").lower() == "endpoints":
+        return False
+    return str(args.get("method") or _READ_METHOD).strip().upper() != _READ_METHOD
+
+
+def is_sensitive(name: str, content: Any) -> bool:
+    tool = canonical_tool(name)
+    if tool in _SENSITIVE_TOOLS:
+        return True
+    capabilities = capabilities_for_action(tool, content)
+    # Unknown tools (custom MCP) fail high on effects but stay rule-governed.
+    if capabilities.known and ToolEffect.DESTRUCTIVE in capabilities.effects:
+        return True
+    if tool == "manage_tasks" and _action_from_content(tool, content) in _TASK_ACTIONS_THAT_ASK:
+        return True
+    if tool == "ui_control" and _ui_control_loosens(content):
+        return True
+    return tool in _RAW_API_TOOLS and _raw_api_writes(tool, content)
+
+
+def is_protected(name: str, content: Any) -> bool:
+    """Actions auto mode never answers for the user (#68)."""
+    tool = canonical_tool(name)
+    if tool in _PROTECTED_TOOLS:
+        return True
+    if tool in _RAW_API_TOOLS:
+        return _raw_api_writes(tool, content)
+    if tool != "manage_tasks" or _action_from_content(tool, content) not in _TASK_ACTIONS_THAT_ASK:
+        return False
+    args = _args(content)
+    target = str(args.get("output_target") or "").strip()
+    return bool(
+        (target and TaskScheduler._is_email_output_target(target))
+        or target.startswith(_MCP_PREFIX)
+        or str(args.get("trigger_type") or "").strip() == _WEBHOOK_TRIGGER
+        or str(args.get("trigger_event") or "").strip() == _EMAIL_TRIGGER_EVENT
+    )
+
+
+# --- Egress gate (ADR 0002) ---------------------------------------------------
+
+# The runtime's own source table (#38). Email reads are both legs: a message
+# body is attacker-writable content and the user's private data.
+_EMAIL_READS = frozenset({"list_emails", "read_email", "search_emails"})
+_EXTERNAL_SOURCES = (
+    WEB_ACCESS_TOOL_NAMES | _EMAIL_READS
+    | {"pdf_extract", "trigger_research", "manage_research", "manage_bg_jobs"}
+)
+_PRIVATE_SOURCES = _EMAIL_READS | {"search_chats", "vault_get", "vault_search"}
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """What this turn has taken in: external content, a private-data read."""
+
+    external: bool = False
+    private: bool = False
+
+    def after(self, name: str) -> "Provenance":
+        """The provenance once a call to ``name`` has run."""
+        tool = canonical_tool(name)
+        return Provenance(
+            external=self.external or tool in _EXTERNAL_SOURCES or tool.startswith(_MCP_PREFIX),
+            private=self.private or tool in _PRIVATE_SOURCES,
+        )
+
+
+def _egress(name: str, content: Any) -> bool:
+    return ToolEffect.NETWORK_EGRESS in capabilities_for_action(canonical_tool(name), content).effects
+
+
+# --- The gate ------------------------------------------------------------------
+
+
+def decide(
+    layers: DenyLayers,
+    name: str,
+    content: Any,
+    *,
+    rules: Rules = Rules(),
+    session: Iterable[Rule] = (),
+    provenance: Provenance = Provenance(),
+) -> Decision:
     reason = layers.deny_reason(name, content) or _mcp_server_disabled_reason(name)
     if reason:
         return Decision(DENY, reason)
-    if posture(name, content) == ASK:
+    for rule in rules.deny:
+        if _matches(rule, name, content, every=False):
+            return Decision(DENY, f"Denied by the user's permission rule {rule.text}.")
+    asks = (
+        any(_matches(rule, name, content, every=False) for rule in rules.ask)
+        or is_sensitive(name, content)
+        or (provenance.external and provenance.private and _egress(name, content))
+        or (posture(name, content) == ASK
+            and not any(rule_covers(rule, name, content) for rule in rules.allow))
+    )
+    if asks and not any(rule_covers(rule, name, content) for rule in session):
         return Decision(ASK)
     return Decision(ALLOW)
 
 
 def posture(name: str, content: Any) -> str:
+    """The default for a call no rule decides."""
     tool = canonical_tool(name)
-    capabilities = capabilities_for_action(tool, content)
-    if ToolEffect.DESTRUCTIVE in capabilities.effects:
+    if is_sensitive(tool, content):
         return ASK
-    if tool == "manage_tasks" and _action_from_content(tool, content) in _TASK_ACTIONS_THAT_ASK:
-        return ASK
-    if tool == "ui_control" and _ui_control_loosens(content):
-        return ASK
-    return POSTURE.get(tool) or _derived_posture(capabilities.effects)
-
+    return POSTURE.get(tool) or _derived_posture(capabilities_for_action(tool, content).effects)
 
 def _derived_posture(effects) -> str:
     return ALLOW if effects <= _ALLOWED_EFFECTS else ASK

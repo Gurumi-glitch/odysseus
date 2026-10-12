@@ -1,8 +1,10 @@
 """Per-user store of the chat_agent runtime: one JSON file per user.
 
 The file lives at ``CHAT_AGENT_DIR/<percent-encoded lowercased user>.json``.
-It holds the runtime switch (``chat_runtime``) and the user-level
-instructions toggle (``instructions_enabled``). The user's instruction files
+It holds the runtime switch (``chat_runtime``), the user-level
+instructions toggle (``instructions_enabled``), the user's permission rules
+(``rules``: allow/ask/deny lists of rule text) and the session rules "Allow
+for this chat" saved (``session_rules``: chat id -> rule records). The user's instruction files
 live in ``INSTRUCTIONS_DIR/<same encoded name>/``. User rename and delete move
 or remove both (``rename_owner`` / ``delete_owner``).
 """
@@ -26,6 +28,9 @@ logger = logging.getLogger(__name__)
 RUNTIME_LEGACY = "legacy"
 RUNTIME_NEW = "new"
 CHAT_RUNTIME_VALUES = frozenset({RUNTIME_LEGACY, RUNTIME_NEW})
+RULE_LISTS = ("allow", "ask", "deny")
+# A session rule record: [tool, kind, value] (permissions.Rule.record).
+SESSION_RULE_FIELDS = 3
 
 
 # The Settings Instructions panel edits this file; CLAUDE.md beside it loads too.
@@ -75,7 +80,42 @@ def set_chat_runtime(owner: str, value: str) -> None:
     if value not in CHAT_RUNTIME_VALUES:
         raise ValueError(f"chat_runtime must be one of {sorted(CHAT_RUNTIME_VALUES)}")
     data = load(owner)
+    if data.get("chat_runtime") != value:
+        # A chat that moves between runtimes starts with no grants (#35).
+        data.pop("session_rules", None)
     data["chat_runtime"] = value
+    atomic_write_json(store_path(owner), data, indent=2)
+
+
+def user_rules(owner: str) -> dict:
+    """The user's rules as written: {"allow": [...], "ask": [...], "deny": [...]}."""
+    rules = load(owner).get("rules")
+    rules = rules if isinstance(rules, dict) else {}
+    return {name: [str(text) for text in rules.get(name) or () if isinstance(text, str)]
+            for name in RULE_LISTS}
+
+
+def set_user_rules(owner: str, rules: dict) -> None:
+    """Replace the user's rules; the caller has validated every entry."""
+    data = load(owner)
+    data["rules"] = {name: list(rules.get(name) or ()) for name in RULE_LISTS}
+    atomic_write_json(store_path(owner), data, indent=2)
+
+
+def session_rules(owner: str, session_id: str) -> list:
+    """The rule records "Allow for this chat" saved in this chat."""
+    by_chat = load(owner).get("session_rules")
+    records = by_chat.get(session_id) if isinstance(by_chat, dict) else None
+    return [r for r in records or () if isinstance(r, list) and len(r) == SESSION_RULE_FIELDS]
+
+
+def add_session_rule(owner: str, session_id: str, record: list) -> None:
+    data = load(owner)
+    by_chat = data.get("session_rules") if isinstance(data.get("session_rules"), dict) else {}
+    records = by_chat.setdefault(session_id, [])
+    if record not in records:
+        records.append(record)
+    data["session_rules"] = by_chat
     atomic_write_json(store_path(owner), data, indent=2)
 
 

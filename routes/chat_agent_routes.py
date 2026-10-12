@@ -8,7 +8,7 @@ from core.atomic_io import atomic_write_text
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import require_user
-from src.chat_agent import store
+from src.chat_agent import permissions, store
 from src.owner_identity import auth_disabled
 
 
@@ -72,6 +72,30 @@ def setup_chat_agent_routes() -> APIRouter:
         if "enabled" in body:
             store.set_instructions_enabled(user, bool(body["enabled"]))
         return _instructions(user)
+
+    @router.get("/rules")
+    async def get_rules(request: Request) -> dict:
+        if auth_disabled():
+            return {"available": False}
+        return {"available": True, "rules": store.user_rules(require_user(request))}
+
+    @router.put("/rules")
+    async def put_rules(request: Request, body: dict) -> dict:
+        user = require_interactive_user(request)
+        rules = body.get("rules")
+        if not isinstance(rules, dict) or set(rules) - set(store.RULE_LISTS):
+            raise HTTPException(400, f"rules must be an object with lists {', '.join(store.RULE_LISTS)}.")
+        written = {}
+        for name in store.RULE_LISTS:
+            texts = rules.get(name) or []
+            if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+                raise HTTPException(400, f"rules.{name} must be a list of rule strings.")
+            try:
+                written[name] = list(dict.fromkeys(permissions.parse_rule(text).text for text in texts))
+            except ValueError as exc:
+                raise HTTPException(400, f"rules.{name}: {exc}") from exc
+        store.set_user_rules(user, written)
+        return {"available": True, "rules": store.user_rules(user)}
 
     return router
 
