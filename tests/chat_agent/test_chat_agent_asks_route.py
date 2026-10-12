@@ -169,7 +169,7 @@ async def test_deny_gives_the_model_a_denial_with_the_reason_and_the_turn_contin
 
 
 @pytest.mark.asyncio
-async def test_allow_for_this_chat_covers_the_command_prefix_in_this_chat_only(
+async def test_allow_for_this_chat_allows_the_whole_shell_tool_in_this_chat_only(
     harness, admin, executor, workspace,
 ):
     harness.provider_rounds = [
@@ -186,11 +186,12 @@ async def test_allow_for_this_chat_covers_the_command_prefix_in_this_chat_only(
         harness, _Request("agent", allow_bash="true", workspace=workspace), on_ask,
     )
 
-    # "ls -la" rides the bash(ls:*) rule; a compound with another command asks again.
-    assert asked == ["ls", "ls; rm -rf /tmp/x"]
-    assert "bash(ls:*)" in _events(body, "ask_user")[0]["data"]["options"][1]["description"]
-    assert executor == ["ls", "ls -la"]
-    assert store.session_rules("alice", "session-1") == [permissions.Rule("bash", "prefix", "ls").record()]
+    # Shell specifiers are not supported yet: the answer allows bash as a whole.
+    assert asked == ["ls"]
+    assert (_events(body, "ask_user")[0]["data"]["options"][1]["description"]
+            == "Run it and allow bash for the rest of this chat.")
+    assert executor == ["ls", "ls -la", "ls; rm -rf /tmp/x"]
+    assert store.session_rules("alice", "session-1") == [permissions.Rule("bash").record()]
     assert store.session_rules("alice", "session-2") == []
     assert store.session_rules("bob", "session-1") == []
 

@@ -41,24 +41,10 @@ def _email(to, **extra):
 
 
 @pytest.mark.parametrize(("rule", "name", "content", "matches"), [
-    # bash / python: command prefix; every part of a compound must match.
-    ("bash(git:*)", "bash", "git status", True),
-    ("bash(git:*)", "bash", "git status && git diff", True),
-    ("bash(git:*)", "bash", "git status; rm -rf ~", False),
-    ("bash(git:*)", "bash", "git log | sh", False),
-    ("bash(git:*)", "bash", "git log $(rm -rf ~)", False),
-    ("bash(git:*)", "bash", "git log `id`", False),
-    ("bash(git:*)", "bash", "git log > ~/.bashrc", False),
-    ("bash(git:*)", "bash", "gitk", False),
-    ("bash(npm run:*)", "bash", "npm run test", True),
-    ("bash(npm run:*)", "bash", "npm install", False),
-    ("bash(npm test)", "bash", "npm test", True),
-    ("bash(npm test)", "bash", "npm test --watch", False),
-    ("bash", "bash", "anything at all", True),
-    # Code is not a command line: a python prefix never allows anything.
-    ("python(print:*)", "python", "print(1)", False),
-    ("python(print(1))", "python", "print(1)", True),
-    ("host_shell(docker:*)", "host_shell", json.dumps({"command": "docker ps"}), True),
+    # Shell tools: the bare name covers the whole tool.
+    ("bash", "bash", "git status; rm -rf ~", True),
+    ("python", "python", "print(1)", True),
+    ("host_shell", "host_shell", json.dumps({"command": "docker ps"}), True),
     # file tools: path glob.
     ("write_file(notes/*.md)", "write_file", "notes/a.md\nhello", True),
     ("write_file(notes/*.md)", "write_file", "src/a.py\nhello", False),
@@ -87,6 +73,8 @@ def test_allow_rule_matching(rule, name, content, matches):
 @pytest.mark.parametrize("text", [
     "", "bash(", "bash()", "(git:*)", "web_search(domain:x.com)", "manage_notes(delete)",
     "web_fetch(example.com)", "send_email(mom@example.com)",
+    # Shell command specifiers are not supported yet (2026-10-13).
+    "bash(git:*)", "bash(npm test)", "python(print(1))", "host_shell(docker:*)",
 ])
 def test_rules_outside_the_specifier_table_are_rejected(text):
     with pytest.raises(ValueError):
@@ -94,21 +82,25 @@ def test_rules_outside_the_specifier_table_are_rejected(text):
 
 
 def test_deny_beats_ask_beats_allow():
-    assert _decide("bash", "git push", allow=["bash(git:*)"], deny=["bash(git push)"]) == DENY
-    assert _decide("bash", "git push", allow=["bash(git:*)"], ask=["bash(git push:*)"]) == ASK
-    assert _decide("bash", "git status", allow=["bash(git:*)"], ask=["bash(git push:*)"]) == ALLOW
+    delete = json.dumps({"action": "delete", "id": "1"})
+    add = json.dumps({"action": "add", "title": "x"})
+    assert _decide("bash", "git push", allow=["bash"], deny=["bash"]) == DENY
+    assert _decide("bash", "git push", allow=["bash"], ask=["bash"]) == ASK
+    assert _decide("bash", "git push", allow=["bash"]) == ALLOW
+    assert _decide("manage_notes", add, allow=["manage_notes"], ask=["manage_notes(action:delete)"]) == ALLOW
+    assert _decide("manage_notes", delete, deny=["manage_notes(action:delete)"]) == DENY
 
 
-def test_a_deny_rule_hits_any_part_of_a_compound_command():
-    assert _decide("bash", "ls && rm -rf build", allow=["bash"], deny=["bash(rm:*)"]) == DENY
-    assert _decide("bash", "echo $(rm -rf build)", allow=["bash"], deny=["bash(rm:*)"]) == DENY
+def test_a_shell_tool_asks_by_default():
+    assert _decide("bash", "ls") == ASK
+    assert _decide("python", "print(1)") == ASK
 
 
 def test_a_bare_deny_removes_the_tool_from_context():
-    rules = Rules.from_lists({"deny": ["web_fetch", "bash(rm:*)"]})
+    rules = Rules.from_lists({"deny": ["bash", "read_file(secrets/*)"]})
     layers = _layers(rules)
-    assert "web_fetch" in layers.denied_names
-    assert "bash" not in layers.denied_names
+    assert "bash" in layers.denied_names
+    assert "read_file" not in layers.denied_names
 
 
 def test_ask_rule_turns_a_default_allow_into_an_ask():
@@ -139,9 +131,9 @@ def test_app_api_reads_follow_the_rules():
 
 
 def test_a_session_rule_lifts_an_ask_but_never_a_deny():
-    assert _decide("bash", "ls -la", session=["bash(ls:*)"]) == ALLOW
+    assert _decide("bash", "ls -la", session=["bash"]) == ALLOW
     assert _decide("send_email", _email("mom@example.com"), session=["send_email(to:mom@example.com)"]) == ALLOW
-    assert _decide("bash", "ls", session=["bash(ls:*)"], deny=["bash(ls:*)"]) == DENY
+    assert _decide("bash", "ls", session=["bash"], deny=["bash"]) == DENY
 
 
 @pytest.mark.parametrize(("name", "content", "protected"), [
@@ -206,12 +198,10 @@ def test_neither_an_allow_rule_nor_a_session_rule_opens_the_egress_gate():
 
 
 @pytest.mark.parametrize(("name", "content", "label"), [
-    ("bash", "git status", "bash(git:*)"),
-    ("bash", "git status && git diff", "bash(git:*)"),
-    ("bash", "ls | grep x", "bash(ls | grep x)"),
-    ("bash", "git log > out.txt", "bash(git log > out.txt)"),
-    ("host_shell", json.dumps({"command": "docker ps"}), "host_shell(docker:*)"),
-    ("python", "print(1)", "python(print(1))"),
+    # Shell tools: "Allow for this chat" allows the whole tool in this chat.
+    ("bash", "git status && rm -rf build", "bash"),
+    ("host_shell", json.dumps({"command": "docker ps"}), "host_shell"),
+    ("python", "print(1)", "python"),
     ("write_file", "notes/a.md\nhello", "write_file(notes/a.md)"),
     ("write_file", "notes/[a].md\nhello", "write_file(notes/[[]a].md)"),
     ("manage_notes", json.dumps({"action": "delete", "id": "1"}), "manage_notes(action:delete)"),
