@@ -105,6 +105,7 @@ CHAT_AGENT_DIR = os.path.join(DATA_DIR, "chat_agent")
 # Per-user instruction files (AGENTS.md / CLAUDE.md) of the chat_agent runtime,
 # one folder per user; the Settings Instructions panel and the host edit the same file.
 INSTRUCTIONS_DIR = os.path.join(DATA_DIR, "instructions")
+INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md")
 # Characters loaded from one instruction file; the rest is cut and marked.
 INSTRUCTION_FILE_MAX_CHARS = 12_000
 

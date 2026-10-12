@@ -24,6 +24,7 @@ import httpx
 from sqlalchemy.exc import SQLAlchemyError
 
 from core import database
+from src import constants
 
 # Relies on: _load_mcp_disabled_map reads every server's disabled_tools from
 # the database on each call, as {server_id: set of server-local tool names}.
@@ -292,6 +293,7 @@ RECIPIENT = "recipient"
 # README "Not decided yet"): these tools take the bare name only.
 _SHELL_TOOLS = frozenset({"bash", "host_shell", "python"})
 _PATH_TOOLS = frozenset({"read_file", "write_file", "edit_file"})
+_WRITE_PATH_TOOLS = _PATH_TOOLS - {"read_file"}
 _RECIPIENT_TOOLS = frozenset({"send_email"})
 # The specifier word each scoped kind is written with.
 _KIND_WORDS = {DOMAIN: "domain:", ACTION: "action:", RECIPIENT: "to:"}
@@ -588,6 +590,21 @@ _MCP_PREFIX = "mcp__"
 _STORED_TASK_ACTIONS = frozenset({"edit", "resume", "run"})
 
 
+_INSTRUCTION_NAMES = frozenset(name.casefold() for name in constants.INSTRUCTION_FILENAMES)
+
+
+def _writes_instruction_file(tool: str, content: Any, workspace: Optional[str]) -> bool:
+    """A write the next prompt and classifier would trust as the user's own
+    instructions; one whose target the matcher cannot place counts."""
+    if tool == "apply_patch":
+        text = str(content or "").casefold()
+        return any(name in text for name in _INSTRUCTION_NAMES)
+    if tool not in _WRITE_PATH_TOOLS:
+        return False
+    views = _path_views(_path(content), workspace)
+    return views is None or any(posixpath.basename(view).casefold() in _INSTRUCTION_NAMES for view in views)
+
+
 def _raw_api_writes(tool: str, content: Any) -> bool:
     """A non-GET app_api / api_call; arguments it cannot read count as a write."""
     raw = str(content or "").strip()
@@ -687,11 +704,12 @@ def _task_delivery_protected(fields: Mapping[str, Any]) -> bool:
     )
 
 
-def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> bool:
+def is_protected(name: str, content: Any, *, owner: Optional[str] = None,
+                 workspace: Optional[str] = None) -> bool:
     """Actions auto mode never answers for the user (#68). A task edit, resume
     or run whose stored task cannot be read counts as protected."""
     tool = policy_name(name).casefold()
-    if tool in _PROTECTED_TOOLS:
+    if tool in _PROTECTED_TOOLS or _writes_instruction_file(tool, content, workspace):
         return True
     if tool in _RAW_API_TOOLS:
         return _raw_api_writes(tool, content)
@@ -710,8 +728,11 @@ def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> boo
 # --- Egress gate (ADR 0002) ---------------------------------------------------
 
 # The runtime's own source table (#38). Email reads are both legs: a message
-# body is attacker-writable content and the user's private data.
-_EMAIL_READS = frozenset({"list_emails", "read_email", "search_emails"})
+# body is attacker-writable content and the user's private data. The scans
+# return senders and subjects, which are both too.
+_EMAIL_READS = frozenset({
+    "list_emails", "read_email", "search_emails", "scan_spam", "scan_email_unsubscribes",
+})
 _EXTERNAL_SOURCES = (
     WEB_ACCESS_TOOL_NAMES | _EMAIL_READS
     | {"pdf_extract", "trigger_research", "manage_research", "manage_bg_jobs"}
@@ -767,7 +788,49 @@ class Provenance:
 
 
 def _egress(name: str, content: Any) -> bool:
-    return ToolEffect.NETWORK_EGRESS in capabilities_for_action(canonical_tool(name), content).effects
+    tool = canonical_tool(name)
+    effects = capabilities_for_action(tool, content).effects
+    if ToolEffect.NETWORK_EGRESS in effects:
+        return True
+    # The shared registry leaves these readers off NETWORK_EGRESS, which the
+    # legacy preflight blocks; here each one is read from the call it runs.
+    if tool == "pdf_extract":
+        # Relies on: capabilities_for_action picks pdf_extract's source the way
+        # the tool does and drops the network read only when it is local.
+        return ToolEffect.BROKERED_NETWORK_READ in effects
+    if tool == "youtube_tool":
+        return _youtube_fetches_elsewhere(content)
+    return False
+
+
+_YOUTUBE_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be",
+})
+# Every argument YouTubeTool reads a target from.
+_YOUTUBE_TARGET_KEYS = ("url", "video_url", "video_id", "channel_url", "handle")
+
+
+def _youtube_fetches_elsewhere(content: Any) -> bool:
+    """A target URL off YouTube: the channel actions hand it to yt-dlp as is."""
+    raw = str(content or "").strip()
+    try:
+        args = json.loads(raw)
+    except ValueError:
+        # YouTubeTool._parse_args reads non-JSON text as the url.
+        args = {"url": raw}
+    if not isinstance(args, dict):
+        return False
+    for key in _YOUTUBE_TARGET_KEYS:
+        target = str(args.get(key) or "").strip()
+        if not target.casefold().startswith(("http://", "https://")):
+            continue
+        try:
+            host = (httpx.URL(target).host or "").lower().rstrip(".")
+        except (httpx.InvalidURL, ValueError):
+            return True
+        if host not in _YOUTUBE_HOSTS:
+            return True
+    return False
 
 
 # --- The gate ------------------------------------------------------------------
@@ -801,7 +864,7 @@ def decide(
     user_only = (
         UNSURE in deny
         or any(_match(rule, name, content, allow=False, workspace=workspace) != MISS for rule in rules.ask)
-        or is_protected(name, content, owner=owner)
+        or is_protected(name, content, owner=owner, workspace=workspace)
         # A task's grants come from its prompt and it runs unattended later,
         # so each one needs the user's own answer.
         or (policy_name(name) == "manage_tasks"

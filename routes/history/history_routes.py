@@ -730,6 +730,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             meta1 = (msg1.metadata if isinstance(msg1, ChatMessage) else msg1.get('metadata')) or {}
             meta2 = (msg2.metadata if isinstance(msg2, ChatMessage) else msg2.get('metadata')) or {}
             merged_meta = {**meta1, **meta2}
+            # Both rows' calls stay in context; the egress gate reads them here.
+            tool_events = [*(meta1.get('tool_events') or []), *(meta2.get('tool_events') or [])]
+            if tool_events:
+                merged_meta['tool_events'] = tool_events
             thinking1 = str(meta1.get('thinking') or '').strip()
             thinking2 = str(meta2.get('thinking') or '').strip()
             if thinking1 and thinking2:

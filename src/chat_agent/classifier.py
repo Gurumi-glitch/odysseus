@@ -51,6 +51,11 @@ UNAVAILABLE = "unavailable"
 DENIED_BY = "auto_mode"
 DENIAL_PREFIX = "Denied by auto mode: "
 
+# Characters (as JSON) of earlier user messages, and again of earlier
+# actions, the classifier sees; older entries drop first. About 6k tokens
+# each, so a long chat still fits a small classifier model's window.
+HISTORY_BUDGET_CHARS = 24_000
+
 # The legacy non-streaming call bound: a verdict slower than this raises the ask.
 TIMEOUT_SECONDS = LLMConfig.DEFAULT_TIMEOUT
 # A judgment, not prose: the same input should get the same verdict.
@@ -198,6 +203,18 @@ def _changing_payloads(tool_events: Iterable[Mapping[str, Any]]) -> List[Dict[st
     return payloads
 
 
+def _most_recent(entries: List[Any], budget: int) -> List[Any]:
+    """The newest entries whose JSON fits the budget together."""
+    kept: List[Any] = []
+    used = 0
+    for entry in reversed(entries):
+        used += len(json.dumps(entry)) + len(", ")
+        if used > budget:
+            break
+        kept.append(entry)
+    return kept[::-1]
+
+
 def classifier_endpoint(owner: str, privileges: Mapping[str, Any]) -> Optional[Endpoint]:
     """The model Settings picked for the classifier, when this user may use it;
     None means the chat's own model judges."""
@@ -224,7 +241,7 @@ class AutoMode:
     def __init__(
         self, *, state: str, owner: str = "", session_id: str = "", endpoint: Optional[Endpoint] = None,
         user_messages: List[str] = (), history_events: List[Dict[str, Any]] = (),
-        workspace: Optional[str] = None, incognito: bool = False,
+        instruction_files: List[prompt.InstructionFile] = (),
     ) -> None:
         self.state = state
         self.owner = owner
@@ -232,25 +249,27 @@ class AutoMode:
         self.endpoint = endpoint
         self.user_messages = list(user_messages)
         self.history_events = list(history_events)
-        self.workspace = workspace
-        self.incognito = incognito
+        self.instruction_files = list(instruction_files)
 
     @classmethod
-    def for_turn(cls, turn: Any) -> "AutoMode":
-        """Read before the context builder saves this turn's user row, so the
-        current message is counted once (from ``turn.message``)."""
+    def for_turn(cls, turn: Any, history: Iterable[Any]) -> "AutoMode":
+        """``history``: the rows the turn replays, read before the context
+        builder saves this turn's user row, so the current message is counted
+        once (from ``turn.message``)."""
         if not turn.auto_mode:
             return cls(state=OFF)
         # The model cannot set it; a turn nobody can answer runs without it.
         if not turn.interactive or not turn.privileges.get("can_use_auto_mode", True):
             return cls(state=UNAVAILABLE)
-        history = list(getattr(turn.sess, "history", None) or ())
+        history = list(history)
         mode = cls(
             state=ACTIVE, owner=turn.owner, session_id=turn.session_id,
             endpoint=classifier_endpoint(turn.owner, turn.privileges),
             user_messages=[*real_user_messages(history), turn.message],
             history_events=_tool_events(history),
-            workspace=turn.toggles.workspace, incognito=turn.toggles.incognito,
+            # Read once: the agent can write these files mid-turn (security pass).
+            instruction_files=[] if turn.toggles.incognito else prompt.instruction_files(
+                turn.owner, turn.toggles.workspace),
         )
         if paused_in(turn.owner, turn.session_id):
             mode.state = PAUSED
@@ -315,11 +334,12 @@ class AutoMode:
         tool_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         said = "\n".join(self.user_messages).casefold()
-        files = [] if self.incognito else prompt.instruction_files(self.owner, self.workspace)
+        *earlier, current = self.user_messages
         return {
-            "user_messages": self.user_messages,
-            "instruction_files": [{"path": f.path, "text": f.text} for f in files],
-            "earlier_actions": _changing_payloads([*self.history_events, *tool_events]),
+            "user_messages": [*_most_recent(earlier, HISTORY_BUDGET_CHARS), current],
+            "instruction_files": [{"path": f.path, "text": f.text} for f in self.instruction_files],
+            "earlier_actions": _most_recent(
+                _changing_payloads([*self.history_events, *tool_events]), HISTORY_BUDGET_CHARS),
             "provenance": {
                 "external_content_in_context": provenance.external,
                 "external_content_from": list(provenance.origins),

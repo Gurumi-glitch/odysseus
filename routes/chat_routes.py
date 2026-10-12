@@ -2494,6 +2494,9 @@ def setup_chat_routes(
         # marks a turn nobody can answer an ask in. Read from the form only:
         # a JSON body never sets the mode, so it never reaches the runtime.
         interactive = str(form_data.get("interactive", "")).lower() != "false"
+        # interaction_mode on the user row tells the auto-mode classifier the
+        # user typed it; a programmatic or API-token message is not their words.
+        typed_by_user = interactive and not is_delegated_credential(request)
         client_runtime_context = None
         raw_client_runtime_context = (
             form_data.get("client_runtime_context")
@@ -3071,7 +3074,7 @@ def setup_chat_routes(
                     no_memory=no_memory,
                     webhook_manager=webhook_manager,
                     use_enhanced_message=True,
-                    interaction_mode="agent",
+                    interaction_mode="agent" if typed_by_user else None,
                     auto_escalated=auto_escalated,
                     # Continue after a capped turn (spec #44 Transcript); no
                     # other client value reaches the row.
@@ -3080,7 +3083,7 @@ def setup_chat_routes(
                 privileges=_request_privileges(request, owner),
                 delegated_credential=is_delegated_credential(request),
                 # An API-token caller has no browser to answer an ask either.
-                interactive=interactive and not is_delegated_credential(request),
+                interactive=typed_by_user,
                 active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
                 active_email=active_email_ctx,
                 active_document_id=active_doc_id,
@@ -3201,7 +3204,7 @@ def setup_chat_routes(
             ),
             persist_user_message=not tool_approval_continuation and not is_internal_tool_request(request),
             context_resolution=_compact_context_resolution,
-            interaction_mode=chat_mode,
+            interaction_mode=chat_mode if typed_by_user else None,
             auto_escalated=auto_escalated,
         )
         if is_internal_tool_request(request):
