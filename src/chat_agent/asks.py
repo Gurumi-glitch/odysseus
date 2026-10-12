@@ -215,5 +215,9 @@ def resolution_event(card: dict, reply: Optional[Answer]) -> dict:
 
 
 def resolved_card(card: dict, reply: Optional[Answer]) -> dict:
-    """The card as stored on its tool event, so history renders it read-only."""
-    return {**card, "resolved": reply.decision if reply else RESOLVED_EXPIRED}
+    """The card as stored on its tool event, so history renders it read-only.
+    It keeps the reply's text under the same key the live event uses."""
+    stored = {**card, "resolved": reply.decision if reply else RESOLVED_EXPIRED}
+    if reply and reply.text:
+        stored["reason"] = reply.text
+    return stored
