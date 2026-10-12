@@ -151,6 +151,21 @@ def test_teacher_draft_awaits_the_audit_outside_the_index(env):
     assert _list_states(sm)[name] == "awaiting_audit"
 
 
+def test_agent_draft_awaits_the_audit_like_a_teacher_draft(env):
+    sm, _prefs = env
+    # What manage_skills create writes: a draft the agent learned.
+    name = _add(sm, source="learned")
+
+    assert _list_states(sm)[name] == "awaiting_audit"
+
+
+def test_user_draft_stays_a_draft(env):
+    sm, _prefs = env
+    name = _add(sm, source="user")
+
+    assert _list_states(sm)[name] == "draft"
+
+
 def test_internal_tool_cannot_publish_from_the_skills_route(env):
     sm, _prefs = env
     name = _add(sm)

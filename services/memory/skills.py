@@ -138,13 +138,20 @@ def is_usable(skill: Dict) -> bool:
     )
 
 
+# Agent- and teacher-drafted skills await the audit until it gives a verdict
+# (spec #44, Skills); a user's own draft is just a draft.
+_AUDITED_SOURCES = frozenset({"learned", "teacher-escalation"})
+
+
 def skill_state(skill: Dict) -> str:
     """The one state a Skills page card shows."""
     if skill.get("status") == "binned":
         return "binned"
     if is_usable(skill):
         return "published"
-    if skill.get("status") == "published" or skill.get("source") == "teacher-escalation":
+    if skill.get("status") == "published":
+        return "awaiting_audit"
+    if skill.get("source") in _AUDITED_SOURCES and not skill.get("audit_verdict"):
         return "awaiting_audit"
     return "draft"
 
