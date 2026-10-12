@@ -55,7 +55,7 @@ _NOBODY_DENIED = frozenset({
     "list_sessions", "manage_session", "send_to_session", "chat_with_model",
 })
 # An open email reader: the agent drafts through the reader, never sends.
-_EMAIL_READER_DENIED = frozenset({"create_document", "send_email", "reply_to_email"})
+EMAIL_READER_DENIED = frozenset({"create_document", "send_email", "reply_to_email"})
 # Per-user privileges -> tools they deny (legacy chat route parity).
 _PRIVILEGE_DENIED: Mapping[str, frozenset] = {
     "can_use_bash": FAMILY_TOOLS["shell_files"],
@@ -199,7 +199,7 @@ def build_deny_layers(
     if toggles.incognito:
         disabled |= _NOBODY_DENIED
     if active_email_open:
-        disabled |= _EMAIL_READER_DENIED
+        disabled |= EMAIL_READER_DENIED
 
     return DenyLayers(
         hidden=frozenset(hidden),
