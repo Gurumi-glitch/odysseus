@@ -204,6 +204,9 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Publish + User-only + Test/Edit/Delete no longer fit one phone-width row. */
+  .skill-card .doclib-card-expanded-actions { flex-wrap: wrap; }
+  .skill-user-only-toggle { white-space: nowrap; }
 }
 /* Right cluster — pills (right-aligned), stats, then the menu/chevron. */
 .skill-card-right {
@@ -248,6 +251,21 @@
 .skill-model-teacher {
   background: color-mix(in srgb, var(--color-warning, #f0ad4e) 24%, transparent);
   color: var(--color-warning, #f0ad4e);
+}
+/* Backend card states (#49): awaiting audit shares the teacher/warning tint,
+   the user-approval pills say whether the user's publish still covers the content. */
+.skill-status-awaiting,
+.skill-approval-lapsed {
+  background: color-mix(in srgb, var(--color-warning, #f0ad4e) 24%, transparent);
+  color: var(--color-warning, #f0ad4e);
+}
+.skill-approval-user {
+  background: color-mix(in srgb, var(--color-success, #4ade80) 16%, transparent);
+  color: var(--color-success, #4ade80);
+}
+.skill-user-only-toggle {
+  font-size: 10px;
+  cursor: pointer;
 }
 .skill-necessity-pill {
   max-width: 150px;
