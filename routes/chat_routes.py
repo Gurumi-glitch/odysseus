@@ -2490,6 +2490,10 @@ def setup_chat_routes(
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        # interactive=false (notes agent-solve, group panes, compare synthesis)
+        # marks a turn nobody can answer an ask in. Read from the form only:
+        # a JSON body never sets the mode, so it never reaches the runtime.
+        interactive = str(form_data.get("interactive", "")).lower() != "false"
         client_runtime_context = None
         raw_client_runtime_context = (
             form_data.get("client_runtime_context")
@@ -3072,6 +3076,8 @@ def setup_chat_routes(
                 ),
                 privileges=_request_privileges(request, owner),
                 delegated_credential=is_delegated_credential(request),
+                # An API-token caller has no browser to answer an ask either.
+                interactive=interactive and not is_delegated_credential(request),
                 active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
                 active_email=active_email_ctx,
                 active_document_id=active_doc_id,

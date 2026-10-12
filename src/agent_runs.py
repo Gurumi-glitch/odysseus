@@ -289,6 +289,21 @@ def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     return False
 
 
+async def stop_and_wait(session_id: str) -> None:
+    """Cancel the session's run, whichever it is, and wait until it unwound.
+
+    Deleting a chat stops its run (spec #44). The cancel path saves the
+    partial turn, so the delete waits for it and then removes that row too:
+    nothing is written into the chat afterwards.
+    """
+    run = _RUNS.get(session_id)
+    if run is None or run.task is None or run.task.done():
+        return
+    run.task.cancel()
+    # _drain waits for a replaced predecessor on cancel, so this covers it too.
+    await asyncio.wait({run.task})
+
+
 def request_finish(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     """Ask the exact active run to finish after its completed editor work."""
     run = _RUNS.get(session_id)
