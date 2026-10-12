@@ -2,8 +2,9 @@
 
 The turn runs rounds until a reply has no tool calls or a shared cap is hit.
 Each round's tool calls run one at a time in call order; errors and denials go
-back to the model as tool results. Continue, the repeat guard, steering and
-finish arrive in later tickets (#54, #63).
+back to the model as tool results. The turn also stops at the round and
+tool-call caps, when the repeat guard stops it, and after Finish (one more
+round with no tools). Steering arrives in #63.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Dict
 # ("none" | "compact" | "full" | "") for this owner's endpoint row and model.
 from src.agent_loop import _configured_model_tool_surface
 from src.agent_tools import MAX_AGENT_ROUNDS
-from src.chat_agent import permissions, prompt, tools, transcript
+# Relies on: agent_runs.should_finish(session_id) is True only while that
+# session's registered run is running and Finish was requested for it; a run
+# that replaces it starts with the flag clear.
+from src import agent_runs
+from src.chat_agent import permissions, prompt, repeat_guard, tools, transcript
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
@@ -39,6 +44,19 @@ from src.tool_schemas import function_call_to_tool_block
 logger = logging.getLogger(__name__)
 
 TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
+FINISH_REASON = "Not run: the user asked to finish with the results so far."
+REPEAT_STOP_REASON = (
+    f"Not run: this exact call was repeated {repeat_guard.STOP_STREAK} times in a row, "
+    "so the turn stopped."
+)
+REPEAT_STOP_MESSAGE = (
+    f"The agent repeated the same tool call {repeat_guard.STOP_STREAK} times in a row "
+    "without progress, so this turn stopped."
+)
+_NOT_RUN_REASONS = {
+    transcript.STOP_BUDGET: TOOL_CALL_CAP_REASON,
+    transcript.STOP_INTERRUPTED: FINISH_REASON,
+}
 
 
 @dataclass(frozen=True)
@@ -147,9 +165,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             denied_names=layers.denied_names,
         )
         tool_calls_used = 0
+        guard = repeat_guard.RepeatGuard()
+        round_tools = tool_schemas
         while True:
             end = None
-            async for event in _stream_round(turn, provider, endpoint, conversation, tool_schemas):
+            async for event in _stream_round(turn, provider, endpoint, conversation, round_tools):
                 if isinstance(event, ProviderError):
                     yield _error_event(event.message, event.status)
                     yield "data: [DONE]\n\n"
@@ -161,21 +181,31 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             round_record = _round_record(end)
             record.rounds.append(round_record)
             calls = [b for b in end.blocks if b["type"] == "tool_call"]
-            if not calls:
+            if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
+                # Finish's tool-less round is the turn's last.
                 break
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = []
-            budget_hit = False
             for call in calls:
                 block = function_call_to_tool_block(call["name"], call["arguments"])
-                if caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                reminder = None
+                if record.stop_reason is None and agent_runs.should_finish(turn.session_id):
+                    record.stop_reason = transcript.STOP_INTERRUPTED
+                if record.stop_reason is None and caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                    record.stop_reason = transcript.STOP_BUDGET
+                if record.stop_reason is not None:
                     # Every call still gets a result, so the round replays
                     # as a complete call/result pair.
-                    budget_hit = True
-                    decision = permissions.Decision(permissions.DENY, TOOL_CALL_CAP_REASON)
+                    decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                 else:
                     tool_calls_used += 1
-                    decision = _gate(call, block, layers, offered)
+                    signal = guard.observe(call["name"], call["arguments"])
+                    if signal.stop and not await resolve_repeat_stop(turn, call, signal):
+                        record.stop_reason = transcript.STOP_REPEAT_GUARD
+                        decision = permissions.Decision(permissions.DENY, REPEAT_STOP_REASON)
+                    else:
+                        reminder = signal.reminder
+                        decision = _gate(call, block, layers, offered)
                 if decision.outcome == permissions.ALLOW:
                     yield _event({
                         "type": "tool_start", "tool": block.tool_type, "command": block.content,
@@ -190,14 +220,29 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     )
                 yield _event(_tool_output_event(outcome, attempted=decision.outcome == permissions.ALLOW))
                 record.tool_events.append(outcome.tool_event(len(record.rounds), endpoint.model))
-                results.append(outcome.envelope())
-                conversation.append({"role": "tool", **outcome.envelope()})
+                envelope = outcome.envelope()
+                if reminder:
+                    # The reminder is for the model only; the tool card keeps the output.
+                    envelope["content"] += reminder
+                results.append(envelope)
+                conversation.append({"role": "tool", **envelope})
             round_record["results"] = results
-            if budget_hit:
+            if record.stop_reason == transcript.STOP_BUDGET:
                 yield _event({"type": "budget_exceeded", "kind": "tool_calls",
                               "limit": caps.max_tool_calls, "used": tool_calls_used})
                 break
+            if record.stop_reason == transcript.STOP_REPEAT_GUARD:
+                yield _event({"type": "loop_breaker_triggered", "reason": transcript.STOP_REPEAT_GUARD,
+                              "message": REPEAT_STOP_MESSAGE})
+                break
+            if record.stop_reason is None and agent_runs.should_finish(turn.session_id):
+                record.stop_reason = transcript.STOP_INTERRUPTED
+            if record.stop_reason == transcript.STOP_INTERRUPTED:
+                # Finish: one more round with no tools, so the model answers.
+                round_tools = ()
+                continue
             if len(record.rounds) >= caps.max_rounds:
+                record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
         message_id = transcript.save_turn(sess, turn.session_id, record, incognito=turn.toggles.incognito)
@@ -211,6 +256,15 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
     yield "data: [DONE]\n\n"
+
+
+async def resolve_repeat_stop(
+    turn: ChatAgentTurn, call: Dict[str, Any], signal: repeat_guard.RepeatSignal,
+) -> bool:
+    """The repeat guard's stop-or-continue signal at STOP_STREAK: True runs the
+    call, False stops the turn. #56 turns this into a ``repeat_guard`` ask; until
+    then the answer is always stop."""
+    return False
 
 
 def _gate(
