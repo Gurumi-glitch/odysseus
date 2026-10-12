@@ -30,8 +30,14 @@ class _EmptyQuery:
     def order_by(self, *args, **kwargs):
         return self
 
+    def limit(self, *args, **kwargs):
+        return self
+
     def first(self):
         return None
+
+    def all(self):
+        return []
 
 
 class _EmptyDb:
@@ -62,13 +68,36 @@ def _sse_events(chunks):
     return ("\n\n".join(lines + ["data: [DONE]"]) + "\n\n").encode()
 
 
+def _sse_tool_calls(*calls, text=""):
+    """Scripted provider round that asks for these (name, arguments) tool calls.
+
+    Each call's arguments arrive split over two chunks, as providers stream them.
+    """
+    chunks = [{"choices": [{"delta": {"content": text}}]}] if text else []
+    for index, (name, arguments) in enumerate(calls):
+        encoded = json.dumps(arguments)
+        middle = len(encoded) // 2
+        chunks.append({"choices": [{"delta": {"tool_calls": [{
+            "index": index, "id": f"call_{index}", "type": "function",
+            "function": {"name": name, "arguments": encoded[:middle]},
+        }]}}]})
+        chunks.append({"choices": [{"delta": {"tool_calls": [{
+            "index": index, "function": {"arguments": encoded[middle:]},
+        }]}}]})
+    lines = ["data: " + json.dumps(chunk) for chunk in chunks]
+    return ("\n\n".join(lines + ["data: [DONE]"]) + "\n\n").encode()
+
+
 class _Harness:
     def __init__(self, monkeypatch, tmp_path, *, chat_handler=None, chat_processor=None):
         self.captured = {"legacy_agent": 0, "legacy_chat": 0, "provider_requests": []}
         self.saved = []
         self.provider_chunks = ["Hel", "lo!"]
+        # Scripted rounds (SSE bodies), consumed one per provider request.
+        self.provider_rounds = []
         self.monkeypatch = monkeypatch
         monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
+        monkeypatch.setattr(constants, "INSTRUCTIONS_DIR", str(tmp_path / "instructions"))
         monkeypatch.setenv("AUTH_ENABLED", "true")
 
         harness = self
@@ -142,7 +171,10 @@ class _Harness:
             self.captured["provider_requests"].append(json.loads(request.content))
             return httpx.Response(
                 200,
-                content=_sse_events(self.provider_chunks),
+                content=(
+                    self.provider_rounds.pop(0) if self.provider_rounds
+                    else _sse_events(self.provider_chunks)
+                ),
                 headers={"content-type": "text/event-stream"},
             )
 
@@ -244,7 +276,6 @@ async def test_new_runtime_prompt_order_and_context_flags(harness):
     [payload] = harness.captured["provider_requests"]
     assert payload["model"] == "x-ai/grok-4.1-fast"
     assert payload["stream"] is True
-    assert "tools" not in payload
     messages = payload["messages"]
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert messages[0]["content"].startswith("You are Odysseus.\n\n")

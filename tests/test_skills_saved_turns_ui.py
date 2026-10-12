@@ -31,7 +31,7 @@ def test_skills_can_sort_by_saved_turns():
 def test_skills_summary_surfaces_audit_health_and_quick_filters():
     assert '<div id="skills-summary" class="skills-summary-strip"' in INDEX
     assert "await _loadSkillApprovalThreshold();" in SKILLS_JS
-    assert "skillsSummaryMetrics(userSkills, _skillApprovalThreshold)" in SKILLS_JS
+    assert "skillsSummaryMetrics(userSkills)" in SKILLS_JS
     assert "_summaryChip('all', 'All'" in SKILLS_JS
     assert "_summaryChip('approved', 'Approved'" in SKILLS_JS
     assert "_summaryChip('builtin', 'Built-in'" in SKILLS_JS
@@ -53,29 +53,29 @@ def test_skills_summary_metrics_and_quick_filters_behave():
         } from './static/js/skillsMetrics.js';
 
         const skills = [
-          { name: 'fast', status: 'published', confidence: 0.95, audit_verdict: 'pass', saved_turns: 3 },
-          { name: 'slow', status: 'published', confidence: 0.95, audit_verdict: 'pass', saved_turns: -1, saved_tool_calls: -1, baseline_verdict: 'worse', usefulness: 0.1 },
-          { name: 'drafty', status: 'draft', confidence: 0.6 },
-          { name: 'dup', status: 'draft', confidence: 0.9, audit_verdict: 'pass', necessity: { necessary: false, redundant_with: ['fast'], reason: 'duplicate' } },
-          { name: 'broad-zero', status: 'draft', confidence: 0.9, audit_verdict: 'pass', saved_turns: 0, necessity: { necessary: false, redundant_with: [], reason: 'generic but maybe useful' } },
+          { name: 'fast', state: 'published', status: 'published', confidence: 0.95, audit_verdict: 'pass', saved_turns: 3 },
+          { name: 'slow', state: 'published', status: 'published', confidence: 0.95, audit_verdict: 'pass', saved_turns: -1, saved_tool_calls: -1, baseline_verdict: 'worse', usefulness: 0.1 },
+          { name: 'drafty', state: 'draft', status: 'draft', confidence: 0.6 },
+          { name: 'dup', state: 'awaiting_audit', status: 'published', confidence: 0.9, audit_verdict: 'pass', necessity: { necessary: false, redundant_with: ['fast'], reason: 'duplicate' } },
+          { name: 'broad-zero', state: 'draft', status: 'draft', confidence: 0.9, audit_verdict: 'pass', saved_turns: 0, necessity: { necessary: false, redundant_with: [], reason: 'generic but maybe useful' } },
         ];
 
         assert.equal(auditNumber({ verdict: { saved_turns: '4' } }, 'saved_turns'), 4);
-        assert.deepEqual(skillsSummaryMetrics(skills, 0.85), {
+        assert.deepEqual(skillsSummaryMetrics(skills), {
             total: 5,
             approved: 2,
             proven: 1,
             needsAudit: 1,
             audited: 4,
-            review: 2,
-            drafts: 3,
+            awaitingAudit: 1,
+            drafts: 2,
             binned: 0,
           savedTurns: 3,
         });
         assert.deepEqual(filterSkillsByQuickFilter(skills, 'saved').map(s => s.name), ['fast']);
         assert.deepEqual(filterSkillsByQuickFilter(skills, 'approved').map(s => s.name), ['fast', 'slow']);
         assert.deepEqual(filterSkillsByQuickFilter(skills, 'unaudited').map(s => s.name), ['drafty']);
-        assert.deepEqual(filterSkillsByQuickFilter(skills, 'review').map(s => s.name), ['dup', 'broad-zero']);
+        assert.deepEqual(filterSkillsByQuickFilter(skills, 'awaiting').map(s => s.name), ['dup']);
         assert.deepEqual(filterSkillsByQuickFilter(skills, 'draft').map(s => s.name), ['drafty', 'dup', 'broad-zero']);
     """
     result = subprocess.run(
@@ -112,10 +112,10 @@ def test_skill_card_statuses_are_compact_and_unambiguous():
     assert 'class="skill-card-title-row"' in SKILLS_JS
     assert "sk.source === 'builtin' ? _sourcePill(sk) : ''" in SKILLS_JS
     assert 'class="memory-cat-badge skill-status-pill skill-status-published"' in SKILLS_JS
-    assert "skillIsApproved(sk, _skillApprovalThreshold) ? _statusPill(sk) : ''" in SKILLS_JS
+    assert "return `${_auditMarks(sk)}${approval}${_statusPill(sk)}`;" in SKILLS_JS
     assert 'Queued for automatic skill check' in SKILLS_JS
-    assert 'Eligible drafts are reviewed automatically.' in SKILLS_JS
-    assert 'esc(model + reason)' in SKILLS_JS
+    assert 'title="Audit: ${esc(label)}.' in SKILLS_JS
+    assert 'esc(reason + model + when)' in SKILLS_JS
     assert ".skill-status-published" in STYLE
     assert ".skill-card:not(.doclib-card-expanded) .skill-card-tags { display: none; }" in STYLE
 
@@ -140,7 +140,7 @@ def test_total_skill_count_and_all_filter_include_their_respective_scopes():
 
 def test_builtin_skills_are_preapproved_and_excluded_from_audit_queues():
     assert "if (sk && sk.source === 'builtin') return false" in METRICS_JS
-    assert "if (sk.source === 'builtin') return sk.status === 'published'" in METRICS_JS
+    assert "if (sk.source === 'builtin') return true" in METRICS_JS
     assert ".filter(sk => sk.source !== 'builtin' && sk.status !== 'binned')" in SKILLS_JS
 
     script = """
@@ -151,16 +151,16 @@ def test_builtin_skills_are_preapproved_and_excluded_from_audit_queues():
         } from './static/js/skillsMetrics.js';
 
         const skills = [
-          { name: 'core', source: 'builtin', status: 'published', confidence: 1 },
-          { name: 'draft', source: 'user', status: 'draft', confidence: 0.5 },
+          { name: 'core', source: 'builtin', state: 'published', status: 'published', confidence: 1 },
+          { name: 'draft', source: 'user', state: 'draft', status: 'draft', confidence: 0.5 },
         ];
-        assert.deepEqual(skillsSummaryMetrics(skills, 0.85), {
+        assert.deepEqual(skillsSummaryMetrics(skills), {
           total: 2,
           approved: 1,
           proven: 1,
           needsAudit: 1,
               audited: 0,
-              review: 0,
+              awaitingAudit: 0,
               drafts: 1,
               binned: 0,
               savedTurns: 0,
