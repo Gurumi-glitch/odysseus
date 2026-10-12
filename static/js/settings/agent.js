@@ -17,7 +17,12 @@ export async function initAgentSettings() {
       var rt = await rtRes.json();
       if (!rtRes.ok) throw new Error(rt.detail || 'Failed to load');
       if (rt.available) runtimeToggle.checked = rt.chat_runtime === 'new';
-      else if (runtimeCard) runtimeCard.style.display = 'none';
+      else if (runtimeCard) {
+        runtimeCard.style.display = 'none';
+        // The classifier only serves the new runtime (#68).
+        var classifierCard = el('set-classifierCard');
+        if (classifierCard) classifierCard.style.display = 'none';
+      }
     } catch (e) { runtimeMsg.textContent = e.message || 'Failed to load'; runtimeMsg.style.color = 'var(--red)'; }
 
     runtimeToggle.addEventListener('change', async function() {
