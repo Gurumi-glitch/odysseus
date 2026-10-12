@@ -1136,6 +1136,7 @@ import { invalidateSettings } from './appConfig.js';
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
   const _terminalSavedStreams = new Set(); // sessionId -> canonical terminal event seen by active reader
   const _streamRunIds = new Map();      // sessionId -> opaque identity of the current send's detached run
+  const _streamRuntimes = new Map();    // sessionId -> X-Odysseus-Runtime of that run (routes composer sends while it is live)
   const _streamGenerations = new Map(); // sessionId -> generation of the current (latest) send
   const _sendStates = new Map();        // sessionId -> { generation, abortCtrl } of the current send, installed synchronously at send commit so Stop never has to borrow an older send's controller
   const _pendingRunStops = new Map();   // 'sessionId:generation' -> abortCtrl|null; Stop queued for that send while it awaits headers. Keyed per send so concurrent sends' cancellation intents never displace each other.
@@ -1218,7 +1219,7 @@ import { invalidateSettings } from './appConfig.js';
     return true;
   }
 
-  function _rememberStreamRunId(sessionId, runId, generation) {
+  function _rememberStreamRunId(sessionId, runId, generation, runtime = '') {
     if (!sessionId || !runId) return;
     // A superseded send must not record its run id as the session's current
     // identity, but it must still flush its own queued Stop: this is the only
@@ -1226,6 +1227,7 @@ import { invalidateSettings } from './appConfig.js';
     // own POST reaches the server.
     if (_streamGenerations.get(sessionId) === generation) {
       _streamRunIds.set(sessionId, runId);
+      _streamRuntimes.set(sessionId, runtime);
     }
     const pendingKey = sessionId + ':' + generation;
     if (!_pendingRunStops.has(pendingKey)) return;
@@ -1725,16 +1727,41 @@ import { invalidateSettings } from './appConfig.js';
     const queuedInput = uiModule.el('message');
     const queuedText = (queuedInput && queuedInput.value || '').trim();
     if (!queuedText) return false;
+    const sid = sessionModule.getCurrentSessionId();
+    // The Enter paths call this before submit; while a chat_agent ask waits,
+    // the composer text is its answer, not a queued message (spec #44, Asks).
+    const pendingAsk = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)')?._askUser;
+    if (pendingAsk && pendingAsk.session_id === sid) return false;
     if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
       try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
       return true;
     }
-    if (_queueAgentRequest(queuedText)) {
+    const clearComposer = () => {
       queuedInput.value = '';
       queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
       if (uiModule.autoResize) uiModule.autoResize(queuedInput);
       try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
+    };
+    if (_streamRuntimes.get(sid) === 'chat_agent') {
+      // A chat_agent run takes the message at its next round boundary (#63);
+      // 409 means the turn already ended, so the message waits as before.
+      clearComposer();
+      fetch(`${API_BASE}/api/chat/steer/${encodeURIComponent(sid)}`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: queuedText }),
+      }).then(async res => {
+        if (res.ok) { chatRenderer.renderSteerBubble(queuedText); return; }
+        if (res.status === 409) { _queueAgentRequest(queuedText); return; }
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Steer failed (${res.status})`);
+      }).catch(err => {
+        queuedInput.value = queuedText;
+        try { uiModule.showError && uiModule.showError(err.message || 'Could not send the message to the running turn'); } catch (_) {}
+      });
+      return true;
     }
+    if (_queueAgentRequest(queuedText)) clearComposer();
     return true;
   }
 
@@ -2148,6 +2175,7 @@ import { invalidateSettings } from './appConfig.js';
     // (The old send's own queued Stop still works — its flush carries the run
     // id from its header, and its stale generation cannot repopulate this map.)
     _streamRunIds.delete(streamSessionId);
+    _streamRuntimes.delete(streamSessionId);
     _streamSessionId = streamSessionId;
     _sendInFlight = false;
 
@@ -2844,7 +2872,8 @@ import { invalidateSettings } from './appConfig.js';
         return;
       }
       const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
-      if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration);
+      const streamRuntime = res.headers.get('X-Odysseus-Runtime') || '';
+      if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration, streamRuntime);
 
       // Mark the chat log busy while streaming so screen readers wait for the
       // settled response instead of announcing every token. Cleared in finally.
@@ -6273,7 +6302,11 @@ import { invalidateSettings } from './appConfig.js';
     }
     if (!res.ok || !res.body) return false;
     const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
-    if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
+    const resumeRuntime = res.headers.get('X-Odysseus-Runtime') || '';
+    if (resumeRunId) {
+      _streamRunIds.set(sessionId, resumeRunId);
+      _streamRuntimes.set(sessionId, resumeRuntime);
+    }
 
     const box = document.getElementById('chat-history');
     if (!box) return false;

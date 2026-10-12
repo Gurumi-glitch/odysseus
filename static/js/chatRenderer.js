@@ -2962,6 +2962,32 @@ export function displayMetrics(messageElement, metrics) {
   if (uiModule) uiModule.scrollHistory();
 }
 
+/**
+ * A steering message: sent while a chat_agent turn ran, joined at the next
+ * round boundary (spec #44, #63). Not a `.msg-user`: regenerate, delete and
+ * the turn-rendering scan treat `.msg-user` as the turn's real message, and a
+ * steer never answers an ask (#65).
+ */
+export function renderSteerBubble(text) {
+  const box = document.getElementById('chat-history');
+  if (!box) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-steer';
+  wrap.title = 'Sent while the agent was working; it joined the turn at the next round';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = 'You';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = String(text || '');
+  wrap.appendChild(role);
+  wrap.appendChild(body);
+  wrap.dataset.raw = String(text || '');
+  box.appendChild(wrap);
+  if (uiModule) uiModule.scrollHistory();
+  return wrap;
+}
+
 /** Remove any unanswered multiple-choice cards currently in the chat. */
 export function removeAskUserCards(root) {
   const scope = root || document.getElementById('chat-history') || document;
@@ -3997,6 +4023,7 @@ const chatRenderer = {
   renderAskUserCard,
   resolveAskUserCard,
   answerChatAsk,
+  renderSteerBubble,
   buildSourcesBox,
   buildFindingsBox,
   buildRagSourcesBox,
