@@ -791,17 +791,18 @@ _EXTERNAL_SOURCES = (
 
 def _reads_private(tool: str, content: Any) -> bool:
     """A call that brings the user's private data into the context (2026-10-13
-    decision, ADR 0002 amendment): every known READ_PRIVATE call, which covers
+    decision, ADR 0002 amendment): every READ_PRIVATE call, which covers
     email, chat search, vault, the session/contact/account listers and the
-    read actions of the manage_* tools, plus a GET raw API call. Custom MCP
-    tools (unknown) stay the external leg only."""
+    read actions of the manage_* tools, plus a GET raw API call. Derived for
+    every tool, so a new one is classified with no list to update."""
     if tool in _RAW_API_TOOLS:
         return not _raw_api_writes(tool, content)
     # Relies on: capabilities_for_action gives a manage_* read action only
-    # READ_PRIVATE, a write action only its writes, and an unreadable action
-    # both (so an unparsed call counts as a read).
+    # READ_PRIVATE, a write action only its writes, an unreadable action both,
+    # and an unknown tool (custom MCP) every effect, so whatever the gate
+    # cannot classify counts as a private read.
     capabilities = capabilities_for_action(tool, content)
-    return capabilities.known and ToolEffect.READ_PRIVATE in capabilities.effects
+    return ToolEffect.READ_PRIVATE in capabilities.effects
 
 
 # Row metadata where a compaction summary keeps the provenance of the rows it

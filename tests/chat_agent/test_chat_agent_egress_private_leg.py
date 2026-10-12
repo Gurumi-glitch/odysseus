@@ -92,8 +92,8 @@ def test_private_reads_arm_the_private_leg(name, arguments):
     # Workspace and web reads are not the user's private data.
     ("read_file", "notes.md"),
     ("web_search", json.dumps({"query": "q"})),
-    # Custom MCP tools stay the external leg only (ADR 0002 source table).
-    ("mcp__github__list_issues", "{}"),
+    # The browser MCP readers are classified as web reads.
+    ("mcp__builtin_browser__browser_snapshot", "{}"),
 ])
 def test_other_calls_leave_the_private_leg_alone(name, content):
     assert Provenance().after(name, content).private is False
@@ -114,3 +114,62 @@ def test_an_earlier_turn_s_notes_write_does_not_count():
         {"tool": "manage_notes", "command": json.dumps({"action": "add", "title": "x"})},
     ]}}]
     assert Provenance().after_history(rows).private is False
+
+
+def test_a_custom_mcp_tool_the_gate_cannot_classify_is_both_legs():
+    after = Provenance().after("mcp__github__list_issues", "{}")
+    assert (after.external, after.private) == (True, True)
+
+
+# Every native tool, called with no arguments, by whether it reads private
+# data. A tool missing here fails the table below until it is classified.
+_PRIVATE_READS = frozenset({
+    # registered READ_PRIVATE
+    "list_cached_models", "list_cookbook_servers", "list_downloads", "list_models",
+    "list_serve_presets", "list_served_models", "tail_serve_output",
+    "list_email_accounts", "list_emails", "read_email", "scan_spam", "scan_email_unsubscribes",
+    "search_emails", "resolve_contact", "search_chats", "list_sessions", "vault_get",
+    "vault_search", "download_attachment",
+    # manage_*: the default action is a read, or no action fails high
+    "manage_calendar", "manage_contact", "manage_documents", "manage_memory", "manage_notes",
+    "manage_research", "manage_session", "manage_skills", "manage_tasks", "manage_email_state",
+    "manage_endpoints", "manage_mcp", "manage_tokens", "manage_webhooks", "manage_settings",
+    # an argument-less raw API call is a GET
+    "app_api", "api_call",
+})
+_NOT_PRIVATE = frozenset({
+    "ask_user", "update_plan",
+    "get_workspace", "glob", "grep", "ls", "read_file", "inspect_media", "extract_text",
+    "transcribe_media",
+    "web_search", "web_fetch", "get_weather", "youtube_tool", "private_browser", "pdf_extract",
+    "search_hf_models",
+    "todowrite", "create_document", "edit_document", "suggest_document", "update_document",
+    "create_session", "draft_email", "draft_email_reply", "ai_draft_email_reply",
+    "archive_email", "mark_email_read", "ui_control",
+    "chat_with_model", "ask_teacher", "generate_image", "edit_image", "trigger_research",
+    "send_to_session", "pipeline",
+    "write_file", "edit_file", "apply_patch",
+    "bash", "python", "host_shell", "manage_bg_jobs",
+    "download_model", "serve_model", "serve_preset", "stop_served_model", "adopt_served_model",
+    "cancel_download",
+    "send_email", "reply_to_email", "bulk_email", "delete_email", "unsubscribe_email",
+    "block_sender", "vault_unlock",
+})
+
+
+def _native_tool_names():
+    from src.agent_tools import FUNCTION_TOOL_SCHEMAS
+    from src.tool_capabilities import KNOWN_CAPABILITY_TOOLS
+    names = set(permissions.POSTURE) | set(KNOWN_CAPABILITY_TOOLS)
+    names |= {schema.get("function", schema)["name"] for schema in FUNCTION_TOOL_SCHEMAS}
+    return sorted(names)
+
+
+def test_every_native_tool_is_in_the_private_leg_table():
+    unclassified = set(_native_tool_names()) - _PRIVATE_READS - _NOT_PRIVATE
+    assert not unclassified, f"classify these for the egress gate's private leg: {sorted(unclassified)}"
+
+
+@pytest.mark.parametrize("name", _native_tool_names())
+def test_the_private_leg_of_each_native_tool(name):
+    assert Provenance().after(name, "{}").private is (name in _PRIVATE_READS)
