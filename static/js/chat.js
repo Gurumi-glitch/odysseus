@@ -2669,6 +2669,11 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
 	      }
+	      // One-shot, set by the composer's /name skill invocation (#66).
+	      if (window.__odysseusPendingInvokedSkill) {
+	        fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);
+	        window.__odysseusPendingInvokedSkill = '';
+	      }
 	      if (el('web-toggle').checked) {
 	        if (!isAgentMode) {
 	          fd.append('use_web', 'true');

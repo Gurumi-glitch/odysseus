@@ -382,7 +382,11 @@ async function _invokeSkillByName(name, requestText, ctx) {
     return true;
   }
   const data = await res.json();
+  // Read once by the next chat_stream send: the new runtime loads the
+  // skill's required tools for that turn (#66).
+  window.__odysseusPendingInvokedSkill = data.name || '';
   if (!data.message || !_submitComposedMessage(data.message)) {
+    window.__odysseusPendingInvokedSkill = '';
     slashReply('Could not start skill invocation.');
   }
   return true;
