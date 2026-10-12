@@ -33,7 +33,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
 from src.turn_contract import canonical_tool
-from src.chat_agent.permissions import task_prompt
+from src.chat_agent.permissions import task_args
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
 from src.agent_loop import _allow_visual_tool_evidence_for_model
@@ -443,12 +443,8 @@ def _task_prompt_grants(block: Any, scope: ExecutionScope) -> Tuple[OperationGra
         return ()
     if _action_from_content(block.tool_type, block.content) not in _TASK_SEALING_ACTIONS:
         return ()
-    try:
-        args = json.loads(block.content)
-    except (TypeError, ValueError):
-        return ()
     # The same prompt the card showed (permissions.task_card).
-    prompt = task_prompt(args) if isinstance(args, dict) else ""
+    prompt = str((task_args(block.content) or {}).get("prompt") or "")
     if not prompt.strip():
         return ()
     return create_request_authority(prompt, owner=scope.owner).grants

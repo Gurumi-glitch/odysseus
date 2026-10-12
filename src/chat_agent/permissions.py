@@ -16,7 +16,6 @@ import logging
 import os
 import posixpath
 import re
-import shlex
 from dataclasses import dataclass
 from email.utils import getaddresses
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -64,6 +63,9 @@ from src.tool_policy import WEB_ACCESS_TOOL_NAMES, web_search_enabled_for_turn
 # Relies on: _resolve_tool_path_in_workspace returns the realpath the file
 # tools open inside the workspace, or raises ValueError where they refuse.
 from src.tool_execution import _resolve_tool_path_in_workspace
+# manage_tasks_args / find_task are do_manage_tasks' own parsing and lookup,
+# so the gate judges the task the executor will act on (no second reading).
+from src.tools.system import find_task, manage_tasks_args
 from src.turn_contract import FAMILY_TOOLS, canonical_tool
 
 logger = logging.getLogger(__name__)
@@ -267,52 +269,28 @@ def _mcp_server_disabled_reason(name: str) -> Optional[str]:
 
 # --- Rules: `tool` or `tool(specifier)` (spec #44, Permissions; #25) ---------
 #
-# The matcher reads a call's command, path, host or recipients itself, so it
-# can disagree with what the executor will do. Where its reading is not
-# certain it fails closed: an allow rule does not cover the call, and a deny
-# or ask rule turns it into an ask (UNSURE).
+# The matcher reads a call's path, host or recipients itself, so it can
+# disagree with what the executor will do. Where its reading is not certain
+# it fails closed: an allow rule does not cover the call, and a deny or ask
+# rule turns it into an ask (UNSURE).
 
 ANY = "any"
-PREFIX = "prefix"
-# An exact command for shell tools; for any other tool the whole call, which
-# only "Allow for this chat" saves (the rule syntax cannot spell it).
+# The whole call, which only "Allow for this chat" saves (the rule syntax
+# cannot spell it).
 EXACT = "exact"
 PATH = "path"
 DOMAIN = "domain"
 ACTION = "action"
 RECIPIENT = "recipient"
 
-_SHELL_TOOLS = frozenset({"bash", "host_shell"})
-_PREFIX_TOOLS = _SHELL_TOOLS | {"python"}
+# Shell specifiers (`bash(git:*)`) are not supported yet (2026-10-13, see
+# README "Not decided yet"): these tools take the bare name only.
+_SHELL_TOOLS = frozenset({"bash", "host_shell", "python"})
 _PATH_TOOLS = frozenset({"read_file", "write_file", "edit_file"})
 _RECIPIENT_TOOLS = frozenset({"send_email"})
 # The specifier word each scoped kind is written with.
 _KIND_WORDS = {DOMAIN: "domain:", ACTION: "action:", RECIPIENT: "to:"}
-_PREFIX_SUFFIX = ":*"
-_SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|&\n]")
-# A deny or ask rule also looks inside substitutions and subshells.
-_SHELL_SEPARATORS_DEEP = re.compile(r"&&|\|\||\$\(|[;|&\n`()<>]")
 _RULE_TEXT = re.compile(r"^([A-Za-z0-9_\-]+)(?:\((.*)\))?$", re.S)
-# A word an allow rule can read without a shell: no quoting, expansion,
-# globbing, redirection or substitution.
-_PLAIN_WORD = re.compile(r"^[A-Za-z0-9_./:=@%+,~-]+$")
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-_SHELL_EXPANSION = re.compile(r"[$`\\]")
-# Words that run another command than the one the rule names: an allowed
-# prefix followed by one of these escapes the rule (`find -exec`, `git -c
-# core.sshCommand=...`, `xargs sh`), so an allow rule never covers them.
-_COMMAND_RUNNERS = frozenset({
-    "exec", "command", "builtin", "env", "sudo", "doas", "su", "nohup", "time", "nice", "ionice",
-    "timeout", "stdbuf", "setsid", "xargs", "parallel", "watch", "eval", "source", ".",
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
-    "python", "python3", "perl", "ruby", "node", "php", "lua", "awk", "gawk",
-})
-_EXEC_FLAGS = frozenset({"-c", "-e", "-exec", "-execdir", "-ok", "-okdir", "--exec"})
-# Prefix words a deny rule looks through to find the command that runs.
-_TRANSPARENT_RUNNERS = frozenset({
-    "exec", "command", "builtin", "env", "sudo", "doas", "nohup", "time", "nice", "ionice",
-    "timeout", "stdbuf", "setsid",
-})
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _PATH_GLOBSTAR = "**"
 
@@ -342,16 +320,14 @@ class Rule:
         """The rule as written, also the "Allow for this chat" card label."""
         if self.kind == ANY:
             return self.tool
-        if self.kind == PREFIX:
-            return f"{self.tool}({self.value}{_PREFIX_SUFFIX})"
         if self.kind in _KIND_WORDS:
             return f"{self.tool}({_KIND_WORDS[self.kind]}{self.value})"
-        if self.kind == EXACT and self.tool not in _PREFIX_TOOLS:
+        if self.kind == EXACT:
             return f"this exact {self.tool} call"
         return f"{self.tool}({self.value})"
 
     def record(self) -> List[str]:
-        """The store's form: EXACT rules of non-shell tools have no text form."""
+        """The store's form: EXACT rules have no text form."""
         return [self.tool, self.kind, self.value]
 
 
@@ -371,9 +347,10 @@ def parse_rule(text: str) -> Rule:
     spec = spec.strip()
     if not spec:
         raise ValueError(f"Empty specifier in {text!r}.")
-    if tool in _PREFIX_TOOLS:
-        prefix = spec[:-len(_PREFIX_SUFFIX)].strip() if spec.endswith(_PREFIX_SUFFIX) else ""
-        return Rule(tool, PREFIX, prefix) if prefix else Rule(tool, EXACT, spec)
+    if tool in _SHELL_TOOLS:
+        raise ValueError(
+            f"Shell command specifiers like {tool}(git:*) are not supported yet; "
+            f"write the bare name {tool} to allow, ask or deny the whole tool.")
     if tool in _PATH_TOOLS:
         return Rule(tool, PATH, posixpath.normpath(spec))
     kind = (DOMAIN if tool == "web_fetch" else ACTION if tool.startswith("manage_")
@@ -429,52 +406,6 @@ def _args(content: Any) -> dict:
     except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-def _command(tool: str, content: Any) -> str:
-    # bash and python blocks carry the raw text; host_shell blocks carry JSON.
-    return str(_args(content).get("command") or "") if tool == "host_shell" else str(content or "")
-
-
-def _shell_parts(command: str, *, deep: bool) -> List[str]:
-    separators = _SHELL_SEPARATORS_DEEP if deep else _SHELL_SEPARATORS
-    return [part.strip() for part in separators.split(command) if part.strip()]
-
-
-def _plain_words(part: str) -> Optional[List[str]]:
-    """The words of a command an allow rule may cover, or None when the shell
-    could run something else (quoting, expansion, wrappers, -exec style flags)."""
-    words = part.split()
-    if not words or not all(_PLAIN_WORD.match(word) for word in words):
-        return None
-    if _ASSIGNMENT.match(words[0]) or "/" in words[0]:
-        return None
-    if any(word in _COMMAND_RUNNERS or word in _EXEC_FLAGS for word in words):
-        return None
-    return words
-
-
-def _effective_words(part: str) -> Optional[List[str]]:
-    """The command a deny or ask rule judges: past variable assignments and
-    pass-through wrappers, binary by base name; None when a shell reading
-    is uncertain."""
-    if _SHELL_EXPANSION.search(part):
-        return None
-    try:
-        words = shlex.split(part)
-    except ValueError:
-        return None
-    while words and (_ASSIGNMENT.match(words[0]) or posixpath.basename(words[0]) in _TRANSPARENT_RUNNERS):
-        words = words[1:]
-        # A wrapper's own options and arguments (env -i, timeout 5, nice -n 5).
-        while words and (words[0].startswith("-") or words[0].isdigit() or _ASSIGNMENT.match(words[0])):
-            words = words[1:]
-    if not words:
-        return []
-    words[0] = posixpath.basename(words[0])
-    if words[0] in _COMMAND_RUNNERS:
-        return None
-    return words
 
 
 def _path(content: Any) -> str:
@@ -540,36 +471,6 @@ def _recipients(content: Any) -> Optional[List[str]]:
     return addresses
 
 
-def _shell_match(rule: Rule, tool: str, content: Any, *, allow: bool) -> str:
-    command = _command(tool, content)
-    if rule.kind == EXACT and allow:
-        # The very command the user approved runs the same way again.
-        return HIT if command.strip() == rule.value.strip() else MISS
-    if tool == "python":
-        if allow:
-            # Code is not a command line: a prefix says nothing about what runs.
-            return MISS
-        return HIT if command.strip().startswith(rule.value.strip()) else MISS
-    expected = rule.value.split() if rule.kind == PREFIX else _effective_words(rule.value)
-    parts = _shell_parts(command, deep=not allow)
-    if not parts or not expected:
-        return MISS if allow else UNSURE
-    outcomes = []
-    for part in parts:
-        words = _plain_words(part) if allow else _effective_words(part)
-        if words is None:
-            outcomes.append(UNSURE)
-        elif rule.kind == PREFIX:
-            outcomes.append(HIT if words[:len(expected)] == expected else MISS)
-        else:
-            outcomes.append(HIT if words == expected else MISS)
-    if not allow and _SHELL_EXPANSION.search(command):
-        # Splitting consumed the substitution markers ("r$(echo m) x"), so
-        # the parts alone cannot say what runs.
-        outcomes.append(UNSURE)
-    return _combine(outcomes, allow=allow)
-
-
 def _combine(outcomes: List[str], *, allow: bool) -> str:
     """An allow covers a call when every part hits; a deny or ask hits on any
     part, and an unreadable part makes it unsure."""
@@ -610,8 +511,6 @@ def _match(rule: Rule, name: str, content: Any, *, allow: bool, workspace: Optio
         return MISS
     if rule.kind == ANY:
         return HIT
-    if tool in _PREFIX_TOOLS:
-        return _shell_match(rule, tool, content, allow=allow)
     if rule.kind == EXACT:
         return HIT if str(content or "") == rule.value else MISS
     if rule.kind == PATH:
@@ -634,14 +533,11 @@ def rule_covers(rule: Rule, name: str, content: Any, workspace: Optional[str] = 
 
 def session_rule(name: str, content: Any) -> Rule:
     """The rule "Allow for this chat" saves for this call: its narrowest scope
-    that still covers it, else the exact call."""
+    that still covers it, else the exact call. Shell tools: the whole tool."""
     tool = policy_name(name)
     candidate = None
-    if tool in _SHELL_TOOLS:
-        parts = [_plain_words(part) for part in _shell_parts(_command(tool, content), deep=False)]
-        firsts = {words[0] for words in parts if words}
-        if parts and all(parts) and len(firsts) == 1:
-            candidate = Rule(tool, PREFIX, firsts.pop())
+    if tool in _SHELL_TOOLS or tool.startswith(_MCP_PREFIX):
+        candidate = Rule(tool)
     elif tool in _PATH_TOOLS and _clean_path(_path(content)):
         candidate = Rule(tool, PATH, glob.escape(_clean_path(_path(content))))
     elif tool == "web_fetch" and _hosts(content) and len(set(_hosts(content))) == 1:
@@ -654,11 +550,9 @@ def session_rule(name: str, content: Any) -> Rule:
         candidate = Rule(tool, ACTION, glob.escape(_action_from_content(tool, content)))
     elif tool in _RECIPIENT_TOOLS and _recipients(content) and len(_recipients(content)) == 1:
         candidate = Rule(tool, RECIPIENT, glob.escape(_recipients(content)[0]))
-    elif tool.startswith(_MCP_PREFIX):
-        candidate = Rule(tool)
     if candidate is not None and rule_covers(candidate, tool, content):
         return candidate
-    return Rule(tool, EXACT, _command(tool, content) if tool in _PREFIX_TOOLS else str(content or ""))
+    return Rule(tool, EXACT, str(content or ""))
 
 
 # --- Sensitive and protected sets --------------------------------------------
@@ -714,36 +608,29 @@ def is_sensitive(name: str, content: Any) -> bool:
     return tool in _RAW_API_TOOLS and _raw_api_writes(tool, content)
 
 
-def task_prompt(args: Mapping[str, Any]) -> str:
-    """The prompt do_manage_tasks stores: prompt, else task, else description."""
-    return str(args.get("prompt") or args.get("task") or args.get("description") or "")
+def task_args(content: Any) -> Optional[Dict[str, Any]]:
+    """A manage_tasks call as do_manage_tasks reads it; None when it would reject it."""
+    try:
+        return manage_tasks_args(content)
+    except ValueError:
+        return None
 
 
-def stored_task(owner: Optional[str], content: Any) -> Optional[Dict[str, Any]]:
-    """The task an edit/resume/run names, found the way do_manage_tasks finds
-    it (id, else exact name, owner's tasks only); None when not exactly one."""
-    args = _args(content)
+def stored_task(owner: Optional[str], args: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The owner's task an edit/resume/run acts on, by do_manage_tasks' own
+    lookup; None when that lookup fails or lands on another owner's task."""
     if not owner:
         return None
-    task_id = str(args.get("task_id") or "").strip()
-    name = str(args.get("name") or "").strip()
     try:
         db = database.SessionLocal()
     except SQLAlchemyError:
         logger.warning("chat_agent: task store unreadable; treating the task as unknown", exc_info=True)
         return None
     try:
-        query = db.query(database.ScheduledTask)
-        if task_id:
-            by_id = query.filter(database.ScheduledTask.id == task_id).first()
-            if by_id is not None:
-                return _task_fields(by_id) if by_id.owner == owner else None
-            name = task_id
-        if not name:
+        task, error = find_task(db, dict(args), owner, "lookup")
+        if error or task.owner != owner:
             return None
-        matches = query.filter(database.ScheduledTask.name == name,
-                               database.ScheduledTask.owner == owner).limit(2).all()
-        return _task_fields(matches[0]) if len(matches) == 1 else None
+        return _task_fields(task)
     except SQLAlchemyError:
         logger.warning("chat_agent: task lookup failed; treating the task as unknown", exc_info=True)
         return None
@@ -762,15 +649,13 @@ def _task_fields(task: Any) -> Dict[str, Any]:
 
 def task_card(owner: Optional[str], content: Any) -> Dict[str, Any]:
     """What a manage_tasks ask shows: the stored task under the call's changes."""
-    args = _args(content)
+    args = task_args(content) or {}
     action = _action_from_content("manage_tasks", content)
-    stored = stored_task(owner, content) if action in _STORED_TASK_ACTIONS else None
+    stored = stored_task(owner, args) if action in _STORED_TASK_ACTIONS else None
     fields = {**(stored or {}), **{k: v for k, v in args.items() if v not in (None, "")}}
-    prompt = task_prompt(args) or (stored or {}).get("prompt") or ""
+    # Shorthands manage_tasks_args already folded into prompt and name.
     for alias in ("task", "description"):
         fields.pop(alias, None)
-    if prompt:
-        fields["prompt"] = prompt
     if action == "create":
         fields.setdefault("output_target", _TASK_DEFAULT_TARGET)
     if action in _STORED_TASK_ACTIONS and stored is None:
@@ -802,10 +687,11 @@ def is_protected(name: str, content: Any, *, owner: Optional[str] = None) -> boo
     action = _action_from_content(tool, content) if tool == "manage_tasks" else None
     if action not in _TASK_ACTIONS_THAT_ASK:
         return False
-    if _task_delivery_protected(_args(content)):
+    args = task_args(content)
+    if args is None or _task_delivery_protected(args):
         return True
     if action in _STORED_TASK_ACTIONS:
-        stored = stored_task(owner, content)
+        stored = stored_task(owner, args)
         return stored is None or _task_delivery_protected(stored)
     return False
 
