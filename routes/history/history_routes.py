@@ -742,6 +742,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 merged_meta['thinking'] = thinking1
             merged_meta.pop('stopped', None)  # no longer stopped after continue
             merged_meta.pop('thinking_interrupted', None)
+            if 'agent_v2' in merged_meta:
+                # The turn record covers one reply, not the merged text: render
+                # and replay this row from its content (spec #44 Transcript).
+                merged_meta['edited'] = True
 
             # Update first message, remove second
             if isinstance(msg1, ChatMessage):
