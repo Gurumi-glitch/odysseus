@@ -170,11 +170,16 @@ def _field(row: Any, name: str) -> Any:
 def real_user_messages(history: Iterable[Any]) -> List[str]:
     """User rows the chat endpoint saved: they carry ``interaction_mode``.
     Rows that session tools, the scheduler, group sync or context injection
-    add do not (routes.chat_helpers.add_user_message is the only writer)."""
-    return [
-        str(_field(row, "content") or "") for row in history
-        if _field(row, "role") == "user" and (_field(row, "metadata") or {}).get("interaction_mode")
-    ]
+    add do not (routes.chat_helpers.add_user_message is the only writer).
+    A turn's steers (server-owned ``steers`` on its row) count in place."""
+    said = []
+    for row in history:
+        metadata = _field(row, "metadata") or {}
+        if _field(row, "role") == "user" and metadata.get("interaction_mode"):
+            said.append(str(_field(row, "content") or ""))
+        elif _field(row, "role") == "assistant":
+            said += [str(steer.get("text") or "") for steer in metadata.get("steers") or () if isinstance(steer, dict)]
+    return said
 
 
 def _tool_events(history: Iterable[Any]) -> List[Dict[str, Any]]:

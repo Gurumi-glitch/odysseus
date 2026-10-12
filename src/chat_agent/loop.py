@@ -4,7 +4,8 @@ The turn runs rounds until a reply has no tool calls or a shared cap is hit.
 Each round's tool calls run one at a time in call order; errors and denials go
 back to the model as tool results. The turn also stops at the round and
 tool-call caps, when the repeat guard stops it, and after Finish (one more
-round with no tools). Steering arrives in #63.
+round with no tools). Messages the user sends meanwhile (steers) join the
+turn at the next round boundary.
 """
 
 from __future__ import annotations
@@ -301,6 +302,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         }
         writer.checkpoint()
 
+    steers = asks.SteerQueue(turn.session_id, turn.owner)
     try:
         # Before anything reads the history: the context builder, and the
         # egress provenance the summary row carries over (#67). Nobody-mode
@@ -418,8 +420,14 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             writer.checkpoint()
             calls = [b for b in end.blocks if b["type"] == "tool_call"]
             if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
-                # Finish's tool-less round is the turn's last.
-                break
+                # Finish's tool-less round is the turn's last. A steer sent
+                # during a plain answer gets one more round to be answered.
+                if calls or record.stop_reason or not steers.texts or len(record.rounds) >= caps.max_rounds:
+                    break
+                conversation.append({"role": "assistant", "blocks": end.blocks})
+                _join_steers(record, conversation, auto, steers.take())
+                writer.checkpoint()
+                continue
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = round_record["results"] = []
             round_outcomes = []
@@ -559,6 +567,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             visual = tools.visual_evidence([o.result for o in round_outcomes], endpoint.model)
             if visual is not None:
                 conversation.append(visual)
+            joined = steers.take()
+            if joined:
+                _join_steers(record, conversation, auto, joined)
+                writer.checkpoint()
             # Tools loaded by this round's tool_search join the next round.
             tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
             round_tools = tool_schemas
@@ -583,6 +595,11 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
+        # Steers that came after the last boundary stay in the record, so the
+        # next turn's request carries them.
+        unused = steers.close()
+        if unused:
+            record.add_steers(unused)
         # The last round's text with its titles linked, once (spec #44, Stream events).
         yield _event({"type": "final_response", "content": record.round_texts[-1]})
         message_id = writer.finish()
@@ -593,7 +610,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # reasoning is dropped and unfinished calls get cancelled results.
         if streamed:
             record.rounds.append({"blocks": [{"type": "text", "text": "".join(streamed)}]})
+        unused = steers.close()
         if record.rounds:
+            if unused:
+                record.add_steers(unused)
             record.stop_reason = transcript.STOP_INTERRUPTED
             writer.finish()
         raise
@@ -605,6 +625,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         yield _error_event("The chat agent runtime failed on this turn. See the server log.")
         yield "data: [DONE]\n\n"
         return
+    finally:
+        steers.close()
     yield _event({"type": "metrics", "data": metrics})
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
@@ -801,6 +823,15 @@ def _permission_decision(
     if reply.decision == asks.CHAT and rule is not None:
         store.add_session_rule(turn.owner, turn.session_id, rule.record())
     return permissions.Decision(permissions.ALLOW)
+
+
+def _join_steers(
+    record: transcript.TurnRecord, conversation: List[Dict[str, Any]], auto: classifier.AutoMode, texts: List[str],
+) -> None:
+    record.add_steers(texts)
+    conversation.extend({"role": "user", "content": text} for text in texts)
+    # Auto mode judges by every message the user sent (spec #44, Auto mode).
+    auto.user_messages.extend(texts)
 
 
 def _question_result(reply: Optional[asks.Answer]) -> str:

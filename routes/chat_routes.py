@@ -5162,6 +5162,25 @@ def setup_chat_routes(
             raise HTTPException(409, "No open ask matches this answer.")
         return {"accepted": True}
 
+    @router.post("/api/chat/steer/{session_id}")
+    async def chat_steer(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
+        """Queue a message for the running chat_agent turn; it joins at the
+        next round boundary (spec #44, Asks, steering, finish)."""
+        if is_internal_tool_request(request) or is_delegated_credential(request):
+            raise HTTPException(403, "Only you, in an interactive session, can steer a turn.")
+        _verify_session_owner(request, session_id)
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(400, "text must be a non-empty string.")
+        try:
+            sess = session_manager.get_session(session_id)
+        except (KeyError, SessionNotFoundError):
+            raise HTTPException(404, "Session not found")
+        _enforce_chat_privileges(request, sess)
+        if not chat_asks.steer(session_id, effective_user(request), text):
+            raise HTTPException(409, "No running turn in this chat takes steering messages.")
+        return {"accepted": True}
+
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
     # ------------------------------------------------------------------ #

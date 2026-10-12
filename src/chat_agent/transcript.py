@@ -85,8 +85,9 @@ class TurnRecord:
     model: str
     turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     # Each round: {"blocks": [...]} plus "usage" when the provider reported it
-    # (compaction reads it, #67) and "results" (tool-result envelopes) once its
-    # calls ran. Block shapes: src/chat_agent/providers/__init__.py.
+    # (compaction reads it, #67), "results" (tool-result envelopes) once its
+    # calls ran and "steers" (user text blocks that joined after it, #63).
+    # Block shapes: src/chat_agent/providers/__init__.py.
     rounds: List[Dict[str, Any]] = field(default_factory=list)
     # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
     tool_events: List[Dict[str, Any]] = field(default_factory=list)
@@ -135,14 +136,28 @@ class TurnRecord:
         if thinking:
             metadata["thinking"] = thinking
         metadata.update({key: value for key, value in self.context.items() if value})
+        steers = [
+            {"round": number, "text": block["text"]}
+            for number, turn_round in enumerate(self.rounds, start=1) for block in turn_round.get("steers") or ()
+        ]
+        if steers:
+            metadata["steers"] = steers
         if self.stop_reason:
             metadata["stop_reason"] = self.stop_reason
         return metadata
 
     def content(self) -> str:
+        parts = []
+        for text, turn_round in zip(self.round_texts, self.rounds):
+            parts.append(text)
+            parts.extend(_steer_line(block["text"]) for block in turn_round.get("steers") or ())
         # Relies on: persistable_message_content is what the session manager
         # stores for a string, so the digest is over the persisted content.
-        return persistable_message_content("\n\n".join(text for text in self.round_texts if text))
+        return persistable_message_content("\n\n".join(part for part in parts if part))
+
+    def add_steers(self, texts: List[str]) -> None:
+        """The user's steers join the turn after the last round."""
+        self.rounds[-1].setdefault("steers", []).extend({"type": "text", "text": text} for text in texts)
 
     def close_open_calls(self, reason: str, ask_cause: str) -> None:
         """Give every call that has no result a ``cancelled`` one (exit 130).
@@ -154,6 +169,11 @@ class TurnRecord:
             self.tool_events.append(self.pending_ask)
             self.pending_ask = None
         close_open_calls(self.rounds, self.tool_events, reason, ask_cause, self.model)
+
+
+def _steer_line(text: str) -> str:
+    # Every line quoted, so a multi-line steer stays one quote block.
+    return "> ↳ " + text.replace("\n", "\n> ")
 
 
 def linkify(text: str, sources: List[Dict[str, Any]]) -> str:
