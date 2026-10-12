@@ -47,10 +47,10 @@ function makeFetch(responses) {
   return { fetch, calls };
 }
 
-async function loadAgentSettings({ ids, responses }) {
+async function loadAgentSettings({ ids, responses, window = {} }) {
   const dom = makeDom(ids);
   const net = makeFetch(responses);
-  const context = vm.createContext({ document: dom.document, fetch: net.fetch, console });
+  const context = vm.createContext({ document: dom.document, fetch: net.fetch, console, window });
   const cache = new Map();
 
   function load(filename) {
@@ -97,6 +97,23 @@ test('switch reflects the stored runtime and saves the new value through PUT', a
 
   assert.deepEqual(calls[1], { url: '/api/chat_agent/settings', method: 'PUT', body: { chat_runtime: 'legacy' } });
   assert.equal(toggle.checked, false);
+  assert.match(byId.get('set-chatRuntimeMsg').textContent, /next message/);
+});
+
+test('a failing composer icon sync never undoes a save that succeeded', async () => {
+  const { byId } = await loadAgentSettings({
+    ids: SWITCH_IDS,
+    responses: [
+      { status: 200, body: { chat_runtime: 'legacy', available: true } },
+      { status: 200, body: { chat_runtime: 'new', available: true } },
+    ],
+    window: { __odysseusSyncAutoModeButton() { throw new Error('icon sync broke'); } },
+  });
+  const toggle = byId.get('set-chatRuntimeToggle');
+  toggle.checked = true;
+  await toggle.dispatch('change').catch(() => {});
+
+  assert.equal(toggle.checked, true);
   assert.match(byId.get('set-chatRuntimeMsg').textContent, /next message/);
 });
 
