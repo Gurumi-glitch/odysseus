@@ -1012,7 +1012,7 @@ export function mdToHtml(src, opts) {
   // Autolink bare URLs (http/https). Skips URLs already inside <a> tags
   // (placed by markdown link replacement above) and URLs in backticks.
   s = s.replace(
-    /(^|[\s(<])(https?:\/\/[^\s<>"'`\]]+[^\s<>"'`\].,;:!?])/g,
+    /(^|[\s(<：，、。；（「『【《　])(https?:\/\/[^\s<>"'`\]。，、；：）」』】》！？　]+[^\s<>"'`\].,;:!?。，、；：）」』】》！？　])/g,
     (match, prefix, url) => `${prefix}${linkHtml(url, url)}`
   );
 

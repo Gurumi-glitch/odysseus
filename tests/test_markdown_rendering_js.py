@@ -401,6 +401,46 @@ def test_url_outside_inline_code_is_still_autolinked(node_available):
     assert 'href="https://example.com/page"' in html
 
 
+def test_url_after_fullwidth_cjk_punctuation_is_autolinked(node_available):
+    # CJK answers put a full-width colon/paren directly before the URL with no
+    # space, so the old `(^|[\s(<])` prefix left it as plain text.
+    html = _run_markdown_case("來源：https://a.com/x")
+    assert 'href="https://a.com/x"' in html
+
+    html = _run_markdown_case("路透通稿（Reuters）：https://www.internazionale.it/a")
+    assert 'href="https://www.internazionale.it/a"' in html
+
+    html = _run_markdown_case("見（https://a.com/x）")
+    assert 'href="https://a.com/x"' in html
+
+
+def test_url_stops_at_fullwidth_punctuation_but_keeps_cjk_letters(node_available):
+    # CJK text has no spaces, so the URL body must stop at full-width
+    # punctuation instead of swallowing the following sentence.
+    html = _run_markdown_case("來源：https://a.com。下一句")
+    assert 'href="https://a.com/"' in html
+    assert ">https://a.com</a>。下一句" in html
+
+    html = _run_markdown_case("（https://a.com）後文")
+    assert 'href="https://a.com/"' in html
+    assert ">https://a.com</a>）後文" in html
+
+    # CJK letters are valid in URL paths (zh.wikipedia) and must stay linked.
+    html = _run_markdown_case("見 https://zh.wikipedia.org/wiki/火山 。")
+    assert 'href="https://zh.wikipedia.org/wiki/%E7%81%AB%E5%B1%B1"' in html
+
+
+def test_fullwidth_punct_before_url_inside_inline_code_is_not_autolinked(node_available):
+    html = _run_markdown_case("`x https://a.com` and `來源：https://a.com/y`")
+    assert "<a " not in html
+    assert "<code>x https://a.com</code>" in html
+
+
+def test_english_source_url_still_autolinked(node_available):
+    html = _run_markdown_case("Source: https://a.com")
+    assert 'href="https://a.com/"' in html
+
+
 def test_inline_code_content_is_html_escaped(node_available):
     # Inline code is now extracted before the global escape pass, so it must be
     # escaped at extraction time (matching the fenced-code-block handling).
