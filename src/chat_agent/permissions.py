@@ -60,6 +60,7 @@ from src.tool_capabilities import (
     ToolEffect,
     _action_from_content,
     capabilities_for_action,
+    capabilities_for_tool,
     delegated_tool_is_blocked,
 )
 # WEB_ACCESS_TOOL_NAMES is exactly the spec's Web-off family; FAMILY_TOOLS
@@ -649,9 +650,16 @@ def _mentions_instruction_file(content: Any) -> bool:
     return any(name in text.casefold() for text in texts for name in _INSTRUCTION_NAMES)
 
 
+# Registered workspace writers that take no workspace path: the module has
+# nothing to read, and no argument can steer them to an instruction file.
+# download_attachment saves into a hashed folder under MAIL_ATTACHMENTS_DIR.
+_WORKSPACE_WRITERS_WITHOUT_PATH = frozenset({"download_attachment"})
+
+
 def _writes_instruction_file(tool: str, content: Any, workspace: Optional[str]) -> bool:
     """A write the next prompt and classifier would trust as the user's own
-    instructions; one whose target the gate cannot place counts."""
+    instructions; one whose target the gate cannot place counts, and so does a
+    registered workspace writer the gate has no path reader for."""
     if tool == "apply_patch":
         # The TUI host bridge applies the patch with its own reader: a patch
         # this one refuses still counts.
@@ -660,7 +668,12 @@ def _writes_instruction_file(tool: str, content: Any, workspace: Optional[str]) 
     if tool in _SHELL_TOOLS:
         return _mentions_instruction_file(content)
     if tool not in _WRITE_PATH_TOOLS:
-        return False
+        # Relies on: capabilities_for_tool reports `known` and the tool's own
+        # registered effects (not the per-call ones), so custom and MCP tools,
+        # which are not known, keep their rule-governed handling.
+        registered = capabilities_for_tool(tool)
+        return (registered.known and ToolEffect.WRITE_WORKSPACE in registered.effects
+                and tool not in _WORKSPACE_WRITERS_WITHOUT_PATH)
     return _targets_instruction_file(_path(content), workspace)
 
 
