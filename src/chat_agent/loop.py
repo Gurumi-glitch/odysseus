@@ -118,6 +118,13 @@ class Fallback:
 
 
 @dataclass(frozen=True)
+class LevelRefused:
+    """The thinking level was refused; the round is re-sent without one."""
+
+    event: Dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ChatAgentTurn:
     session_id: str
     sess: Any
@@ -239,7 +246,7 @@ def _max_tokens(
 async def _round_with_fallback(
     turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
     tool_schemas: Sequence[Dict[str, Any]], history_start: int, current: Dict[str, Any],
-) -> AsyncIterator[Union[RoundEvent, Fallback]]:
+) -> AsyncIterator[Union[RoundEvent, Fallback, LevelRefused]]:
     """One round on the turn's current candidate; a failure before any output
     with an eligible status moves to the next candidate (spec #44 Providers).
     A failure after output passes through: switching would repeat streamed text.
@@ -285,6 +292,16 @@ async def _round_with_fallback(
                     yield event
             if failure is None:
                 return
+            if thinking is not None and capabilities.is_effort_rejection(failure.status, failure.message):
+                # The level failed, not the model: re-send once on this
+                # candidate at the server's default, before any fallback (#80).
+                capabilities.learn_unsupported_level(candidate.endpoint.url, candidate.endpoint.model, level)
+                thinking = None
+                yield LevelRefused({
+                    "type": "thinking_level_refused", "level": level,
+                    "message": capabilities.LEVEL_REFUSED.format(model=candidate.endpoint.model, level=level),
+                })
+                continue
             if retry_left and failure.status in SINGLE_CANDIDATE_RETRY_STATUSES:
                 retry_left = False
                 logger.warning("chat_agent: retrying %s after pre-output HTTP %s",
@@ -482,6 +499,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         endpoint, conversation = event.candidate.endpoint, event.conversation
                         usage.route = event.candidate
                         record.provider, record.model = provider_key(endpoint.url), endpoint.model
+                        yield _event(event.event)
+                    elif isinstance(event, LevelRefused):
                         yield _event(event.event)
                     elif isinstance(event, ProviderError):
                         failure = event

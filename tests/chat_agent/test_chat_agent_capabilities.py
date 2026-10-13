@@ -27,7 +27,8 @@ BONSAI = "Ternary-Bonsai-2-27B"
 def serve_probes(monkeypatch, routes, *, chat=None):
     """Serve every outgoing request from one mock transport.
 
-    ``routes`` maps "METHOD path" to a JSON body or an int status; unrouted
+    ``routes`` maps "METHOD path" to a JSON body, an int status or a
+    handler taking the request; unrouted
     probe paths answer 404. ``chat`` answers POST .../chat/completions.
     Returns the list of "METHOD path?query" strings seen.
     """
@@ -41,6 +42,8 @@ def serve_probes(monkeypatch, routes, *, chat=None):
         answer = routes.get(f"{request.method} {request.url.path}", 404)
         if isinstance(answer, Exception):
             raise answer
+        if callable(answer):
+            return answer(request)
         if isinstance(answer, int):
             return httpx.Response(answer, json={"error": "nope"})
         return httpx.Response(200, json=answer)

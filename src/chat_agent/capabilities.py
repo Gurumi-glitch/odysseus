@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -53,6 +54,7 @@ LEVELS = (THINKING_OFF,) + THINKING_GRADED
 BINARY_ON = "medium"
 
 NATIVE_TOOLS_REJECTED = "This model doesn't support native tools; the next message uses legacy."
+LEVEL_REFUSED = "{model} doesn't support thinking level {level}; it answered at its default level."
 
 PROBE_TIMEOUT_SECONDS = 1.0
 SERVER_REPORTED_TTL_SECONDS = 60.0
@@ -60,6 +62,9 @@ SERVER_REPORTED_TTL_SECONDS = 60.0
 _OLLAMA_TOOLS_REJECTED = "does not support tools"
 # Local servers on these ports have no capability endpoint (vLLM, SGLang).
 _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
+# "Unexpected reasoning effort" (llama.cpp templates), LM Studio's
+# "reasoning_effort" 400, OpenRouter's mandatory-reasoning refusal (#80).
+_EFFORT_REJECTED = re.compile(r"reasoning|effort", re.IGNORECASE)
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
 
@@ -118,6 +123,10 @@ def learn_no_native_tools(endpoint_url: str, model: str) -> None:
     _learned.setdefault((_origin(endpoint_url), model), {})[_TOOLS] = NO
 
 
+def learn_unsupported_level(endpoint_url: str, model: str, level: str) -> None:
+    _learned.setdefault((_origin(endpoint_url), model), {})[level] = UNSUPPORTED
+
+
 def forget_endpoint(endpoint_url: str) -> None:
     """Drop everything known about this endpoint's server (model-list refresh)."""
     origin = _origin(endpoint_url)
@@ -151,6 +160,10 @@ def is_tools_rejection(status: Optional[int], message: str) -> bool:
     if status != 400:
         return False
     return _native_tool_transport_rejected(message) or _OLLAMA_TOOLS_REJECTED in (message or "").lower()
+
+
+def is_effort_rejection(status: Optional[int], message: str) -> bool:
+    return status is not None and 400 <= status < 600 and bool(_EFFORT_REJECTED.search(message or ""))
 
 
 async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Report]:
@@ -187,7 +200,48 @@ async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Repo
     if not isinstance(props, dict) or not isinstance(props.get("chat_template_caps"), dict):
         return {}
     # /props names the loaded file, not the id the chat uses: it answers for `model`.
-    return {model: _Report(_verdict(llamacpp.record_from_props_payload(props)))}
+    return {model: _Report(
+        _verdict(llamacpp.record_from_props_payload(props)), await _llamacpp_levels(base, model),
+    )}
+
+
+async def _llamacpp_levels(base: str, model: str) -> ThinkingLevels:
+    """Render the prompt once for Auto and once per level with POST
+    /apply-template (no generation; ~1ms each on the PriSM fork, #80). A
+    failed probe reports nothing, and the tools verdict from /props stands."""
+    try:
+        auto = await _render(base, model, None)
+        if auto is None:
+            return ThinkingLevels()
+        renders = {level: await _render(base, model, level) for level in LEVELS}
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("chat_agent: thinking level probe for %s failed (%s)", model, type(exc).__name__)
+        return ThinkingLevels()
+    graded = [renders[level] for level in THINKING_GRADED if renders[level] is not None]
+    # A level equal to Auto may just be the template default (Bonsai's xhigh):
+    # only when every graded level renders like Auto does effort do nothing.
+    graded_effect = any(prompt != auto for prompt in graded)
+    support = {level: UNSUPPORTED if renders[level] is None or not graded_effect else SUPPORTED
+               for level in THINKING_GRADED}
+    support[THINKING_OFF] = SUPPORTED if renders[THINKING_OFF] not in (None, auto) else UNSUPPORTED
+    return ThinkingLevels(support)
+
+
+async def _render(base: str, model: str, level: Optional[str]) -> Optional[str]:
+    """The rendered prompt, or None when the template refuses the level (HTTP 500)."""
+    body: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+    if level is not None:
+        # The wire value, as the Chat Completions adapter sends Off.
+        body["reasoning_effort"] = "none" if level == THINKING_OFF else level
+    response = await _client().post(f"{base}/apply-template", json=body, timeout=PROBE_TIMEOUT_SECONDS)
+    if response.status_code == 500:
+        return None
+    response.raise_for_status()
+    payload = response.json()
+    prompt = payload.get("prompt") if isinstance(payload, dict) else None
+    if not isinstance(prompt, str):
+        raise ValueError("apply-template answered without a prompt")
+    return prompt
 
 
 async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict[str, _Report]:
