@@ -875,13 +875,52 @@ function replaceRawSvgBlocks(source, makePlaceholder) {
   return output;
 }
 
+// Every stash/restore token of one mdToHtml call carries a per-call random
+// nonce, so input text can never spell a token the restore step would honour:
+// a forged `___ALLOWED_HTML_0___` inside an alt="" would otherwise have a
+// stashed block expanded into it and break out of the attribute. Literal
+// `___X___` text in the input still renders as itself.
+function createPlaceholderTokens() {
+  const bytes = new Uint8Array(8);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    // Only unguessability from the input matters; Math.random is enough for
+    // the rare runtime without WebCrypto.
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  const nonce = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const prefix = (kind) => `___${kind}_${nonce}_`;
+  return {
+    make: (kind, index) => `${prefix(kind)}${index}___`,
+    prefix,
+    // Regex sources: the nonce is hex, so nothing here needs escaping.
+    indexPattern: (kind) => new RegExp(`${prefix(kind)}(\\d+)___`, 'g'),
+    anyOfSource: (kinds) => `___(?:${kinds.join('|')})_${nonce}_`,
+  };
+}
+
 export function mdToHtml(src, opts) {
+  const tokens = createPlaceholderTokens();
   const allowedHtmlBlocks = [];
   const codeBlocks = [];
   const inlineCodeBlocks = [];
   const mermaidBlocks = [];
   const svgBlocks = [];
   let s = extractMoreListPayloads(flattenLegacyNoteMoreDetails(src ?? ''));
+
+  // Markup leaves `s` the moment it is produced: the autolink passes are regex
+  // replaces over all of `s`, so an <a>/<img> left in place would get a second
+  // <a> spliced into its alt=/text (attribute injection). Expanding nested
+  // placeholders first keeps the invariant that the sanitizer sees a block's
+  // final markup; plain-text fallbacks (unsafe URL) stay in the stream.
+  const stashAllowedHtml = (html) => {
+    if (!html.startsWith('<')) return html;
+    const expanded = html.replace(tokens.indexPattern('ALLOWED_HTML'), (token, index) => allowedHtmlBlocks[index] ?? token);
+    const placeholder = tokens.make('ALLOWED_HTML', allowedHtmlBlocks.length);
+    allowedHtmlBlocks.push(sanitizeAllowedHtml(expanded));
+    return placeholder;
+  };
 
   // Extract fenced code blocks before any markdown/HTML preservation passes.
   // Otherwise placeholders from the allowed-HTML sanitizer (e.g.
@@ -900,7 +939,7 @@ export function mdToHtml(src, opts) {
     // and every network fetch;
     // malformed SVG remains confined to the frame instead of entering chat DOM.
     if (lang && lang.toLowerCase() === 'svg') {
-      const placeholder = `___SVG_BLOCK_${svgBlocks.length}___`;
+      const placeholder = tokens.make('SVG_BLOCK', svgBlocks.length);
       svgBlocks.push(renderSvgSandbox(cleaned));
       return placeholder;
     }
@@ -909,13 +948,13 @@ export function mdToHtml(src, opts) {
     if (lang && lang.toLowerCase() === 'mermaid') {
       const mermaidId = 'mermaid-' + Date.now() + '-' + mermaidBlocks.length;
       const raw = cleaned.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-      const placeholder = `___MERMAID_BLOCK_${mermaidBlocks.length}___`;
+      const placeholder = tokens.make('MERMAID_BLOCK', mermaidBlocks.length);
       mermaidBlocks.push(`<div class="mermaid-container"><pre class="mermaid" id="${mermaidId}">${escapeHtml(raw)}</pre></div>`);
       return placeholder;
     }
 
     const escaped = cleaned.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-    const placeholder = `___CODE_BLOCK_${codeBlocks.length}___`;
+    const placeholder = tokens.make('CODE_BLOCK', codeBlocks.length);
 
     const langClass = lang ? ` class="language-${lang}"` : '';
     const runnableLangs = ['python','py','javascript','js','html','bash','sh','shell','zsh'];
@@ -935,8 +974,8 @@ export function mdToHtml(src, opts) {
   // ___ALLOWED_HTML_ placeholder — corrupting the command. The old inline-code
   // pass ran after those passes, too late to protect it.
   s = s.replace(/`([^`]+?)`/g, (match, code) => {
-    if (code.startsWith('___CODE_BLOCK_') || code.startsWith('___MERMAID_BLOCK_') || code.startsWith('___SVG_BLOCK_')) return match;
-    const placeholder = `___INLINE_CODE_${inlineCodeBlocks.length}___`;
+    if (['CODE_BLOCK', 'MERMAID_BLOCK', 'SVG_BLOCK'].some((kind) => code.startsWith(tokens.prefix(kind)))) return match;
+    const placeholder = tokens.make('INLINE_CODE', inlineCodeBlocks.length);
     inlineCodeBlocks.push(`<code>${escapeHtml(code)}</code>`);
     return placeholder;
   });
@@ -945,7 +984,7 @@ export function mdToHtml(src, opts) {
   // complete raw SVG element as the same visual artifact, while fenced and
   // inline-code examples remain protected by the extraction passes above.
   s = replaceRawSvgBlocks(s, rawSvg => {
-    const placeholder = `___SVG_BLOCK_${svgBlocks.length}___`;
+    const placeholder = tokens.make('SVG_BLOCK', svgBlocks.length);
     svgBlocks.push(renderSvgSandbox(rawSvg));
     return placeholder;
   });
@@ -999,21 +1038,25 @@ export function mdToHtml(src, opts) {
   // Convert markdown images before links so ![alt](url) does not become
   // literal "!" plus a normal link.
   s = s.replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (match, alt, url, title) => {
-    return imageHtml(alt, url, title);
+    return stashAllowedHtml(imageHtml(alt, url, title));
   });
 
   // Convert markdown links [text](url) to clickable links
   // Internal #hash links navigate in-page; external links open in new tab
   s = s.replace(/\[((?:\\.|[^\]\\\n])+)\]\(([^)]+)\)/g, (match, text, url) => {
     const label = text.replace(/\\([\[\]])/g, '$1');
-    return linkHtml(label, url);
+    return stashAllowedHtml(linkHtml(label, url));
   });
 
-  // Autolink bare URLs (http/https). Skips URLs already inside <a> tags
-  // (placed by markdown link replacement above) and URLs in backticks.
+  // Raw <a>/<img> tags the model wrote as HTML leave the stream here too, so
+  // the autolinks below cannot splice into their attributes either.
+  s = s.replace(/<(?:a\s+[^>]*>.*?<\/a|img\s+[^>]*?)>/gi, stashAllowedHtml);
+
+  // Autolink bare URLs (http/https). Markdown links/images and raw tags are
+  // already placeholders, and URLs in backticks were extracted above.
   s = s.replace(
-    /(^|[\s(<：，、。；（「『【《　])(https?:\/\/[^\s<>"'`\]。，、；：）」』】》！？　]+[^\s<>"'`\].,;:!?。，、；：）」』】》！？　])/g,
-    (match, prefix, url) => `${prefix}${linkHtml(url, url)}`
+    /(^|[\s(<\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef])(https?:\/\/[^\s<>"'`\]。，、；：）」』】》！？　]+[^\s<>"'`\].,;:!?。，、；：）」』】》！？　])/g,
+    (match, prefix, url) => `${prefix}${stashAllowedHtml(linkHtml(url, url))}`
   );
 
   // Autolink scheme-less domains the model often emits as plain text
@@ -1029,24 +1072,12 @@ export function mdToHtml(src, opts) {
     (match, prefix, domain) => {
       const trail = (domain.match(/[.,;:!?)]+$/) || [''])[0];
       const core = trail ? domain.slice(0, -trail.length) : domain;
-      return `${prefix}${linkHtml(core, 'https://' + core)}${trail}`;
+      return `${prefix}${stashAllowedHtml(linkHtml(core, 'https://' + core))}${trail}`;
     }
   );
 
   // Extract <details>...</details> blocks and replace with placeholders.
-  s = s.replace(/<details>([\s\S]*?)<\/details>/gi, (match) => {
-    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
-    allowedHtmlBlocks.push(sanitizeAllowedHtml(match));
-    return placeholder;
-  });
-
-  // ALSO preserve <a>/<img> tags the same way (they're now in the HTML from
-  // markdown conversion)
-  s = s.replace(/<(?:a\s+[^>]*>.*?<\/a|img\s+[^>]*?)>/gi, (match) => {
-    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
-    allowedHtmlBlocks.push(sanitizeAllowedHtml(match));
-    return placeholder;
-  });
+  s = s.replace(/<details>([\s\S]*?)<\/details>/gi, stashAllowedHtml);
 
   // Now escape everything else
   s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1061,7 +1092,7 @@ export function mdToHtml(src, opts) {
   // an inert placeholder for renderMath() to swap once the library lands.
   const pushMath = (math, displayMode) => {
     const raw = decodeMathSource(math).trim();
-    const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+    const placeholder = tokens.make('MATH_BLOCK', mathBlocks.length);
     if (window.katex) {
       mathBlocks.push(katex.renderToString(raw, { displayMode, throwOnError: false }));
     } else {
@@ -1097,7 +1128,7 @@ export function mdToHtml(src, opts) {
 
   // Handle pipe tables
   s = s.replace(/(?:^|\n)([^\n]*\|[^\n]*\|[^\n]*)(?:\n([^\n]*\|[^\n]*\|[^\n]*))*/g, (table) => {
-    if (table.includes('___CODE_BLOCK_') || table.includes('___ALLOWED_HTML_')) return table;
+    if (table.includes(tokens.prefix('CODE_BLOCK')) || table.includes(tokens.prefix('ALLOWED_HTML'))) return table;
 
     const rows = table.trim().split('\n');
     if (rows.length < 2) return table;
@@ -1166,11 +1197,12 @@ export function mdToHtml(src, opts) {
     `<blockquote>${m.trim().replace(/<\/?bq>/g, (t) => t === '<bq>' ? '<p>' : '</p>')}</blockquote>`);
 
   // Paragraphs - but NOT for code block placeholders or allowed HTML
-  s = s.replace(/^(?!<h\d|<ul>|<ol>|<li|<oli>|<\/li>|<pre>|<blockquote>|<bq>|<hr>|___CODE_BLOCK_|___ALLOWED_HTML_|___MATH_BLOCK_|___MERMAID_BLOCK_|___SVG_BLOCK_)([^\n]+)$/gm, '<p>$1</p>');
+  const blockPlaceholder = tokens.anyOfSource(['CODE_BLOCK', 'ALLOWED_HTML', 'MATH_BLOCK', 'MERMAID_BLOCK', 'SVG_BLOCK']);
+  s = s.replace(new RegExp(`^(?!<h\\d|<ul>|<ol>|<li|<oli>|<\\/li>|<pre>|<blockquote>|<bq>|<hr>|${blockPlaceholder})([^\\n]+)$`, 'gm'), '<p>$1</p>');
 
   // Line breaks within paragraphs
   s = s.replace(/<p>([\s\S]*?)<\/p>/g, (match, content) => {
-    if (content.includes('___CODE_BLOCK_') || content.includes('___ALLOWED_HTML_') || content.includes('___MATH_BLOCK_') || content.includes('___MERMAID_BLOCK_') || content.includes('___SVG_BLOCK_')) return match;
+    if (new RegExp(blockPlaceholder).test(content)) return match;
     const withLineBreaks = content.replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>');
     return `<p>${withLineBreaks}</p>`;
   });
@@ -1188,33 +1220,33 @@ export function mdToHtml(src, opts) {
 
   // CRITICAL: Restore allowed HTML blocks first
   allowedHtmlBlocks.forEach((block, index) => {
-    s = s.replace(`___ALLOWED_HTML_${index}___`, () => block);
+    s = s.replace(tokens.make('ALLOWED_HTML', index), () => block);
   });
 
   // Restore math blocks
   mathBlocks.forEach((block, index) => {
-    s = s.replace(`___MATH_BLOCK_${index}___`, () => block);
+    s = s.replace(tokens.make('MATH_BLOCK', index), () => block);
   });
 
   // Restore mermaid diagram blocks
   mermaidBlocks.forEach((block, index) => {
-    s = s.replace(`___MERMAID_BLOCK_${index}___`, () => block);
+    s = s.replace(tokens.make('MERMAID_BLOCK', index), () => block);
   });
 
   // Restore isolated inline SVG previews before ordinary code blocks.
   svgBlocks.forEach((block, index) => {
-    s = s.replace(`___SVG_BLOCK_${index}___`, () => block);
+    s = s.replace(tokens.make('SVG_BLOCK', index), () => block);
   });
 
   // CRITICAL: Restore code blocks at the end
   codeBlocks.forEach((block, index) => {
-    s = s.replace(`___CODE_BLOCK_${index}___`, () => block);
+    s = s.replace(tokens.make('CODE_BLOCK', index), () => block);
   });
 
   // Restore inline code spans last, so placeholders carried inside restored
   // <a>/allowed-HTML blocks are resolved too.
   inlineCodeBlocks.forEach((block, index) => {
-    s = s.replace(`___INLINE_CODE_${index}___`, () => block);
+    s = s.replace(tokens.make('INLINE_CODE', index), () => block);
   });
 
   return _useSvgEmoji() ? svgifyEmoji(s, opts) : s;
