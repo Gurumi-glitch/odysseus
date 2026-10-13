@@ -6542,6 +6542,7 @@ import { invalidateSettings } from './appConfig.js';
     let metricsData = null;
     let replayError = null;
     let canonicalTerminalSeen = false;
+    let sawDone = false;
     let currentToolBubble = null;
     let currentToolThread = null;
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
@@ -6672,6 +6673,7 @@ import { invalidateSettings } from './appConfig.js';
           if (!line) continue;
           const payload = line.slice(6);
           if (payload === '[DONE]') {
+            sawDone = true;
             try { await reader.cancel(); } catch (_) {}
             break readLoop;
           }
@@ -6827,6 +6829,21 @@ import { invalidateSettings } from './appConfig.js';
     cleanup();
     if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
     if (leftSession) { removeReplayNodes(); return true; }
+
+    // The connection ended before [DONE] while the run kept going on the
+    // server; finalizing here would leave the turn cut off at the last event
+    // (a running tool card, no answer). Re-attach the way the live reader's
+    // auto-recovery does, under the same per-turn cap: the new reader replays
+    // the run's buffer from its first event, so this reader's nodes make way.
+    // A 404 means the run ended meanwhile: its saved answer is on the server.
+    if (!sawDone && !replayError && _autoNudges < _AUTO_NUDGE_CAP
+        && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
+      _autoNudges++;
+      removeReplayNodes();
+      if (await resumeStream(sessionId)) return true;
+      await sessionModule.selectSession(sessionId, { showLoading: false });
+      return true;
+    }
 
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
