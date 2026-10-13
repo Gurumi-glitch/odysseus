@@ -848,6 +848,10 @@ def _permission_decision(
     if reply.decision == asks.DENY:
         reason = "Denied by the user."
         return permissions.Decision(permissions.DENY, f"{reason} Reason: {reply.text}" if reply.text else reason)
+    # Only an explicit allow runs the tool; any other value (a decision added
+    # later, a malformed reply) is a denial.
+    if reply.decision not in (asks.ONCE, asks.CHAT):
+        return permissions.Decision(permissions.DENY, "Denied: the reply was not an allow.")
     if reply.decision == asks.CHAT and rule is not None:
         store.add_session_rule(turn.owner, turn.session_id, rule.record())
     return permissions.Decision(permissions.ALLOW)
