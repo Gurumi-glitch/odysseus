@@ -53,7 +53,13 @@ from src.chat_agent.providers import (
 from src.chat_agent.routing import ComposerToggles
 from src import settings
 from src.llm_core import LLMConfig
-from src.model_context import estimate_text_tokens, estimate_tokens
+# Relies on: fit_output_token_budget returns a positive allowance unchanged
+# when it fits the window less the estimated request (messages + tool schemas)
+# and a safety margin, else that room (at least 1).
+from src.generation_budget import fit_output_token_budget
+# Relies on: get_context_length_known returns (window, measured); measured is
+# False only for the bare DEFAULT_CONTEXT fallback.
+from src.model_context import estimate_text_tokens, estimate_tokens, get_context_length_known
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -79,6 +85,15 @@ _NOT_RUN_REASONS = {
     transcript.STOP_ASK_EXPIRED: ASK_EXPIRED_REASON,
 }
 CRASH_MESSAGE = "The chat agent runtime failed on this turn. See the server log."
+# A round cut at the output limit (finish_reason=length, spec #89). No retry.
+OUTPUT_LIMIT_THINKING = (
+    "Stopped: {model} reached the output limit while thinking, before any answer. "
+    "Raise Max tokens or lower the thinking level."
+)
+OUTPUT_LIMIT_TOOL_CALL = (
+    "Stopped: {model} reached the output limit in the middle of a tool call; the call was not run."
+)
+OUTPUT_LIMIT_NOTICE = "stopped at output limit"
 # With no fallback configured, one retry on these (the legacy foreground
 # availability retry, spec #44 Providers).
 SINGLE_CANDIDATE_RETRY_STATUSES = frozenset({502, 503, 504, 529})
@@ -110,7 +125,8 @@ class ChatAgentTurn:
     owner: str
     toggles: ComposerToggles
     auto_escalated: bool
-    temperature: float
+    # The session's overrides; None / 0 = unset, and nothing is sent.
+    temperature: Optional[float]
     max_tokens: int
     # The route's build_chat_context bound to this request; prompt picks the flags.
     build_context: Callable[..., Awaitable[Any]]
@@ -195,15 +211,30 @@ def _stream_round(
     turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
     tool_schemas: Sequence[Dict[str, Any]],
 ) -> AsyncIterator[RoundEvent]:
+    max_tokens = _max_tokens(turn.max_tokens, endpoint, conversation, tool_schemas)
     if provider == XAI:
         return xai_responses.stream_round(
             endpoint, conversation, cache_key=turn.session_id,
-            temperature=turn.temperature, max_tokens=turn.max_tokens, tools=tool_schemas,
+            temperature=turn.temperature, max_tokens=max_tokens, tools=tool_schemas,
         )
     return chat_completions.stream_round(
-        endpoint, conversation, temperature=turn.temperature, max_tokens=turn.max_tokens,
+        endpoint, conversation, temperature=turn.temperature, max_tokens=max_tokens,
         tools=tool_schemas, thinking_mode=turn.thinking_mode,
     )
+
+
+def _max_tokens(
+    requested: int, endpoint: Endpoint, conversation: List[Dict[str, Any]], tool_schemas: Sequence[Dict[str, Any]],
+) -> int:
+    """A set max_tokens clamped to the room left in a measured window, so the
+    server never rejects the request for asking too much. An unmeasured
+    window's fallback size proves nothing, so it does not clamp."""
+    if requested <= 0:
+        return requested
+    window, measured = get_context_length_known(endpoint.url, endpoint.model)
+    if not measured:
+        return requested
+    return fit_output_token_budget(requested, window, transcript.text_view(conversation), list(tool_schemas))
 
 
 async def _round_with_fallback(
@@ -465,14 +496,21 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             streamed.clear()
             thought.clear()
             round_record = _round_record(end)
+            calls = [b for b in end.blocks if b["type"] == "tool_call"]
+            if end.output_limit:
+                failure = _output_limit(record, round_record, calls, endpoint.model)
+                saved = failure is not None
             record.rounds.append(round_record)
             usage.add_round(len(record.rounds), end, conversation)
             writer.checkpoint()
-            calls = [b for b in end.blocks if b["type"] == "tool_call"]
+            if failure is not None:
+                break
             if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
                 # Finish's tool-less round is the turn's last. A steer sent
-                # during a plain answer gets one more round to be answered.
-                if calls or record.stop_reason or not steers.texts or len(record.rounds) >= caps.max_rounds:
+                # during a plain answer gets one more round to be answered;
+                # an answer cut at the output limit ends the turn as it is.
+                if (calls or record.stop_reason or not steers.texts or end.output_limit
+                        or len(record.rounds) >= caps.max_rounds):
                     if not calls and record.stop_reason is None and not record.round_texts[-1].strip():
                         failure, saved = ProviderError(502, f"{endpoint.model} returned no answer"), True
                         # Whitespace is not an answer; the thinking stays.
@@ -703,6 +741,25 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     if message_id:
         yield _event({"type": "message_saved", "id": message_id})
     yield "data: [DONE]\n\n"
+
+
+def _output_limit(
+    record: transcript.TurnRecord, round_record: Dict[str, Any], calls: List[Dict[str, Any]], model: str,
+) -> Optional[ProviderError]:
+    """A round cut at the output limit: the error that ends the turn, or None
+    when the answer is kept with a saved notice. The round's blocks lose what
+    must not be kept."""
+    blocks = round_record["blocks"]
+    if calls:
+        # Cut arguments are not run, and a call with no result would not replay.
+        round_record["blocks"] = [b for b in blocks if b["type"] != "tool_call"]
+        return ProviderError(502, OUTPUT_LIMIT_TOOL_CALL.format(model=model))
+    if not "".join(b["text"] for b in blocks if b["type"] == "text").strip():
+        # Takes the place of the empty-answer error; whitespace is not an answer.
+        round_record["blocks"] = [b for b in blocks if b["type"] != "text"]
+        return ProviderError(502, OUTPUT_LIMIT_THINKING.format(model=model))
+    record.notice = OUTPUT_LIMIT_NOTICE
+    return None
 
 
 def _finish_failed_turn(writer: transcript.TurnWriter, error: Optional[str] = None, *, save: bool = False) -> None:

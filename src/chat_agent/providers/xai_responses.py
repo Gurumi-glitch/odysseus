@@ -50,7 +50,7 @@ def build_payload(
     conversation: List[Dict[str, Any]],
     *,
     cache_key: str,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
@@ -62,7 +62,7 @@ def build_payload(
         "include": _INCLUDE,
         "prompt_cache_key": cache_key,
     }
-    if not _omit_temperature(_detect_provider(endpoint.url), endpoint.model):
+    if temperature is not None and not _omit_temperature(_detect_provider(endpoint.url), endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
         payload["max_output_tokens"] = max_tokens
@@ -142,7 +142,7 @@ async def stream_round(
     conversation: List[Dict[str, Any]],
     *,
     cache_key: str,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
 ) -> AsyncIterator[RoundEvent]:

@@ -106,6 +106,8 @@ class TurnRecord:
     metrics: Dict[str, Any] = field(default_factory=dict)
     # The visible error a STOP_ERROR turn ended with, shown again on reload.
     error: Optional[str] = None
+    # A visible note on a kept answer (the output-limit cut), shown on reload.
+    notice: Optional[str] = None
 
     @property
     def round_texts(self) -> List[str]:
@@ -152,6 +154,8 @@ class TurnRecord:
             metadata["stop_reason"] = self.stop_reason
         if self.error:
             metadata["error"] = self.error
+        if self.notice:
+            metadata["notice"] = self.notice
         return metadata
 
     def content(self) -> str:
@@ -459,6 +463,16 @@ async def summarise(messages: List[Dict[str, Any]], endpoint: Endpoint, owner: s
     return normalize_compaction_summary(summary) or None
 
 
+def text_view(conversation: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The conversation as role/content messages for the token estimates (they
+    read only ``content``, so round blocks would otherwise count as empty).
+    Other messages keep their content as is, image parts included."""
+    return [
+        {"role": m["role"], "content": _summary_text(m) if "blocks" in m or m["role"] == "tool" else m.get("content")}
+        for m in conversation
+    ]
+
+
 def _summary_text(message: Dict[str, Any]) -> str:
     """A message as the summariser reads it: rounds as text and calls."""
     if "blocks" in message:
@@ -545,8 +559,7 @@ async def fit_request(
     at a turn boundary. Request-local: the next turn compacts the stored chat
     at the fallback's (now sticky) window."""
     window = get_context_length(endpoint.url, endpoint.model)
-    view = [{"role": m["role"], "content": _summary_text(m)} for m in conversation]
-    if not over_threshold(estimate_tokens(view), window):
+    if not over_threshold(estimate_tokens(text_view(conversation)), window):
         return conversation
     end = next(i for i, message in enumerate(conversation) if message is current)
     history = conversation[history_start:end]

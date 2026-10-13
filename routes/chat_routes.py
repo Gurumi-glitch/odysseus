@@ -20,7 +20,6 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
-    LLMConfig,
     _normalize_http_status,
     llm_call_async,
     llm_call_async_with_route_fallback,
@@ -3054,11 +3053,8 @@ def setup_chat_routes(
                 owner=owner,
                 toggles=composer_toggles,
                 auto_escalated=auto_escalated,
-                temperature=(
-                    temperature_override
-                    if temperature_override is not None
-                    else LLMConfig.DEFAULT_TEMPERATURE
-                ),
+                # Unset sends nothing: the server's default applies (spec #89).
+                temperature=temperature_override,
                 max_tokens=getattr(sess, "max_tokens_override", None) or 0,
                 thinking_mode=thinking_mode,
                 build_context=functools.partial(

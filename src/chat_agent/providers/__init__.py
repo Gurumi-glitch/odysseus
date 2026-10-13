@@ -68,6 +68,8 @@ class Usage:
 class RoundEnd:
     blocks: List[Dict[str, Any]]
     usage: Optional[Usage]
+    # The provider stopped the round at its output limit (finish_reason=length).
+    output_limit: bool = False
 
 
 RoundEvent = Union[TextDelta, ReasoningDelta, ProviderError, RoundEnd]

@@ -62,7 +62,7 @@ def build_payload(
     endpoint: Endpoint,
     conversation: List[Dict[str, Any]],
     *,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
     thinking_mode: Optional[str] = None,
@@ -78,7 +78,8 @@ def build_payload(
         # calls per round, and the loop runs them one at a time (spec #44).
         payload["tools"] = list(tools)
         payload["tool_choice"] = "auto"
-    if not _omit_temperature(provider, endpoint.model):
+    # Unset sends nothing, so the server's own sampling default applies (spec #89).
+    if temperature is not None and not _omit_temperature(provider, endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
         key = "max_completion_tokens" if _uses_max_completion_tokens(endpoint.model) else "max_tokens"
@@ -133,7 +134,7 @@ async def stream_round(
     endpoint: Endpoint,
     conversation: List[Dict[str, Any]],
     *,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
     thinking_mode: Optional[str] = None,
@@ -162,6 +163,7 @@ async def stream_round(
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
         usage = None
+        output_limit = False
         async for line in response.aiter_lines():
             # SSE allows "data:value" without the space.
             if not line.startswith("data:"):
@@ -180,6 +182,7 @@ async def stream_round(
                 usage = _usage(chunk["usage"])
             for choice in chunk.get("choices") or ():
                 delta = choice.get("delta") or {}
+                output_limit = output_limit or choice.get("finish_reason") == "length"
                 # OpenRouter: "the complete reasoning sequence is built by
                 # concatenating all chunks in order".
                 details.extend(delta.get("reasoning_details") or ())
@@ -202,7 +205,7 @@ async def stream_round(
              "name": call["name"], "arguments": call["arguments"]}
             for _, call in sorted(calls.items())
         ]
-        yield RoundEnd(blocks, usage)
+        yield RoundEnd(blocks, usage, output_limit)
 
 
 # Inline thinking (spec #89): only these tags, only when they open a round's
