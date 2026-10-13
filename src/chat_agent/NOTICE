@@ -1,0 +1,13 @@
+src/chat_agent/repeat_guard.py is derived from Kimi CLI
+(https://github.com/MoonshotAI/kimi-cli, src/kimi_cli/soul/toolset.py),
+licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0), and was modified for Odysseus.
+The file keeps the Apache-2.0 header and states what was changed.
+
+Attribution notice from Kimi CLI's NOTICE file:
+
+Kimi Code CLI
+Copyright 2025 Moonshot AI
+
+This product includes software developed at
+Moonshot AI (https://www.moonshot.ai/).

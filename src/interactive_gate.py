@@ -8,9 +8,12 @@ user opening Odysseus, Cookbook, email, documents, notes, or other panels.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 import os
 import time
+
+logger = logging.getLogger(__name__)
 
 
 _ACTIVE_REQUESTS = 0
@@ -146,19 +149,27 @@ def _has_active_chat_stream() -> bool:
     tasks must still wait for those runs; otherwise helpers like email
     auto-translate compete with the user's active chat on the same local model.
     """
+    # A run waiting on a chat_agent ask does no model work; skipping it keeps
+    # one open question from stalling background work for everyone (#56).
+    try:
+        from src import agent_runs
+    except ImportError:
+        logger.warning("agent_runs unavailable; detached runs not checked", exc_info=True)
+        runs = {}
+    else:
+        runs = agent_runs.snapshot_runs()
+    awaiting = {sid for sid, run in runs.items() if run.awaiting_user}
     try:
         from routes import chat_routes as _chat_routes
         active_streams = getattr(_chat_routes, "_active_streams", {}) or {}
-        if active_streams:
+        if any(sid not in awaiting for sid in list(active_streams)):
             return True
     except Exception:
         pass
-    try:
-        from src import agent_runs
-        runs = getattr(agent_runs, "_RUNS", {}) or {}
-        return any(getattr(run, "status", None) == "running" for run in runs.values())
-    except Exception:
-        return False
+    return any(
+        run.status == "running" and sid not in awaiting
+        for sid, run in runs.items()
+    )
 
 
 @asynccontextmanager

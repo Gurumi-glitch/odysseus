@@ -1136,6 +1136,7 @@ import { invalidateSettings } from './appConfig.js';
   const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
   const _terminalSavedStreams = new Set(); // sessionId -> canonical terminal event seen by active reader
   const _streamRunIds = new Map();      // sessionId -> opaque identity of the current send's detached run
+  const _streamRuntimes = new Map();    // sessionId -> X-Odysseus-Runtime of that run (routes composer sends while it is live)
   const _streamGenerations = new Map(); // sessionId -> generation of the current (latest) send
   const _sendStates = new Map();        // sessionId -> { generation, abortCtrl } of the current send, installed synchronously at send commit so Stop never has to borrow an older send's controller
   const _pendingRunStops = new Map();   // 'sessionId:generation' -> abortCtrl|null; Stop queued for that send while it awaits headers. Keyed per send so concurrent sends' cancellation intents never displace each other.
@@ -1218,7 +1219,7 @@ import { invalidateSettings } from './appConfig.js';
     return true;
   }
 
-  function _rememberStreamRunId(sessionId, runId, generation) {
+  function _rememberStreamRunId(sessionId, runId, generation, runtime = '') {
     if (!sessionId || !runId) return;
     // A superseded send must not record its run id as the session's current
     // identity, but it must still flush its own queued Stop: this is the only
@@ -1226,6 +1227,7 @@ import { invalidateSettings } from './appConfig.js';
     // own POST reaches the server.
     if (_streamGenerations.get(sessionId) === generation) {
       _streamRunIds.set(sessionId, runId);
+      _streamRuntimes.set(sessionId, runtime);
     }
     const pendingKey = sessionId + ':' + generation;
     if (!_pendingRunStops.has(pendingKey)) return;
@@ -1452,11 +1454,13 @@ import { invalidateSettings } from './appConfig.js';
     } catch (_) { return {}; }
   }
 
-  function _persistQueuedRequests() {
+  function _persistQueuedRequests(removedSid = '') {
     const all = _readPersistedQueuedRequests();
     const touched = new Set(_queuedAgentRequests.map(item => String(item.sessionId || '')).filter(Boolean));
     const currentSid = _queuedSessionId();
     if (currentSid) touched.add(currentSid);
+    // The chat whose last queued item just left has no row to rewrite it from.
+    if (removedSid) touched.add(removedSid);
     for (const sid of touched) {
       const rows = _queuedAgentRequests
         .filter(item => item.sessionId === sid)
@@ -1635,7 +1639,7 @@ import { invalidateSettings } from './appConfig.js';
     if (idx < 0) return null;
     const [item] = _queuedAgentRequests.splice(idx, 1);
     if (item && item.el && item.el.parentNode) item.el.remove();
-    _persistQueuedRequests();
+    _persistQueuedRequests(item ? String(item.sessionId || '') : '');
     return item;
   }
 
@@ -1659,6 +1663,61 @@ import { invalidateSettings } from './appConfig.js';
       message: items.map(item => String(item.message || '').trim()).filter(Boolean).join('\n\n'),
       createdAt: items[0]?.createdAt || Date.now(),
     };
+  }
+
+  // A fallback answered and the server moved the session onto it (#55). The
+  // cached session and the last picker choice must follow, or the picker
+  // keeps the failed model and the next send carries it back as
+  // selected_model / selected_endpoint_id.
+  function _stickToFallbackRoute(json, sid) {
+    if (!sid || !json.answered_by) return;
+    const endpointId = json.answered_by_endpoint_id ? String(json.answered_by_endpoint_id) : '';
+    const items = window.modelsModule?.getCachedItems?.() || [];
+    const endpoint = endpointId ? items.find(item => String(item.endpoint_id || '') === endpointId) : null;
+    const s = (sessionModule.getSessions?.() || []).find(x => x.id === sid);
+    if (s) {
+      s.model = json.answered_by;
+      s.endpoint_id = endpointId;
+      s.endpoint_name = json.answered_by_endpoint_label || '';
+      // Unknown URL beats the failed one: the server ignores a model without
+      // a route rather than re-binding the session to the failed endpoint.
+      s.endpoint_url = endpoint ? endpoint.url || '' : '';
+    }
+    const lastPicked = window.__odysseusLastPickedRoute || null;
+    if (lastPicked && lastPicked.session_id === sid) {
+      window.__odysseusLastPickedRoute = {
+        model: json.answered_by,
+        endpoint_url: endpoint ? endpoint.url || '' : '',
+        endpoint_id: endpointId,
+        display: _shortModel(json.answered_by),
+        picked_at: Date.now(),
+        session_id: sid,
+      };
+    }
+    if (sessionModule.updateModelPicker) sessionModule.updateModelPicker();
+  }
+
+  // auto_mode stream states (#68): active; paused, after the chat's denials
+  // passed a threshold, until an approved ask; unavailable, when the turn
+  // cannot use it (no privilege, no one to answer asks).
+  function _applyAutoModeState(state) {
+    const btn = uiModule.el('auto-mode-toggle-btn');
+    if (!btn) return;
+    btn.classList.toggle('auto-paused', state === 'paused');
+    btn.title = state === 'paused' ? 'Auto mode paused until you approve an ask' : 'Auto mode';
+  }
+
+  /** The paused state of a chat as the server stores it, for the icon on session load (#68). */
+  async function checkAutoModePaused(sessionId) {
+    let paused = false;
+    if (sessionId) {
+      try {
+        const res = await fetch(`${API_BASE}/api/chat_agent/auto_mode/${encodeURIComponent(sessionId)}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        paused = res.ok && !!data.paused;
+      } catch (_) {}
+    }
+    _applyAutoModeState(paused ? 'paused' : 'active');
   }
 
   function _setComposerAndSend(message) {
@@ -1699,13 +1758,21 @@ import { invalidateSettings } from './appConfig.js';
       return;
     }
     try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
+    // An empty composer keeps the submit handler on its stop branch: a draft
+    // would answer a waiting ask instead (and the queued message replaces it).
     const input = uiModule.el('message');
-    const submitBtn = document.querySelector('.send-btn');
     if (input) {
       input.value = '';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    if (submitBtn) submitBtn.click();
+    // Stop through the submit handler itself: the send button dispatches on
+    // its visual mode, and an idle-looking button with an empty composer is
+    // the New Chat button, which wiped the chat instead of stopping. A send
+    // still in flight has nothing to stop; _sendQueuedWhenIdle waits it out.
+    if (isStreaming) {
+      window.__odysseusQueueStreamingSubmit = 0;
+      handleChatSubmit({ preventDefault() {} }).catch(err => console.error('queued promote stop failed', err));
+    }
     _sendQueuedWhenIdle(item);
   }
 
@@ -1725,16 +1792,40 @@ import { invalidateSettings } from './appConfig.js';
     const queuedInput = uiModule.el('message');
     const queuedText = (queuedInput && queuedInput.value || '').trim();
     if (!queuedText) return false;
+    const sid = sessionModule.getCurrentSessionId();
+    // The Enter paths call this before submit; while a chat_agent ask waits,
+    // the composer text is its answer, not a queued message (spec #44, Asks).
+    if (chatRenderer.hasPendingAsk(sid)) return false;
     if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
       try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
       return true;
     }
-    if (_queueAgentRequest(queuedText)) {
+    const clearComposer = () => {
       queuedInput.value = '';
       queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
       if (uiModule.autoResize) uiModule.autoResize(queuedInput);
       try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
+    };
+    if (_streamRuntimes.get(sid) === 'chat_agent') {
+      // A chat_agent run takes the message at its next round boundary (#63);
+      // 409 means the turn already ended, so the message waits as before.
+      clearComposer();
+      fetch(`${API_BASE}/api/chat/steer/${encodeURIComponent(sid)}`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: queuedText }),
+      }).then(async res => {
+        if (res.ok) { chatRenderer.renderSteerBubble(queuedText); return; }
+        if (res.status === 409) { _queueAgentRequest(queuedText); return; }
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `Steer failed (${res.status})`);
+      }).catch(err => {
+        queuedInput.value = queuedText;
+        try { uiModule.showError && uiModule.showError(err.message || 'Could not send the message to the running turn'); } catch (_) {}
+      });
+      return true;
     }
+    if (_queueAgentRequest(queuedText)) clearComposer();
     return true;
   }
 
@@ -1772,6 +1863,16 @@ import { invalidateSettings } from './appConfig.js';
     // If compare is active, stop all compare streams
     if (window.compareModule && window.compareModule.isActive()) {
       window.compareModule.handleCompareSubmit();
+      return;
+    }
+
+    // While a chat_agent ask waits, a composer send answers it: a chat_stream
+    // send would cancel the waiting run (spec #44, Asks). Synthetic sends
+    // (voice, Continue) click the same button, so they land here too.
+    const askInput = uiModule.el('message');
+    if (chatRenderer.answerPendingAskFromComposer(sessionId, (askInput ? askInput.value : '').trim())) {
+      askInput.value = '';
+      if (uiModule.autoResize) uiModule.autoResize(askInput);
       return;
     }
 
@@ -1867,6 +1968,10 @@ import { invalidateSettings } from './appConfig.js';
         const stoppedLabel = document.createElement('span');
         stoppedLabel.textContent = '[Message interrupted]';
         stoppedIndicator.appendChild(stoppedLabel);
+        // A chat_agent run records the stop itself (stop_reason interrupted;
+        // its Resume would be the legacy merge), so only the marker shows.
+        const _sid = sessionModule.getCurrentSessionId();
+        const _stoppedAgentRun = _streamRuntimes.get(_sid) === 'chat_agent';
         const continueBtn = document.createElement('button');
         continueBtn.className = 'continue-btn resume-btn';
         continueBtn.title = 'Resume response';
@@ -1883,12 +1988,11 @@ import { invalidateSettings } from './appConfig.js';
             if (sb) sb.click();
           }
         });
-        stoppedIndicator.appendChild(continueBtn);
+        if (!_stoppedAgentRun) stoppedIndicator.appendChild(continueBtn);
         _stoppedViewHolder.querySelector('.body').appendChild(stoppedIndicator);
 
         // Tell server to mark this message as stopped
-        const _sid = sessionModule.getCurrentSessionId();
-        if (_sid) fetch(`${API_BASE}/api/session/${_sid}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
+        if (_sid && !_stoppedAgentRun) fetch(`${API_BASE}/api/session/${_sid}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
         // Add footer with copy/regen if not already present
         if (!_stoppedViewHolder.querySelector('.msg-footer')) {
@@ -2128,6 +2232,7 @@ import { invalidateSettings } from './appConfig.js';
     // (The old send's own queued Stop still works — its flush carries the run
     // id from its header, and its stale generation cannot repopulate this map.)
     _streamRunIds.delete(streamSessionId);
+    _streamRuntimes.delete(streamSessionId);
     _streamSessionId = streamSessionId;
     _sendInFlight = false;
 
@@ -2166,6 +2271,7 @@ import { invalidateSettings } from './appConfig.js';
     let _streamSawDone = false;
     let spinner = null;
     let timedOut = false;
+    let streamRuntime = ''; // X-Odysseus-Runtime of this send's run; the catch path reads it too
     let processingProbeTimer = null;
     let processingProbeAbort = null;
     let _renderStream = () => {};
@@ -2577,6 +2683,13 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.append('approved_plan', _pendingApprovedPlan.slice(0, 8192));
 	        _pendingApprovedPlan = '';
 	      }
+	      // One-shot, set by the composer's /name skill invocation (#66).
+	      if (window.__odysseusPendingInvokedSkill) {
+	        fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);
+	        window.__odysseusPendingInvokedSkill = '';
+	      }
+	      const _turnSource = chatRenderer.takePendingTurnSource();
+	      if (_turnSource) fd.append('source', _turnSource);
 	      if (el('web-toggle').checked) {
 	        if (!isAgentMode) {
 	          fd.append('use_web', 'true');
@@ -2592,6 +2705,9 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.set('plan_mode', 'false');
 	      }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
+      // Auto mode (#68) is agent-only like the shell toggle; the server checks
+      // the runtime, the privilege and that someone can answer asks.
+      fd.append('auto_mode', el('auto-mode-toggle')?.checked ? 'true' : 'false');
       const ragChk = el('rag-toggle');
       if (ragChk && !ragChk.checked) {
         fd.append('use_rag', 'false');
@@ -2824,7 +2940,8 @@ import { invalidateSettings } from './appConfig.js';
         return;
       }
       const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
-      if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration);
+      streamRuntime = res.headers.get('X-Odysseus-Runtime') || '';
+      if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration, streamRuntime);
 
       // Mark the chat log busy while streaming so screen readers wait for the
       // settled response instead of announcing every token. Cleared in finally.
@@ -2951,9 +3068,15 @@ import { invalidateSettings } from './appConfig.js';
             await new Promise(resolve => setTimeout(resolve, 100 * (_attempt + 1)));
             return _replaceLiveTurnWithSavedAssistantMessage(_attempt + 1);
           }
-          if (!saved || !String(saved.content || '').trim()) return false;
+          // A chat_agent row's content is every round joined; the live
+          // timeline already shows the earlier rounds, so only the last
+          // round's text replaces the final bubble (#65).
+          const savedRounds = saved?.metadata?.runtime === 'chat_agent' && !saved.metadata.edited
+            && Array.isArray(saved.metadata.round_texts) ? saved.metadata.round_texts : null;
+          const savedText = savedRounds ? savedRounds[savedRounds.length - 1] : saved?.content;
+          if (!saved || !String(savedText || '').trim()) return false;
           const scrollSnapshot = uiModule.captureHistoryScroll?.();
-          const rendered = _renderTerminalAnswer(saved.content, _savedAssistantMessageId, saved.metadata?.render_owner, saved.metadata?.replacement_scope);
+          const rendered = _renderTerminalAnswer(savedText, _savedAssistantMessageId, saved.metadata?.render_owner, saved.metadata?.replacement_scope);
           uiModule.restoreHistoryScroll?.(scrollSnapshot);
           if (rendered) _streamTurnMarker.remove();
           return rendered;
@@ -4125,7 +4248,9 @@ import { invalidateSettings } from './appConfig.js';
                 // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
                 // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
                 const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-                if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
+                // The chat_agent runtime marks reasoning with thinking deltas,
+                // so a reply opening like "Let me look at ..." is prose there.
+                if (!hasUnclosedThink && streamRuntime !== 'chat_agent' && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
                   const _trimmedRT = normalizedRoundText.trimStart();
                   const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
                   if (_isReasoning) {
@@ -4428,6 +4553,7 @@ import { invalidateSettings } from './appConfig.js';
                   var _selM = _shortModel(json.selected_model || '');
                   var _ansM = _shortModel(json.answered_by || '');
                   uiModule.showToast('Fallback: ' + _selM + ' failed — answered by ' + _ansM, 6000);
+                  _stickToFallbackRoute(json, streamSessionId);
                   var _fallbackHolder = applyModelRouteEventState(json, holder, roundHolder, modelName);
                   if (_fallbackHolder) {
                     var _rEl = _fallbackHolder.querySelector('.role');
@@ -4449,6 +4575,18 @@ import { invalidateSettings } from './appConfig.js';
                       });
                     }
                   }
+                }
+              } else if (streamRuntime === 'chat_agent' && (json.type === 'rounds_exhausted' || json.type === 'budget_exceeded')) {
+                // A capped chat_agent turn: the renderer's note, at the bottom
+                // of the chat-history container like the legacy one below.
+                const _chatBox = document.getElementById('chat-history');
+                if (!_isBg && _chatBox) {
+                  _cancelThinkingTimer();
+                  _removeThinkingSpinner();
+                  _chatBox.querySelector('.rounds-exhausted')?.remove();
+                  const note = chatRenderer.renderTurnStopNote(json.type === 'budget_exceeded' ? 'budget' : 'max_rounds', json);
+                  _chatBox.appendChild(note);
+                  try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
               } else if (json.type === 'rounds_exhausted') {
                 // The agent hit the per-turn step limit while still working.
@@ -4834,9 +4972,12 @@ import { invalidateSettings } from './appConfig.js';
                     currentToolBubble._elapsedTicker = null;
                   }
                   const ok = (json.exit_code === 0 || json.exit_code == null);
+                  // `blocked`: the runtime refused the call (denied, exit 126).
+                  const toolStatus = ok ? 'done' : json.blocked ? 'denied' : 'failed';
                   const cmd = json.command || '';
-                  let outHtml = '';
-                  if (!_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
+                  let outHtml = chatRenderer.toolDenialHtml(json);
+                  const deniedByAuto = !!outHtml;
+                  if (!deniedByAuto && !_suppressRawToolOutput(json.tool, ok) && json.output && json.output.trim()) {
                     outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
                   }
                   // File-write diff (write_file): show a before/after unified diff.
@@ -4878,9 +5019,9 @@ import { invalidateSettings } from './appConfig.js';
 	                  if (browserTool) {
                     outHtml = _privateBrowserPreviewHtml(cmd, json.screenshot) + outHtml;
                   }
-	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool;
+	                  const _wasOpen = currentToolBubble.classList.contains('open') || browserTool || deniedByAuto;
                   currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (_wasOpen ? ' open' : '') + (browserTool ? ' browser-preview-node' : '');
-                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
+                  currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${toolIcon2}<span class="agent-thread-tool">${esc(toolInfo2.label || json.tool)}</span>${toolHeaderAction2}<span class="agent-thread-status">${toolStatus}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
                   uiModule.scrollHistory();
@@ -5023,12 +5164,21 @@ import { invalidateSettings } from './appConfig.js';
 
               } else if (json.type === 'ask_user') {
                 if (_isBg) continue;
-                // The agent posed a multiple-choice question; the turn has ended.
+                // The agent posed a question. On legacy the turn has ended; on
+                // chat_agent it waits in place and the answer goes to the ask
+                // endpoint, so the card is routed by the run's runtime header.
                 // Use the shared history renderer so the live and restored
                 // versions have identical behavior.
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
-                chatRenderer.renderAskUserCard(json.data || {});
+                chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime') });
+
+              } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
+                if (_isBg) continue;
+                chatRenderer.resolveAskUserCard(json.ask_id, json);
+
+              } else if (json.type === 'auto_mode') {
+                if (!_isBg) _applyAutoModeState(json.state);
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
@@ -5435,6 +5585,8 @@ import { invalidateSettings } from './appConfig.js';
 
         // Attach footer to the last visible bubble (roundHolder for multi-round agent, holder for single)
         const footerTarget = (roundHolder && roundHolder !== holder && roundHolder.style.display !== 'none') ? roundHolder : holder;
+        // memories_used landed on holder before any round bubble existed; the pill reads it from the footer's bubble
+        if (footerTarget !== holder && holder._memoriesUsed) footerTarget._memoriesUsed = holder._memoriesUsed;
         if (!footerTarget.querySelector('.msg-footer')) {
           footerTarget.appendChild(createMsgFooter(footerTarget, { animate: true }));
         }
@@ -5727,12 +5879,14 @@ import { invalidateSettings } from './appConfig.js';
                 if (sb) sb.click();
               }
             });
-            stoppedIndicator.appendChild(continueBtn);
+            // A chat_agent run records the stop itself; its Resume would be
+            // the legacy merge (see the Stop handler in handleChatSubmit).
+            if (streamRuntime !== 'chat_agent') stoppedIndicator.appendChild(continueBtn);
             _catchViewHolder.querySelector('.body').appendChild(stoppedIndicator);
 
             // Tell server to mark this message as stopped
             const _sid2 = sessionModule.getCurrentSessionId();
-            if (_sid2) fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
+            if (_sid2 && streamRuntime !== 'chat_agent') fetch(`${API_BASE}/api/session/${_sid2}/mark-stopped`, { method: 'POST' }).catch(e => console.warn('mark-stopped failed:', e));
 
             if (!_catchViewHolder.querySelector('.msg-footer')) {
               _catchViewHolder.appendChild(createMsgFooter(_catchViewHolder));
@@ -6146,9 +6300,10 @@ import { invalidateSettings } from './appConfig.js';
     // Persist as an assistant message with stopped+cancelled metadata so the
     // chat-history loader renders the same indicator after a refresh.
     // Include the model name so the bubble header still shows which model
-    // was running when the user hit Stop.
+    // was running when the user hit Stop. A chat_agent run writes its own
+    // row on Stop (completed tool work kept), so no empty row is injected.
     const sid = sessionModule.getCurrentSessionId();
-    if (sid) {
+    if (sid && _streamRuntimes.get(sid) !== 'chat_agent') {
       let modelName = '';
       try { modelName = sessionModule.getCurrentModel?.() || ''; } catch {}
       // Fallback: pull from the holder's existing meta (the streaming
@@ -6181,6 +6336,14 @@ import { invalidateSettings } from './appConfig.js';
     if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
+      // A resumed reader (resumeStream) raised isStreaming without a registry
+      // entry, so no stream finally re-derives the flag when the chat is left;
+      // every send in the next chat then queued behind it.
+      _syncForegroundStreamGlobals();
+      if (!isStreaming) {
+        const submitBtn = document.querySelector('.send-btn');
+        if (submitBtn) updateSubmitButton('idle', submitBtn);
+      }
       return;
     }
     // The backend owns the detached run. Stop this tab's subscriber and its
@@ -6221,6 +6384,43 @@ import { invalidateSettings } from './appConfig.js';
     if (submitBtn) updateSubmitButton('idle', submitBtn);
   }
 
+  /**
+   * Hard stop for a deleted chat on this tab: abort its readers, drop its
+   * queued messages and per-chat stream state, then re-derive the foreground
+   * flags. The DELETE itself cancels the server run (agent_runs.stop_and_wait),
+   * so no Stop is posted here.
+   */
+  export function forgetSessionStreams(sessionId) {
+    if (!sessionId) return;
+    for (const entry of [_activeStreams.get(sessionId), _backgroundStreams.get(sessionId), _sendStates.get(sessionId)]) {
+      const abortCtrl = entry && entry.abortCtrl;
+      if (abortCtrl && !abortCtrl.signal.aborted) {
+        abortCtrl._reason = 'user-stop';
+        abortCtrl.abort();
+      }
+    }
+    _activeStreams.delete(sessionId);
+    _backgroundStreams.delete(sessionId);
+    _resumingStreams.delete(sessionId);
+    _terminalSavedStreams.delete(sessionId);
+    _streamRunIds.delete(sessionId);
+    _streamRuntimes.delete(sessionId);
+    _sendStates.delete(sessionId);
+    if (_streamSessionId === sessionId) _streamSessionId = null;
+    _queuedAgentRequests
+      .filter(item => item.sessionId === sessionId)
+      .forEach(item => _removeQueuedRequest(item.id));
+    // Another chat in the foreground keeps its own state; only an emptied or
+    // self-deleted foreground re-derives (a resumed reader never would).
+    const currentSid = sessionModule.getCurrentSessionId();
+    if (currentSid && currentSid !== sessionId) return;
+    _syncForegroundStreamGlobals();
+    if (!isStreaming) {
+      const submitBtn = document.querySelector('.send-btn');
+      if (submitBtn) updateSubmitButton('idle', submitBtn);
+    }
+  }
+
   // _notifyStreamComplete and _insertStreamDoneToast now in chatStream.js
   var _notifyStreamComplete = chatStream.notifyStreamComplete;
   var _insertStreamDoneToast = chatStream.insertStreamDoneToast;
@@ -6247,11 +6447,30 @@ import { invalidateSettings } from './appConfig.js';
     }
     if (!res.ok || !res.body) return false;
     const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
-    if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
+    const resumeRuntime = res.headers.get('X-Odysseus-Runtime') || '';
+    if (resumeRunId) {
+      _streamRunIds.set(sessionId, resumeRunId);
+      _streamRuntimes.set(sessionId, resumeRuntime);
+    }
 
     const box = document.getElementById('chat-history');
     if (!box) return false;
     if (replaceHolder && replaceHolder.parentNode) replaceHolder.remove();
+    const agentRuntimeRun = resumeRuntime === 'chat_agent';
+    // Everything after the user's message is this turn (#65): the replay
+    // starts at the run's first event although history already drew the
+    // checkpointed in_progress row, and at the end the saved row is drawn
+    // in place of the replayed nodes and ask cards.
+    const clearTurnNodes = () => {
+      const users = box.querySelectorAll('.msg-user');
+      let node = users.length ? users[users.length - 1].nextSibling : null;
+      while (node) {
+        const next = node.nextSibling;
+        if (node.id !== 'chat-queued-bubble-host') node.remove();
+        node = next;
+      }
+    };
+    if (agentRuntimeRun) clearTurnNodes();
 
     // Block duplicate re-attach attempts while this reader is live. A dedicated
     // set (not _backgroundStreams) so checkBackgroundStream doesn't mistake this
@@ -6298,6 +6517,7 @@ import { invalidateSettings } from './appConfig.js';
     let metricsData = null;
     let replayError = null;
     let canonicalTerminalSeen = false;
+    let sawDone = false;
     let currentToolBubble = null;
     let currentToolThread = null;
     // "Rich" responses (tool calls, sources, doc streaming, multi-round) need the
@@ -6392,15 +6612,16 @@ import { invalidateSettings } from './appConfig.js';
       const output = String(json.output || '');
       const label = String(json.label || json.tool || 'Tool');
       const icon = renderToolIcon(json.tool || '', command, json) || '';
-      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error');
+      const denialHtml = chatRenderer.toolDenialHtml(json);
+      currentToolBubble.className = 'agent-thread-node' + (ok ? '' : ' error') + (denialHtml ? ' open' : '');
       currentToolBubble.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
         '<span class="agent-thread-icon">' + (ok ? '✓' : '✗') + '</span>' + icon +
         '<span class="agent-thread-tool">' + uiModule.esc(label) + '</span>' +
-        '<span class="agent-thread-status">' + (ok ? 'done' : 'failed') + '</span>' +
+        '<span class="agent-thread-status">' + (ok ? 'done' : json.blocked ? 'denied' : 'failed') + '</span>' +
         '<span class="agent-thread-chevron" aria-hidden="true"></span></div>' +
         '<div class="agent-thread-content">' +
         (command ? '<pre class="agent-thread-cmd">' + uiModule.esc(command) + '</pre>' : '') +
-        (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '') +
+        (denialHtml || (output ? '<details class="agent-tool-output"><summary>Output</summary><pre>' + uiModule.esc(output) + '</pre></details>' : '')) +
         '</div>';
       if (currentToolThread) currentToolThread.classList.remove('streaming');
     };
@@ -6427,6 +6648,7 @@ import { invalidateSettings } from './appConfig.js';
           if (!line) continue;
           const payload = line.slice(6);
           if (payload === '[DONE]') {
+            sawDone = true;
             try { await reader.cancel(); } catch (_) {}
             break readLoop;
           }
@@ -6474,11 +6696,32 @@ import { invalidateSettings } from './appConfig.js';
             }
           } else if (json.type === 'message_saved') {
             replayMessageId = String(json.id || '');
+          } else if (json.type === 'ask_user') {
+            // A chat_agent ask waits in place; the replayed card (routed by the
+            // run's runtime header) replaces the one history rendered.
+            rich = true;
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderAskUserCard(json.data || {}, { runtime: res.headers.get('X-Odysseus-Runtime'), focus: false });
+          } else if (json.type === 'ask_resolved' || json.type === 'ask_expired') {
+            chatRenderer.resolveAskUserCard(json.ask_id, json);
+          } else if (json.type === 'auto_mode') {
+            _applyAutoModeState(json.state);
+          } else if (json.type === 'plan_update') {
+            rich = true;
+            const plan = (json.data && json.data.plan) ? json.data.plan : '';
+            if (plan) _setStoredPlan(plan);
+          } else if (json.type === 'doc_update') {
+            rich = true;
+            if (documentModule) documentModule.handleDocUpdate(json);
+          } else if (json.type === 'doc_suggestions') {
+            rich = true;
+            if (documentModule && documentModule.handleDocSuggestions) documentModule.handleDocSuggestions(json);
           } else if (json.type === 'fallback') {
             // Replay can attach after the selected route has already failed.
             // Reflect the fallback immediately, then reload the canonical
             // multi-round record when the detached run completes.
             rich = true;
+            _stickToFallbackRoute(json, sessionId);
             const fallbackHolder = applyModelRouteEventState(json, holder, null, meta && meta.model);
             if (fallbackHolder) {
               _setRoleModelLabel(
@@ -6562,6 +6805,21 @@ import { invalidateSettings } from './appConfig.js';
     if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
     if (leftSession) { removeReplayNodes(); return true; }
 
+    // The connection ended before [DONE] while the run kept going on the
+    // server; finalizing here would leave the turn cut off at the last event
+    // (a running tool card, no answer). Re-attach the way the live reader's
+    // auto-recovery does, under the same per-turn cap: the new reader replays
+    // the run's buffer from its first event, so this reader's nodes make way.
+    // A 404 means the run ended meanwhile: its saved answer is on the server.
+    if (!sawDone && !replayError && _autoNudges < _AUTO_NUDGE_CAP
+        && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
+      _autoNudges++;
+      removeReplayNodes();
+      if (await resumeStream(sessionId)) return true;
+      await sessionModule.selectSession(sessionId, { showLoading: false });
+      return true;
+    }
+
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
 
@@ -6592,6 +6850,18 @@ import { invalidateSettings } from './appConfig.js';
           if (!isReplayCurrent()) { removeReplayNodes(); return true; }
           const saved = (data.history || []).find(message => message.role === 'assistant'
             && String(message.metadata?._db_id || '') === replayMessageId);
+          if (saved && agentRuntimeRun) {
+            // The saved row renders from its rounds (steers between them,
+            // tool status, stop reason); the replayed bubbles make way for it.
+            removeReplayNodes();
+            clearTurnNodes();
+            chatRenderer.addMessage('assistant', saved.content, saved.metadata?.model || (meta && meta.model), { ...saved.metadata, _fromHistory: true });
+            const lastBubble = [...box.querySelectorAll('.msg-ai')].pop();
+            if (lastBubble && metricsData) displayMetrics(lastBubble, metricsData);
+            replayRendering.settle();
+            uiModule.restoreHistoryScroll?.(scrollSnapshot);
+            return true;
+          }
           if (saved) {
             metricsData = { ...metricsData, ...saved.metadata };
             roundText = String(saved.content || '');
@@ -6610,6 +6880,7 @@ import { invalidateSettings } from './appConfig.js';
       if (replayMessageId) target.dataset.dbId = replayMessageId;
       if (target.classList.contains('msg-ai')) {
         target.dataset.raw = roundText;
+        if (metricsData?.memories_used?.length) target._memoriesUsed = metricsData.memories_used;
         if (!target.querySelector('.msg-footer')) target.appendChild(createMsgFooter(target));
         const body = target.querySelector('.body');
         if (body && !body.querySelector('.sources-section')) {
@@ -8071,7 +8342,9 @@ import { invalidateSettings } from './appConfig.js';
     handleChatSubmit,
     abortCurrentRequest,
     detachCurrentStream,
+    forgetSessionStreams,
     checkBackgroundStream,
+    checkAutoModePaused,
     resumeStream,
     hideWelcomeScreen: chatRenderer.hideWelcomeScreen,
     showWelcomeScreen: chatRenderer.showWelcomeScreen,

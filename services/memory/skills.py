@@ -19,15 +19,18 @@ loads while a user migrates them to disk.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from src.path_confinement import confine
 
-from .skill_format import Skill, slugify
+from .skill_format import Skill, emit_body, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,84 @@ def _approval_policy(owner: Optional[str]) -> tuple[bool, float]:
     except (TypeError, ValueError):
         minimum = default_minimum
     return bool(prefs.get("auto_approve_skills", True)), max(0.0, min(1.0, minimum))
+
+
+_USER_ONLY_MARK = "disable-model-invocation"
+
+
+def content_digest(skill: Dict) -> str:
+    """Digest of what a user approves (ADR 0008).
+
+    Owner, status, confidence, source and dates are left out: renames and
+    audits rewrite them without changing what the skill tells the model.
+    requires_toolsets is in: a usable skill unlocks those tools, so adding
+    one is a change the user has not approved. So is who may invoke it.
+    """
+    # emit_body renders the parsed sections the same way SKILL.md is written,
+    # so the digest depends on content, not on the dict's key layout.
+    body = emit_body(skill)
+    fields = [skill.get("name") or "", skill.get("description") or "", body,
+              sorted(skill.get("requires_toolsets") or [])]
+    if skill.get("disable_model_invocation"):
+        # Appended only when set, so approvals of model-invocable skills
+        # stamped before the flag counted stay valid.
+        fields.append(_USER_ONLY_MARK)
+    payload = json.dumps(fields, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@functools.lru_cache(maxsize=4)
+def _shipped_builtin_digests(root: str) -> frozenset:
+    """Digests of the tracked built-in skills; the tree ships with the app and
+    does not change while it runs."""
+    digests = set()
+    for path in Path(root).rglob("SKILL.md") if os.path.isdir(root) else ():
+        try:
+            digests.add(content_digest(Skill.from_markdown(path.read_text(encoding="utf-8")).to_dict()))
+        except Exception as e:
+            logger.warning("Unreadable built-in skill %s: %s", path, e)
+    return frozenset(digests)
+
+
+def _is_builtin(skill: Dict) -> bool:
+    # Decided by content shipped in BUILTIN_SKILLS_DIR, never by the writable
+    # `source` field: manage_skills lets the agent set source="builtin".
+    from src import constants
+    return content_digest(skill) in _shipped_builtin_digests(constants.BUILTIN_SKILLS_DIR)
+
+
+def is_usable(skill: Dict) -> bool:
+    """The one usability predicate for the index, injection, slash and /invoke (#44)."""
+    if _is_builtin(skill):
+        return True
+    if skill.get("status") != "published":
+        return False
+    if skill.get("user_approved"):
+        return True
+    auto_approve, min_confidence = _approval_policy(skill.get("owner"))
+    return (
+        auto_approve
+        and str(skill.get("audit_verdict") or "").lower() == "pass"
+        and _to_float(skill.get("confidence"), 0.0) >= min_confidence
+    )
+
+
+# Agent- and teacher-drafted skills await the audit until it gives a verdict
+# (spec #44, Skills); a user's own draft is just a draft.
+_AUDITED_SOURCES = frozenset({"learned", "teacher-escalation"})
+
+
+def skill_state(skill: Dict) -> str:
+    """The one state a Skills page card shows."""
+    if skill.get("status") == "binned":
+        return "binned"
+    if is_usable(skill):
+        return "published"
+    if skill.get("status") == "published":
+        return "awaiting_audit"
+    if skill.get("source") in _AUDITED_SOURCES and not skill.get("audit_verdict"):
+        return "awaiting_audit"
+    return "draft"
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +281,20 @@ class SkillsManager:
         }
         self._save_usage(usage)
 
+    def set_user_approval(self, skill: Dict) -> None:
+        """Stamp a Skills page publish onto the skill's current content."""
+        usage = self._load_usage()
+        e = usage.setdefault(self._usage_key(skill["name"], skill.get("owner")),
+                             {"uses": 0, "last_used": None})
+        e["user_approval"] = {"at": time.time(), "content_digest": content_digest(skill)}
+        self._save_usage(usage)
+
+    def clear_user_approval(self, skill: Dict) -> None:
+        usage = self._load_usage()
+        e = usage.get(self._usage_key(skill["name"], skill.get("owner")))
+        if isinstance(e, dict) and e.pop("user_approval", None) is not None:
+            self._save_usage(usage)
+
     # ----------------------------------------------------------------------
     # Disk scan
     # ----------------------------------------------------------------------
@@ -300,6 +395,10 @@ class SkillsManager:
             d["baseline_verdict"] = u.get("baseline_verdict")
             d["usefulness"] = u.get("usefulness")
             d["necessity"] = u.get("necessity")
+            approval = u.get("user_approval")
+            approval = approval if isinstance(approval, dict) else {}
+            d["user_approval_at"] = approval.get("at")
+            d["user_approved"] = bool(approval) and approval.get("content_digest") == content_digest(d)
             out.append(d)
             seen_names.add(sk.name)
         # Legacy JSON entries — surfaced as draft, not editable from new flow
@@ -527,7 +626,7 @@ class SkillsManager:
             scalar_keys = (
                 "description", "version", "category", "status", "confidence",
                 "source", "teacher_model", "when_to_use",
-                "body_extra",
+                "body_extra", "disable_model_invocation",
             )
             for k in scalar_keys:
                 if k in updates:
@@ -676,36 +775,10 @@ class SkillsManager:
         platform: Optional[str] = None,
     ) -> List[Dict]:
         """Return the `[{name, description, category, status}]` list the
-        agent sees in its system prompt.
-
-        Includes built-ins plus user skills that have passed their audit and
-        meet the owner's current automatic-approval threshold. A persistent
-        ``published`` flag is not sufficient: a changed threshold or a legacy
-        record must not make an unaudited skill eligible for prompt injection.
-        """
-        auto_approve, min_confidence = _approval_policy(owner)
+        agent sees in its system prompt: usable skills the model may invoke."""
         out = []
         for s in self.load(owner=owner):
-            status = s.get("status")
-            # Published + None (pre-status legacy) always included.
-            # Drafts only if the teacher wrote them.
-            if status not in ("published", None):
-                if status == "draft" and s.get("source") == "teacher-escalation":
-                    pass  # let it through
-                else:
-                    continue
-            # A stale published record must not remain injectable after an
-            # audit has recorded a failure. Inconclusive is not a failure.
-            audit_verdict = str(s.get("audit_verdict") or "").lower()
-            if audit_verdict in {"needs_work", "fail"}:
-                continue
-            if s.get("source") != "builtin" and auto_approve:
-                if status != "published" or audit_verdict != "pass":
-                    continue
-                if _to_float(s.get("confidence"), 0.0) < min_confidence:
-                    continue
-            necessity = s.get("necessity") or {}
-            if isinstance(necessity, dict) and necessity.get("necessary") is False:
+            if not is_usable(s) or s.get("disable_model_invocation"):
                 continue
             # Platform gating
             if platform and s.get("platforms") and platform not in s["platforms"]:
@@ -725,7 +798,7 @@ class SkillsManager:
                 "name": s["name"],
                 "description": s.get("description") or s.get("title", ""),
                 "category": s.get("category", "general"),
-                "status": status or "published",
+                "status": s.get("status"),
             })
         out.sort(key=lambda x: (x["category"], x["name"]))
         return out
@@ -745,22 +818,19 @@ class SkillsManager:
         min_confidence: float = 0.0,
         available_toolsets: Optional[Iterable[str]] = None,
         platform: Optional[str] = None,
+        include_user_only: bool = False,
     ) -> List[Dict]:
         if skills is None:
             skills = self.load_all()
         if not skills or not query.strip():
             return []
-        # Consider published AND draft skills for relevance retrieval.
-        # The teacher-escalation loop writes new skills as drafts; the
-        # whole point is for the student to find them on the next try
-        # without a manual publish click. The UI flags teacher-written
-        # entries with a 🎓 badge so users can demote / delete bad
-        # ones when they spot them.
+        # `min_confidence` stays in the signature only because the legacy loop,
+        # which this fork does not edit, still passes it; is_usable reads the
+        # owner's threshold itself. `include_user_only` is for the user's own
+        # `/skills search`, which lists slash commands, user-only ones included.
         skills = [
             s for s in skills
-            if s.get("status") in ("published", "draft")
-            and str(s.get("audit_verdict") or "").lower()
-            not in {"needs_work", "fail", "skipped"}
+            if is_usable(s) and (include_user_only or not s.get("disable_model_invocation"))
         ]
         available = set(available_toolsets) if available_toolsets is not None else None
         if available is not None:
@@ -774,19 +844,6 @@ class SkillsManager:
                 skill for skill in skills
                 if not skill.get("platforms") or platform in skill.get("platforms", [])
             ]
-        # Prompt injection is fail-closed for user skills. Built-ins are
-        # shipped procedures; every other skill needs a passing audit and a
-        # confidence score at the user's current threshold.
-        if min_confidence > 0:
-            def _passes(s):
-                if s.get("source") == "builtin":
-                    return True
-                return (
-                    s.get("status") == "published"
-                    and str(s.get("audit_verdict") or "").lower() == "pass"
-                    and _to_float(s.get("confidence"), 0.0) >= min_confidence
-                )
-            skills = [s for s in skills if _passes(s)]
         if not skills:
             return []
 

@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "finish_requested", "finish_event", "runtime", "awaiting_user")
 
-    def __init__(self) -> None:
+    def __init__(self, runtime: str = "legacy") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
@@ -37,6 +37,12 @@ class _Run:
         self.run_id: str = uuid.uuid4().hex
         self.finish_requested: bool = False
         self.finish_event = asyncio.Event()
+        # Which chat runtime drives this run; sent as X-Odysseus-Runtime so the
+        # browser routes sends, steers and answers to it (spec #44).
+        self.runtime: str = runtime
+        # A chat_agent ask is waiting on the user; the background gate skips
+        # such runs so one open question doesn't stall the instance (#56).
+        self.awaiting_user: bool = False
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -106,6 +112,11 @@ def get_run_id(session_id: str) -> Optional[str]:
     """Return the opaque identity of the current detached run, if present."""
     r = _RUNS.get(session_id)
     return r.run_id if r else None
+
+
+def snapshot_runs() -> Dict[str, _Run]:
+    """Copy of every registered run, safe to iterate while runs come and go."""
+    return dict(_RUNS)
 
 
 def get_active_run(session_id: str) -> Optional[_Run]:
@@ -184,7 +195,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id, run)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(session_id: str, agen: AsyncGenerator[str, None], runtime: str = "legacy") -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
@@ -203,7 +214,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    run = _Run(runtime)
     _RUNS[session_id] = run
     run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
     return run
@@ -281,6 +292,21 @@ def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
         run.task.cancel()
         return True
     return False
+
+
+async def stop_and_wait(session_id: str) -> None:
+    """Cancel the session's run, whichever it is, and wait until it unwound.
+
+    Deleting a chat stops its run (spec #44). The cancel path saves the
+    partial turn, so the delete waits for it and then removes that row too:
+    nothing is written into the chat afterwards.
+    """
+    run = _RUNS.get(session_id)
+    if run is None or run.task is None or run.task.done():
+        return
+    run.task.cancel()
+    # _drain waits for a replaced predecessor on cancel, so this covers it too.
+    await asyncio.wait({run.task})
 
 
 def request_finish(session_id: str, expected_run_id: Optional[str] = None) -> bool:

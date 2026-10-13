@@ -2261,6 +2261,31 @@ body.bg-pattern-ascii-fireflies {
       flex: 0 0 auto;
       opacity: 0.9;
     }
+    /* A steering message drawn between an agent's rounds (chat_agent, #63/#65):
+       the user bubble look without the .msg-user class, so regenerate and
+       delete keep treating .msg-user as the turn's real message. */
+    .msg-steer {
+      align-items: flex-end;
+      align-self: flex-end;
+      margin-left: auto;
+      margin-right: 8px;
+      width: fit-content;
+      max-width: 85%;
+      min-width: 80px;
+      background: var(--user-bubble-bg, color-mix(in srgb, var(--fg) 8%, var(--bg)));
+      border: 1px solid var(--bubble-border, var(--border));
+      border-radius: 18px 18px 0 18px;
+      opacity: 0.85;
+    }
+    .msg-steer .role {
+      color: color-mix(in srgb, var(--fg) 60%, transparent);
+    }
+    .msg-steer .role::before {
+      background: color-mix(in srgb, var(--fg) 40%, transparent);
+    }
+    .msg-steer .body {
+      color: var(--fg);
+    }
 .msg-ai .body {
   color: var(--fg);
 }
@@ -2732,6 +2757,11 @@ body.bg-pattern-ascii-fireflies {
 	      color: var(--fg);
 	      background: color-mix(in srgb, var(--fg) 9%, transparent);
 	    }
+	    /* Runtime-switch gate on the auto mode icon (#68): the author
+	       display rule above would otherwise beat the hidden attribute. */
+	    .input-icon-btn[hidden] { display: none !important; }
+	    /* Auto mode paused: on, but asks come back to the user until one is approved. */
+	    .input-icon-btn.auto-paused { color: var(--warn); opacity: 1; }
 	    .plan-mode-btn {
 	      width: 28px;
 	      height: 28px;
@@ -5279,7 +5309,7 @@ body.bg-pattern-ascii-fireflies {
       /* Chat bubbles — AI stretches full width, user stays compact */
       .msg { font-size: 0.85em; }
       .msg .body { font-size: 0.9em; }
-      .msg-user { max-width: 90% !important; margin-left: auto; margin-right: 4px; }
+      .msg-user, .msg-steer { max-width: 90% !important; margin-left: auto; margin-right: 4px; }
       .msg-ai, .agent-thread { width: 100% !important; max-width: 100% !important; margin: 8px 0; }
       /* Prevent inner scrollable elements from trapping vertical scroll */
       .msg pre,

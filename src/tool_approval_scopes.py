@@ -62,12 +62,19 @@ def sign_chat_session_grant(
     return hmac.new(key, payload.encode("utf-8"), sha256).hexdigest()
 
 
-# Message-metadata keys the server writes and a caller never should. Both are
-# read back as authority: ``tool_events`` carries the approval cards, and the
-# context marker is projected onto a turn once a grant is found.
+# Message-metadata keys the server writes and a caller never should, because
+# they are read back as authority: approval cards, grant markers, the
+# chat_agent turn record replayed as trusted turns (ADR 0007), and
+# ``interaction_mode``, which the auto-mode classifier reads as the user's own words.
 _SERVER_OWNED_METADATA_KEYS = (
     "tool_events",
+    "interaction_mode",
     CHAT_SESSION_APPROVAL_CONTEXT_MARKER,
+    "agent_v2",
+    "runtime",
+    "in_progress",
+    "steers",
+    "stop_reason",
 )
 
 

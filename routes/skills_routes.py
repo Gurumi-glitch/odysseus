@@ -17,8 +17,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from services.memory.skills import SkillsManager
-from src.auth_helpers import get_current_user
+from services.memory.skill_format import slugify
+from services.memory.skills import SkillsManager, is_usable, skill_state
+# Relies on the loopback marker the internal-tool client sets (header token or the
+# "internal-tool" request user), which stays even when X-Odysseus-Owner impersonates the user.
+from src.agent_runtime.authority import is_internal_tool_request
+from src.auth_helpers import _is_api_token_request, get_current_user
 from src.prompt_security import untrusted_context_message
 from src.text_helpers import strip_closed_think_blocks
 from core.middleware import require_admin
@@ -108,6 +112,7 @@ class SkillUpdateRequest(BaseModel):
     version: Optional[str] = None
     confidence: Optional[float] = None
     body_extra: Optional[str] = None
+    disable_model_invocation: Optional[bool] = None
     # Old shape
     title: Optional[str] = None
     problem: Optional[str] = None
@@ -841,7 +846,7 @@ def _finalize_audit_batch(skills_manager, results: list[dict], owner, log) -> No
     protected = {
         str(r.get("skill")) for r in results
         if r.get("skill") and r.get("result") == "approval_required"
-    }
+    } | {name for name, s in by_name.items() if s.get("user_approved")}
 
     def tokens(sk: dict) -> set[str]:
         text = " ".join([
@@ -1258,11 +1263,13 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     if not md:
         log(f"{name}: no source — skipped")
         return {"skill": name, "result": "skipped"}
+    # A user-approved skill is only reported on: no demotion, no rewrite (ADR 0008).
+    report_only = bool(skill.get("user_approved"))
 
     # Cheap deterministic cleanup first. If this is an obvious lower-priority
     # duplicate, do not spend LLM turns on necessity, retrieval precision,
     # skill-vs-baseline testing, self-edit, or teacher escalation.
-    duplicate_of = _skill_duplicate_blocker(skills_manager, name, owner)
+    duplicate_of = None if report_only else _skill_duplicate_blocker(skills_manager, name, owner)
     if duplicate_of:
         reason = f"Lower-priority duplicate of {duplicate_of}"
         try:
@@ -1303,7 +1310,7 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     # Retrieval precision check: if broad tags/trigger text would make this
     # narrow skill over-inject, fix only metadata before the functional test.
     try:
-        if _should_check_retrieval_precision(skill):
+        if not report_only and _should_check_retrieval_precision(skill):
             rp = await _eval_skill_retrieval_precision(
                 md, others, url, model, headers, workload=workload,
             )
@@ -1395,6 +1402,13 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         )
     v = verdict.get("verdict")
     log(f"{name}: verdict = {v} ({verdict.get('summary', '')[:80]})")
+    if report_only and not verdict.get("approval_required"):
+        skills_manager.set_audit(
+            name, v or "inconclusive", by_teacher=False, worker_model=model, owner=owner,
+            **_verdict_efficiency(verdict),
+        )
+        return {"skill": name, "result": v or "inconclusive", "verdict": verdict,
+                "status": skill.get("status")}
     if verdict.get("approval_required"):
         # An unattended audit is not authority for an action influenced by the
         # skill under test. Preserve the skill's current publication/confidence
@@ -1583,6 +1597,7 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 if refreshed:
                     res["skill_state"] = {
                         "name": refreshed.get("name"),
+                        "state": skill_state(refreshed),
                         "status": refreshed.get("status"),
                         "confidence": refreshed.get("confidence"),
                         "audit_verdict": refreshed.get("audit_verdict"),
@@ -1746,6 +1761,28 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         ):
             raise HTTPException(404, "Skill not found")
 
+    def _from_skills_page(request: Request) -> bool:
+        # Tool loopback and bearer tokens act for the user but are not the user
+        # looking at the Skills page, so they never approve (ADR 0008).
+        return not is_internal_tool_request(request) and not _is_api_token_request(request)
+
+    def _require_skills_page(request: Request) -> None:
+        if not _from_skills_page(request):
+            raise HTTPException(403, "Only the Skills page can approve a skill or change who may invoke it.")
+
+    def _record_user_approval(request: Request, name: str, stamp: bool, user: Optional[str]) -> None:
+        """Stamp the saved content when the user approves it; unpublishing withdraws it."""
+        if not _from_skills_page(request):
+            return
+        after = next((s for s in skills_manager.load(owner=user)
+                      if s.get("name") == slugify(name)), None)
+        if after is None:
+            return
+        if after.get("status") != "published":
+            skills_manager.clear_user_approval(after)
+        elif stamp:
+            skills_manager.set_user_approval(after)
+
     def _fire_skill_added(user: Optional[str]):
         try:
             from src.event_bus import fire_event
@@ -1756,7 +1793,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     @router.get("")
     async def list_skills(request: Request):
         user = _owner(request)
-        skills = skills_manager.load(owner=user)
+        skills = [{**s, "state": skill_state(s)} for s in skills_manager.load(owner=user)]
         return {"skills": skills, "count": len(skills)}
 
     @router.get("/index")
@@ -1770,29 +1807,23 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
     @router.get("/slash-catalog")
     async def get_slash_catalog(request: Request):
-        """Return skills that are available as slash commands.
-
-        Mirrors the agent prompt's published-skill index so the UI never offers
-        a slash command the model would not normally be allowed to discover.
-        """
+        """Return usable skills as slash commands, user-only ones included."""
         user = _owner(request)
-        all_skills = {s.get("name"): s for s in skills_manager.load(owner=user)}
         entries = []
-        for s in skills_manager.index_for(owner=user):
+        for s in skills_manager.load(owner=user):
             name = (s.get("name") or "").strip()
-            if not name:
+            if not name or not is_usable(s):
                 continue
-            full = all_skills.get(name) or {}
-            category = (s.get("category") or full.get("category") or "general").strip() or "general"
+            category = (s.get("category") or "general").strip() or "general"
             entries.append({
                 "type": "skill",
                 "token": f"/{name}",
                 "name": name,
                 "category": f"Skills / {category}",
-                "help": s.get("description") or full.get("description") or "",
+                "help": s.get("description") or "",
                 "usage": f"/{name} <request>",
-                "uses": int(full.get("uses") or 0),
-                "last_used": full.get("last_used"),
+                "uses": int(s.get("uses") or 0),
+                "last_used": s.get("last_used"),
             })
         entries.sort(key=lambda row: row["name"])
         return {"skills": entries, "count": len(entries)}
@@ -1975,8 +2006,8 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         request_text = (body.get("request") or "").strip() if isinstance(body, dict) else ""
 
         invokable = {
-            s.get("name"): s for s in skills_manager.index_for(owner=user)
-            if (s.get("name") or "").strip()
+            s.get("name"): s for s in skills_manager.load(owner=user)
+            if (s.get("name") or "").strip() and is_usable(s)
         }
         match = invokable.get(skill_id)
         if not match:
@@ -2395,6 +2426,9 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         sk.name = match.get("name")
         if not sk.owner:
             sk.owner = match.get("owner") or user
+        publishing = sk.status == "published" and match.get("status") != "published"
+        if publishing or sk.disable_model_invocation != bool(match.get("disable_model_invocation")):
+            _require_skills_page(request)
         ok = skills_manager.update_skill(match.get("name"), {
             "name": sk.name,
             "description": sk.description,
@@ -2414,9 +2448,13 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "pitfalls": sk.pitfalls,
             "verification": sk.verification,
             "body_extra": sk.body_extra,
+            "disable_model_invocation": sk.disable_model_invocation,
         }, owner=user)
         if not ok:
             raise HTTPException(500, "Update failed")
+        # The user saw the whole SKILL.md in the editor, so a save re-stamps an
+        # approval that an outside edit lapsed.
+        _record_user_approval(request, sk.name, publishing or match.get("user_approval_at") is not None, user)
         # Manual markdown edits can create or substantially rewrite a draft
         # skill without going through /add. Treat unaudited saves as new audit
         # candidates so the event-driven Skills Audit pipeline still runs.
@@ -2436,9 +2474,16 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         updates = body.dict(exclude_none=True)
         if not updates:
             return {"ok": True}
+        publishing = updates.get("status") == "published"
+        if publishing or "disable_model_invocation" in updates:
+            _require_skills_page(request)
         ok = skills_manager.update_skill(match.get("name"), updates, owner=user)
         if not ok:
             raise HTTPException(404, "Skill not found")
+        # The user-only flag is in the approval digest: the user's own toggle
+        # keeps an approval that still matched, never one an edit lapsed.
+        toggled = set(updates) == {"disable_model_invocation"} and bool(match.get("user_approved"))
+        _record_user_approval(request, updates.get("name") or match.get("name"), publishing or toggled, user)
         if not match.get("audit_verdict"):
             _fire_skill_added(user)
         return {"ok": True}
@@ -2464,7 +2509,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             raise HTTPException(400, "query is required")
         user = _owner(request)
         skills = skills_manager.load(owner=user)
-        results = skills_manager.get_relevant_skills(query, skills, max_items=10)
+        results = skills_manager.get_relevant_skills(query, skills, max_items=10, include_user_only=True)
         return {"skills": results, "query": query, "count": len(results)}
 
     return router

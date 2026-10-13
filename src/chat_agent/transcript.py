@@ -1,0 +1,555 @@
+"""The turn record: ``metadata.agent_v2`` plus the legacy projections (ADR 0007).
+
+``agent_v2`` is the runtime's only replay source; ``content``, ``round_texts``,
+``tool_events``, ``thinking`` and the context projections are what legacy
+readers keep using. The writer inserts the row ``in_progress`` at the first
+round and rewrites it at each round boundary, so a cancel or restart keeps the
+completed tool work. The record carries a keyed ``content_digest`` over the
+persisted content and itself: a row replays from ``agent_v2`` only when the
+digest verifies and nobody marked it ``edited``, so a rewritten or
+client-forged record replays as plain text.
+"""
+
+from __future__ import annotations
+
+import hmac
+import json
+import logging
+import uuid
+from dataclasses import dataclass, field
+from hashlib import sha256
+from typing import Any, Dict, List, Optional, Sequence
+
+from core.models import ChatMessage
+# Relies on: each takes the answer text and tool events shaped like legacy
+# tool_events ("tool", "output", success per tool_result_is_successful, plus
+# note_id/note_title and calendar "events" when the tool returned them), and
+# returns the text with the matching titles turned into #note-/#email-/#event-
+# links, leaving lines that already hold such a link alone.
+from src.agent_loop import (
+    _linkify_calendar_titles_from_tool_events,
+    _linkify_email_titles_from_tool_events,
+    _linkify_note_titles_from_tool_events,
+)
+from src.attachment_refs import persistable_message_content
+from src.chat_agent import permissions, tools
+from src.chat_agent.asks import RESOLVED_EXPIRED
+from src.chat_agent.providers import Endpoint, tool_output_text
+from src.chat_agent.routing import CHAT_AGENT
+# Relies on: SELF_SUMMARY_SYSTEM_PROMPT holds the {count} and {n}
+# placeholders; normalize_compaction_summary strips a leading "Conversation
+# Summary" title; auto_compact_threshold_percent is the configured threshold
+# clamped to 50..95 (default 85); SUMMARY_MAX_TOKENS bounds the summary.
+from src.context_compactor import (
+    SELF_SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_MAX_TOKENS,
+    auto_compact_threshold_percent,
+    normalize_compaction_summary,
+)
+# Relies on: resolve_endpoint("utility", owner=) returns the configured
+# utility (else default chat) model's (url, model, headers), or Nones.
+from src.endpoint_resolver import resolve_endpoint
+# Relies on: llm_call_async returns the reply text or raises.
+from src.llm_core import llm_call_async
+# Relies on: estimate_tokens counts each dict's content (string or text parts)
+# and ignores other keys; get_context_length is the model's window (cached).
+from src.model_context import estimate_tokens, get_context_length
+# Relies on: _grant_key returns the persistent application key (the same bytes
+# across restarts) or None when it is unavailable.
+from src.tool_approval_scopes import _grant_key
+
+logger = logging.getLogger(__name__)
+
+CANCELLED_REASON = "Cancelled: the turn stopped before this call finished."
+INTERRUPTED_REASON = "Cancelled: the server restarted before this call finished."
+# ask_expired causes (spec #44, Stream events).
+ASK_EXPIRED_CANCEL = "cancel"
+ASK_EXPIRED_RESTART = "restart"
+
+
+# Why a turn ended early (metadata.stop_reason; #65 renders it). A turn that
+# ends because the model stopped calling tools has none.
+STOP_MAX_ROUNDS = "max_rounds"
+STOP_BUDGET = "budget"
+# Stop, Finish and a server restart all interrupt the turn.
+STOP_INTERRUPTED = "interrupted"
+STOP_REPEAT_GUARD = "repeat_guard"
+# A provider error or crash after the row was first checkpointed.
+STOP_ERROR = "error"
+STOP_ASK_EXPIRED = "ask_expired"
+
+
+@dataclass
+class TurnRecord:
+    provider: str
+    model: str
+    turn_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Each round: {"blocks": [...]} plus "usage" when the provider reported it
+    # (compaction reads it, #67), "results" (tool-result envelopes) once its
+    # calls ran and "steers" (user text blocks that joined after it, #63).
+    # Block shapes: src/chat_agent/providers/__init__.py.
+    rounds: List[Dict[str, Any]] = field(default_factory=list)
+    # The legacy tool_events projection, one entry per call (tools.ToolOutcome).
+    tool_events: List[Dict[str, Any]] = field(default_factory=list)
+    stop_reason: Optional[str] = None
+    # Each run call's result fields merged under its tool event: the ids the
+    # final text's note, email and calendar titles link to. Not persisted.
+    link_sources: List[Dict[str, Any]] = field(default_factory=list)
+    # Context the route resolved for this turn, projected as save_assistant_response
+    # does: character_name, web_sources, rag_sources, memories_used.
+    context: Dict[str, Any] = field(default_factory=dict)
+    # The tool event of a call waiting on an ask: its card and no exit code
+    # yet. Checkpointed so a restart can expire the ask (spec #44, Transcript).
+    pending_ask: Optional[Dict[str, Any]] = None
+    # The turn-end metrics, saved flat as save_assistant_response does: the
+    # history renderer's footer reads them from the row's metadata.
+    metrics: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def round_texts(self) -> List[str]:
+        """Each round's text; the last one with its titles linked (what
+        final_response shows). agent_v2 keeps the model's own words."""
+        texts = [
+            "".join(block["text"] for block in r["blocks"] if block["type"] == "text")
+            for r in self.rounds
+        ]
+        if texts:
+            texts[-1] = linkify(texts[-1], self.link_sources)
+        return texts
+
+    def agent_v2(self) -> dict:
+        return {
+            "turn_id": self.turn_id,
+            "provider": self.provider,
+            "model": self.model,
+            "rounds": list(self.rounds),
+        }
+
+    def metadata(self) -> dict:
+        metadata = {
+            **self.metrics,
+            "runtime": CHAT_AGENT,
+            "agent_v2": self.agent_v2(),
+            "round_texts": list(self.round_texts),
+            "model": self.model,
+        }
+        tool_events = self.tool_events + ([self.pending_ask] if self.pending_ask else [])
+        if tool_events:
+            metadata["tool_events"] = tool_events
+        thinking = _thinking(self.rounds)
+        if thinking:
+            metadata["thinking"] = thinking
+        metadata.update({key: value for key, value in self.context.items() if value})
+        steers = [
+            {"round": number, "text": block["text"]}
+            for number, turn_round in enumerate(self.rounds, start=1) for block in turn_round.get("steers") or ()
+        ]
+        if steers:
+            metadata["steers"] = steers
+        if self.stop_reason:
+            metadata["stop_reason"] = self.stop_reason
+        return metadata
+
+    def content(self) -> str:
+        parts = []
+        for text, turn_round in zip(self.round_texts, self.rounds):
+            parts.append(text)
+            parts.extend(_steer_line(block["text"]) for block in turn_round.get("steers") or ())
+        # Relies on: persistable_message_content is what the session manager
+        # stores for a string, so the digest is over the persisted content.
+        return persistable_message_content("\n\n".join(part for part in parts if part))
+
+    def add_steers(self, texts: List[str]) -> None:
+        """The user's steers join the turn after the last round."""
+        self.rounds[-1].setdefault("steers", []).extend({"type": "text", "text": text} for text in texts)
+
+    def close_open_calls(self, reason: str, ask_cause: str) -> None:
+        """Give every call that has no result a ``cancelled`` one (exit 130).
+
+        Every round must replay as complete call/result pairs; a call still
+        waiting on an ask keeps its card, now resolved as expired.
+        """
+        if self.pending_ask:
+            self.tool_events.append(self.pending_ask)
+            self.pending_ask = None
+        close_open_calls(self.rounds, self.tool_events, reason, ask_cause, self.model)
+
+
+def _steer_line(text: str) -> str:
+    # Every line quoted, so a multi-line steer stays one quote block.
+    return "> ↳ " + text.replace("\n", "\n> ")
+
+
+def linkify(text: str, sources: List[Dict[str, Any]]) -> str:
+    """Link note, email and calendar titles the turn's tools returned."""
+    text = _linkify_note_titles_from_tool_events(text, sources)
+    text = _linkify_email_titles_from_tool_events(text, sources)
+    return _linkify_calendar_titles_from_tool_events(text, sources)
+
+
+def close_open_calls(
+    rounds: List[Dict[str, Any]], tool_events: List[Dict[str, Any]], reason: str, ask_cause: str, model: str,
+) -> None:
+    for number, turn_round in enumerate(rounds, start=1):
+        results = turn_round.setdefault("results", [])
+        answered = {result["call_id"] for result in results}
+        for block in turn_round["blocks"]:
+            if block["type"] != "tool_call" or block["call_id"] in answered:
+                continue
+            outcome = tools.ToolOutcome(
+                block["call_id"], block["name"], block["arguments"],
+                tools.STATUS_CANCELLED, tools.EXIT_CANCELLED, reason,
+            )
+            results.append(outcome.envelope())
+            pending = next((e for e in tool_events if e.get("call_id") == block["call_id"]), None)
+            if pending is None:
+                tool_events.append(outcome.tool_event(number, model))
+                continue
+            pending.update(status=tools.STATUS_CANCELLED, exit_code=tools.EXIT_CANCELLED, error=True)
+            ask = pending.get("ask_user")
+            if isinstance(ask, dict) and not ask.get("resolved"):
+                ask.update(resolved=RESOLVED_EXPIRED, expired_cause=ask_cause)
+        if not results:
+            turn_round.pop("results")
+
+
+def _thinking(rounds: List[Dict[str, Any]]) -> str:
+    """Readable reasoning for the legacy ``thinking`` projection: Chat
+    Completions ``reasoning_content`` and xAI reasoning summaries."""
+    parts = []
+    for turn_round in rounds:
+        for block in turn_round["blocks"]:
+            if block["type"] != "reasoning":
+                continue
+            if block.get("reasoning_content"):
+                parts.append(block["reasoning_content"])
+            for summary in (block.get("item") or {}).get("summary") or ():
+                if summary.get("text"):
+                    parts.append(summary["text"])
+    return "\n\n".join(parts)
+
+
+def _digest(content: Any, agent_v2: Dict[str, Any]) -> Optional[str]:
+    key = _grant_key()
+    if key is None:
+        return None
+    unsigned = {k: v for k, v in agent_v2.items() if k != "content_digest"}
+    payload = json.dumps(
+        {"content": content, "agent_v2": unsigned}, sort_keys=True, separators=(",", ":"),
+    )
+    return hmac.new(key, payload.encode("utf-8"), sha256).hexdigest()
+
+
+def signed_metadata(content: Any, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp ``agent_v2.content_digest`` for this content; the writer's seal."""
+    agent_v2 = metadata["agent_v2"]
+    agent_v2.pop("content_digest", None)
+    digest = _digest(content, agent_v2)
+    if digest:
+        agent_v2["content_digest"] = digest
+    return metadata
+
+
+def trusted_rounds(message: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """The rounds to replay for a history row, or None to replay it as text.
+
+    Only a record this writer signed, over exactly the content now persisted,
+    and never marked ``edited`` or still ``in_progress`` is trusted.
+    """
+    metadata = message.get("metadata") or {}
+    agent_v2 = metadata.get("agent_v2")
+    if not isinstance(agent_v2, dict) or metadata.get("edited") or metadata.get("in_progress"):
+        return None
+    claimed = agent_v2.get("content_digest")
+    expected = _digest(message.get("content"), agent_v2)
+    if not isinstance(claimed, str) or expected is None or not hmac.compare_digest(claimed, expected):
+        return None
+    return agent_v2.get("rounds") or None
+
+
+class TurnWriter:
+    """Checkpoints one turn's row: inserted at the first round, then rewritten."""
+
+    def __init__(self, sess, session_id: str, record: TurnRecord, *, incognito: bool):
+        self.sess = sess
+        self.session_id = session_id
+        self.record = record
+        self.incognito = incognito
+        self.message: Optional[ChatMessage] = None
+
+    def checkpoint(self) -> None:
+        # Nobody-mode turns live only in the request-local transcript, which
+        # cannot survive a restart; they are written once, at finish.
+        if not self.incognito:
+            self._write(in_progress=True)
+
+    def finish(self) -> Optional[str]:
+        """Write the final row and return its message id (None in Nobody mode).
+
+        A turn stopped mid-round keeps its completed calls; the rest get
+        cancelled results.
+        """
+        self.record.close_open_calls(CANCELLED_REASON, ASK_EXPIRED_CANCEL)
+        if self.incognito:
+            # Relies on: build_chat_context reads Nobody-mode history back from
+            # this request-local transcript on the next turn.
+            from routes.chat_helpers import _append_incognito_message
+            content = self.record.content()
+            _append_incognito_message(
+                self.session_id, "assistant", content,
+                signed_metadata(content, self._metadata(in_progress=False)),
+            )
+            return None
+        self._write(in_progress=False)
+        return (self.message.metadata or {}).get("_db_id")
+
+    @property
+    def started(self) -> bool:
+        return self.message is not None
+
+    def _metadata(self, *, in_progress: bool) -> Dict[str, Any]:
+        metadata = self.record.metadata()
+        if in_progress:
+            metadata["in_progress"] = True
+        elif self.record.stop_reason in (STOP_INTERRUPTED, STOP_ERROR):
+            # The legacy marker the history renderer shows as stopped.
+            metadata["stopped"] = True
+        return metadata
+
+    def _write(self, *, in_progress: bool) -> None:
+        content = self.record.content()
+        metadata = signed_metadata(content, self._metadata(in_progress=in_progress))
+        if self.message is None:
+            self.message = ChatMessage("assistant", content, metadata=metadata)
+            # Relies on: Session.add_message persists through the session
+            # manager, which stamps the row id on metadata["_db_id"] and bumps
+            # sidebar recency.
+            self.sess.add_message(self.message)
+            return
+        current = self._find_row()
+        kept = {k: current.metadata[k] for k in ("_db_id", "timestamp") if k in (current.metadata or {})}
+        current.content = content
+        current.metadata = {**metadata, **kept}
+        self.message = current
+        self.sess.update_message(current)
+
+    def _find_row(self) -> ChatMessage:
+        """The row now holding this turn: compaction and truncation re-create
+        row ids, so it is found by turn id, falling back to the one inserted."""
+        for entry in reversed(getattr(self.sess, "history", None) or ()):
+            metadata = getattr(entry, "metadata", None)
+            agent_v2 = metadata.get("agent_v2") if isinstance(metadata, dict) else None
+            if isinstance(agent_v2, dict) and agent_v2.get("turn_id") == self.record.turn_id:
+                return entry
+        return self.message
+
+
+def sweep_interrupted_turns() -> int:
+    """Startup: rows a previous process left ``in_progress`` become interrupted.
+
+    Calls without a result (including one waiting on an ask) get a cancelled
+    result, so the row replays as complete pairs and its ask shows expired.
+    Returns the number of rows swept.
+    """
+    from core.database import ChatMessage as DbChatMessage, SessionLocal
+
+    db = SessionLocal()
+    swept = 0
+    try:
+        rows = db.query(DbChatMessage).filter(
+            DbChatMessage.role == "assistant",
+            DbChatMessage.meta_data.like('%"in_progress"%'),
+        ).all()
+        for row in rows:
+            try:
+                metadata = json.loads(row.meta_data)
+            except (TypeError, ValueError):
+                continue
+            agent_v2 = metadata.get("agent_v2") if isinstance(metadata, dict) else None
+            if not metadata.get("in_progress") or not isinstance(agent_v2, dict):
+                continue
+            tool_events = metadata.setdefault("tool_events", [])
+            close_open_calls(
+                agent_v2.get("rounds") or [], tool_events, INTERRUPTED_REASON, ASK_EXPIRED_RESTART,
+                agent_v2.get("model") or "",
+            )
+            if not tool_events:
+                metadata.pop("tool_events")
+            metadata.pop("in_progress")
+            metadata["stop_reason"] = STOP_INTERRUPTED
+            metadata["stopped"] = True
+            row.meta_data = json.dumps(signed_metadata(row.content, metadata))
+            swept += 1
+        db.commit()
+    finally:
+        db.close()
+    if swept:
+        logger.info("chat_agent: marked %d interrupted turn(s) left from the last run", swept)
+    return swept
+
+
+# --- Compaction (ticket #67) ---------------------------------------------------
+#
+# Triggered by the size of the next request: the newest usage a provider
+# reported (input, cached tokens included, plus the reply it produced) plus
+# whatever was saved after it. The cut falls only before a user message, so a
+# turn's tool calls and results are kept or summarized together.
+
+# The legacy auto-compaction header (maybe_compact).
+SUMMARY_HEADER = "[Conversation summary — earlier messages were compacted]"
+# Each message's share of the summariser's input, and the summariser call's
+# sampling and wait, as legacy compaction (context_compactor).
+SUMMARY_LINE_CHARS = 2000
+SUMMARY_TEMPERATURE = 0.2
+SUMMARY_TIMEOUT_S = 30
+
+
+def reported_context_tokens(rows: Sequence[ChatMessage]) -> Optional[int]:
+    """The next request's size from the newest reported usage, or None when no
+    trusted row carries one."""
+    for index in range(len(rows) - 1, -1, -1):
+        rounds = trusted_rounds(rows[index].to_dict())
+        usage = rounds[-1].get("usage") if rounds else None
+        if usage:
+            later = [row.to_dict() for row in rows[index + 1:]]
+            return usage["input_tokens"] + usage["output_tokens"] + (estimate_tokens(later) if later else 0)
+    return None
+
+
+def context_tokens(sess: Any) -> int:
+    """What the chat's next request holds: reported usage plus the projections
+    saved after it; the legacy estimate when nothing was reported."""
+    reported = reported_context_tokens(sess.history)
+    return reported if reported is not None else estimate_tokens(sess.get_context_messages())
+
+
+def over_threshold(tokens: int, window: int) -> bool:
+    return bool(window) and tokens * 100 >= window * auto_compact_threshold_percent()
+
+
+def turn_cut(roles: Sequence[str]) -> int:
+    """Where the kept part starts: the first user message at or past the middle
+    (legacy keeps the recent half), or nothing kept when there is none."""
+    return next((i for i in range(max(1, len(roles) // 2), len(roles)) if roles[i] == "user"), len(roles))
+
+
+async def summarise(messages: List[Dict[str, Any]], endpoint: Endpoint, owner: str) -> Optional[str]:
+    """The legacy summariser call over these messages, or None when it fails."""
+    util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
+    earlier = sum(1 for m in messages if "[Conversation summary" in _summary_text(m))
+    prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(messages))).replace("{n}", str(earlier + 1))
+    text = "\n".join(f"{m['role'].upper()}: {_summary_text(m)[:SUMMARY_LINE_CHARS]}" for m in messages)
+    try:
+        summary = await llm_call_async(
+            util_url or endpoint.url, util_model or endpoint.model,
+            [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+            temperature=SUMMARY_TEMPERATURE, max_tokens=SUMMARY_MAX_TOKENS,
+            headers=util_headers if util_url else endpoint.headers, timeout=SUMMARY_TIMEOUT_S,
+        )
+    except Exception:
+        # The chat stays whole; the request may still fit.
+        logger.exception("chat_agent: compaction summary failed")
+        return None
+    # An empty summary would drop the older turns for nothing.
+    return normalize_compaction_summary(summary) or None
+
+
+def _summary_text(message: Dict[str, Any]) -> str:
+    """A message as the summariser reads it: rounds as text and calls."""
+    if "blocks" in message:
+        return "\n".join(
+            block["text"] if block["type"] == "text" else f"{block['name']}({block['arguments']})"
+            for block in message["blocks"] if block["type"] in ("text", "tool_call")
+        )
+    if message["role"] == "tool":
+        return tool_output_text(message)
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    return str(content or "")
+
+
+def compacted_history(
+    summary: ChatMessage, older: Sequence[ChatMessage], recent: Sequence[ChatMessage],
+) -> List[ChatMessage]:
+    """The rows that replace a chat's history: the summary row, then the kept rows.
+
+    The summary records the egress provenance of the rows it replaces (their
+    tool events go with them), so the gate stays armed. Kept rows lose their
+    reported usage: it measured a history that no longer exists.
+    """
+    legs = permissions.Provenance().after_history(older)
+    summary.metadata = {
+        **(summary.metadata or {}),
+        permissions.PROVENANCE_KEY: {
+            "external": legs.external, "private": legs.private, "origins": list(legs.origins),
+        },
+    }
+    return [summary, *(_without_usage(row) for row in recent)]
+
+
+def _without_usage(row: ChatMessage) -> ChatMessage:
+    rounds = trusted_rounds(row.to_dict())
+    if not rounds or not any("usage" in r for r in rounds):
+        return row
+    metadata = dict(row.metadata)
+    metadata["agent_v2"] = {
+        **metadata["agent_v2"],
+        "rounds": [{k: v for k, v in r.items() if k != "usage"} for r in rounds],
+    }
+    # Re-sealed only because it verified above.
+    return ChatMessage(row.role, row.content, metadata=signed_metadata(row.content, metadata))
+
+
+async def compact_history(sess: Any, session_id: str, endpoint: Endpoint, owner: str) -> Optional[int]:
+    """Turn start: compact the stored chat when its next request crosses the
+    threshold of ``endpoint``'s window. Returns the window when it compacted."""
+    rows = list(sess.history or ())
+    if not rows:
+        return None
+    window = get_context_length(endpoint.url, endpoint.model)
+    if not over_threshold(context_tokens(sess), window):
+        return None
+    cut = turn_cut([row.role for row in rows])
+    older, recent = rows[:cut], rows[cut:]
+    summary = await summarise([row.to_dict() for row in older], endpoint, owner)
+    if summary is None:
+        return None
+    rows = compacted_history(
+        ChatMessage("system", f"{SUMMARY_HEADER}\n{summary}", metadata={
+            "compacted": True, "summarized_count": len(older),
+        }),
+        older, recent,
+    )
+    from core.models import get_session_manager_instance
+    manager = get_session_manager_instance()
+    # Relies on: replace_messages swaps the DB rows and the cached history
+    # together, or changes nothing and returns False.
+    if manager is None or not manager.replace_messages(session_id, rows):
+        logger.warning("chat_agent: could not save the compacted history of %s", session_id)
+        return None
+    return window
+
+
+async def fit_request(
+    conversation: List[Dict[str, Any]], history_start: int, current: Dict[str, Any],
+    endpoint: Endpoint, owner: str,
+) -> List[Dict[str, Any]]:
+    """Fit this request to ``endpoint``'s window (a fallback with a smaller
+    one): summarize the history before ``current``, the turn's user message,
+    at a turn boundary. Request-local: the next turn compacts the stored chat
+    at the fallback's (now sticky) window."""
+    window = get_context_length(endpoint.url, endpoint.model)
+    view = [{"role": m["role"], "content": _summary_text(m)} for m in conversation]
+    if not over_threshold(estimate_tokens(view), window):
+        return conversation
+    end = next(i for i, message in enumerate(conversation) if message is current)
+    history = conversation[history_start:end]
+    cut = turn_cut([message["role"] for message in history])
+    summary = await summarise(history[:cut], endpoint, owner) if history else None
+    if summary is None:
+        return conversation
+    return [
+        *conversation[:history_start], {"role": "system", "content": f"{SUMMARY_HEADER}\n{summary}"},
+        *history[cut:], *conversation[end:],
+    ]

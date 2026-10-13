@@ -1,6 +1,7 @@
 """Chat routes — /api/chat, /api/chat_stream, /api/inject_context, /api/search."""
 
 import asyncio
+import functools
 import json
 import os
 import re
@@ -19,6 +20,7 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
+    LLMConfig,
     _normalize_http_status,
     llm_call_async,
     llm_call_async_with_route_fallback,
@@ -33,6 +35,9 @@ from src.agent_loop import (
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
+from src.chat_agent.loop import Candidate, ChatAgentTurn, run_chat_agent_turn
+from src.chat_agent.providers import Endpoint
+from src.chat_agent.routing import CHAT_AGENT, ComposerToggles, TurnFacts, choose_runtime
 from src.model_context import estimate_tokens
 from src.context_compactor import (
     apply_compaction_state,
@@ -2017,6 +2022,48 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
     return False
 
 
+def _persist_session_route(sess, session_id: str, *, model, endpoint_url, headers, endpoint_id) -> None:
+    """Point the session (in memory and its row) at this model route."""
+    sess.model = model
+    sess.endpoint_url = endpoint_url
+    sess.headers = headers or {}
+    sess.endpoint_id = endpoint_id or None
+    db = SessionLocal()
+    try:
+        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        if db_session:
+            db_session.model = model
+            db_session.endpoint_url = endpoint_url
+            db_session.endpoint_id = sess.endpoint_id
+            db_session.headers = sess.headers
+            db_session.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: list, event: dict) -> None:
+    """A fallback answered: the chat stays on it until the user picks another
+    model (spec #44: fallback is sticky on both runtimes).
+
+    The event names the answering route by model and endpoint id; a model can
+    sit on several endpoints, so both must match. ``candidates`` and
+    ``descriptors`` are the parallel foreground lists of this turn.
+    """
+    for (url, model, headers), descriptor in zip(candidates[1:], descriptors[1:]):
+        if (
+            model == event.get("answered_by")
+            and descriptor.get("endpoint_id") == event.get("answered_by_endpoint_id")
+        ):
+            _persist_session_route(
+                sess, session_id, model=model, endpoint_url=url, headers=headers,
+                endpoint_id=descriptor.get("endpoint_id"),
+            )
+            return
+    logger.warning("Fallback answered by %r is not a candidate of %s; session route kept",
+                   event.get("answered_by"), session_id)
+
+
 def _reconcile_selected_route_from_request(
     request: Request,
     sess,
@@ -2093,27 +2140,16 @@ def _reconcile_selected_route_from_request(
     if not route_changed and not headers_changed and not binding_changed:
         return False
 
-    sess.model = selected_model
-    sess.endpoint_url = endpoint_url
-    sess.headers = headers or {}
-    if resolved_endpoint_id:
-        sess.endpoint_id = resolved_endpoint_id
-    elif route_changed:
+    _persist_session_route(
+        sess,
+        session_id,
+        model=selected_model,
+        endpoint_url=endpoint_url,
+        headers=headers,
         # The route moved without an explicit endpoint id: drop a stale binding
         # rather than keep pointing at an endpoint the session no longer uses.
-        sess.endpoint_id = None
-    db = SessionLocal()
-    try:
-        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
-        if db_session:
-            db_session.model = selected_model
-            db_session.endpoint_url = endpoint_url
-            db_session.endpoint_id = getattr(sess, "endpoint_id", None) or None
-            db_session.headers = sess.headers or {}
-            db_session.updated_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
+        endpoint_id=resolved_endpoint_id or (None if route_changed else getattr(sess, "endpoint_id", None)),
+    )
     logger.info(
         "Reconciled selected route for %s: model=%r endpoint=%s route_changed=%s headers_changed=%s",
         session_id,
@@ -2453,6 +2489,13 @@ def setup_chat_routes(
         incognito = str(form_data.get("incognito", "")).lower() == "true"
         plan_mode = str(form_data.get("plan_mode") or (body or {}).get("plan_mode") or "").lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
+        # interactive=false (notes agent-solve, group panes, compare synthesis)
+        # marks a turn nobody can answer an ask in. Read from the form only:
+        # a JSON body never sets the mode, so it never reaches the runtime.
+        interactive = str(form_data.get("interactive", "")).lower() != "false"
+        # interaction_mode on the user row tells the auto-mode classifier the
+        # user typed it; a programmatic or API-token message is not their words.
+        typed_by_user = interactive and not is_delegated_credential(request)
         client_runtime_context = None
         raw_client_runtime_context = (
             form_data.get("client_runtime_context")
@@ -2485,6 +2528,15 @@ def setup_chat_routes(
         # Workspace: confine the agent's file/shell tools to this folder.
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace") or form_data.get("cwd")
+        )
+        composer_toggles = ComposerToggles(
+            mode=chat_mode,
+            allow_bash=allow_bash,
+            allow_web_search=allow_web_search,
+            use_web=use_web,
+            plan_mode=plan_mode,
+            incognito=incognito,
+            workspace=workspace,
         )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
@@ -2953,14 +3005,141 @@ def setup_chat_routes(
             no_memory = True
             use_rag = "false"
             search_context = None
-        pre_context_tool_policy = build_effective_tool_policy(
-            last_user_message=message,
-        )
-        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
+
         foreground_policy = resolve_foreground_model_policy(
             owner=owner,
             allowed_models=_allowed_models_for_request(request),
         )
+        # The runtime is picked once here, before compact-preview selection,
+        # context prefetching, deny-set assembly and turn-contract binding.
+        # The legacy promotion above still decides whether this is an agent
+        # turn; its toggle rewrites are ignored (composer_toggles is raw).
+        runtime = choose_runtime(TurnFacts(
+            owner=owner,
+            agent_turn=(
+                chat_mode == "agent"
+                and _request_privileges(request, owner).get("can_use_agent", True)
+            ),
+            compare=compare_mode or str(getattr(sess, "name", "") or "").startswith("[CMP]"),
+            client_surface=bool((client_runtime_context or {}).get("surface")),
+            image_generation=image_generation_session,
+            research=do_research,
+            approval_continuation=tool_approval_continuation,
+            internal_tool_request=is_internal_tool_request(request),
+            endpoint_url=sess.endpoint_url,
+            model=sess.model,
+            headers=sess.headers,
+        ))
+        if runtime == CHAT_AGENT:
+            set_session_mode(session, "agent")
+            fallback_routes = build_foreground_route_descriptors(
+                sess.endpoint_url, sess.model, sess.headers,
+                owner=owner,
+                policy=foreground_policy,
+                selected_endpoint_id=selected_endpoint_id or getattr(sess, "endpoint_id", None),
+            )
+            fallback_candidates = [
+                Candidate(Endpoint(url, model, headers), route)
+                for (url, model, headers), route in zip(
+                    build_foreground_model_candidates(
+                        sess.endpoint_url, sess.model, sess.headers,
+                        owner=owner, policy=foreground_policy,
+                    ),
+                    fallback_routes,
+                )
+            ]
+            chat_agent_run = agent_runs.start(session, run_chat_agent_turn(ChatAgentTurn(
+                session_id=session,
+                sess=sess,
+                owner=owner,
+                toggles=composer_toggles,
+                auto_escalated=auto_escalated,
+                temperature=(
+                    temperature_override
+                    if temperature_override is not None
+                    else LLMConfig.DEFAULT_TEMPERATURE
+                ),
+                max_tokens=getattr(sess, "max_tokens_override", None) or 0,
+                thinking_mode=thinking_mode,
+                build_context=functools.partial(
+                    build_chat_context,
+                    sess, request, chat_handler, chat_processor,
+                    message=message,
+                    session_id=session,
+                    preset_id=preset_id,
+                    att_ids=att_ids,
+                    use_rag=use_rag,
+                    time_filter=time_filter,
+                    incognito=incognito,
+                    no_memory=no_memory,
+                    webhook_manager=webhook_manager,
+                    use_enhanced_message=True,
+                    interaction_mode="agent" if typed_by_user else None,
+                    auto_escalated=auto_escalated,
+                    # Continue after a capped turn (spec #44 Transcript); no
+                    # other client value reaches the row.
+                    source="continue" if form_data.get("source") == "continue" else None,
+                ),
+                privileges=_request_privileges(request, owner),
+                delegated_credential=is_delegated_credential(request),
+                # An API-token caller has no browser to answer an ask either.
+                interactive=typed_by_user,
+                active_email_open=bool(active_email_ctx and active_email_ctx.get("uid")),
+                active_email=active_email_ctx,
+                active_document_id=active_doc_id,
+                approved_plan=approved_plan,
+                client_runtime_context=client_runtime_context,
+                skills_manager=skills_manager,
+                # Set by the composer's /name skill invocation (#66).
+                invoked_skill=str(form_data.get("invoked_skill") or "").strip(),
+                # The composer's auto mode toggle (#68), read from the form like
+                # interactive; the runtime checks the privilege and the turn.
+                auto_mode=str(form_data.get("auto_mode", "")).lower() == "true",
+                message=message,
+                candidates=fallback_candidates,
+                fallback_statuses=foreground_policy.eligible_statuses,
+                stick_route=lambda candidate: _persist_session_route(
+                    sess, session,
+                    model=candidate.endpoint.model,
+                    endpoint_url=candidate.endpoint.url,
+                    headers=candidate.endpoint.headers,
+                    endpoint_id=candidate.route.get("endpoint_id"),
+                ),
+                after_turn=functools.partial(
+                    run_post_response_tasks,
+                    sess=sess,
+                    session_manager=session_manager,
+                    session_id=session,
+                    message=message,
+                    memory_manager=memory_manager,
+                    memory_vector=memory_vector,
+                    webhook_manager=webhook_manager,
+                    incognito=incognito,
+                    skills_manager=skills_manager,
+                    owner=owner,
+                    extract_skills=user_requested_agent,
+                    # The runtime has no legacy tool policy; its denies are per call.
+                    allow_background_extraction=_post_response_extraction_allowed(
+                        tools_blocked=False,
+                        tool_approval_continuation=tool_approval_continuation,
+                        client_runtime_context=client_runtime_context,
+                    ),
+                ),
+            )), runtime=CHAT_AGENT)
+            return StreamingResponse(
+                agent_runs.subscribe(session, chat_agent_run),
+                media_type="text/event-stream",
+                headers={
+                    "X-Odysseus-Run-Id": chat_agent_run.run_id,
+                    "X-Odysseus-Runtime": chat_agent_run.runtime,
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        pre_context_tool_policy = build_effective_tool_policy(
+            last_user_message=message,
+        )
+        allow_tool_preprocessing = not pre_context_tool_policy.block_all_tool_calls
 
         # Decide once whether this turn runs on the compact (clean v3)
         # runtime. Every input is final here; the native workspace term of
@@ -3025,7 +3204,7 @@ def setup_chat_routes(
             ),
             persist_user_message=not tool_approval_continuation and not is_internal_tool_request(request),
             context_resolution=_compact_context_resolution,
-            interaction_mode=chat_mode,
+            interaction_mode=chat_mode if typed_by_user else None,
             auto_escalated=auto_escalated,
         )
         if is_internal_tool_request(request):
@@ -4163,6 +4342,10 @@ def setup_chat_routes(
                                         )
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
                                     data["selected_model"] = data.get("selected_model") or _requested_model
+                                    _stick_to_fallback(
+                                        sess, session, _foreground_candidates,
+                                        _foreground_route_descriptors, data,
+                                    )
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "model_actual":
                                     if _commit_chat_compaction(_actual_candidate_index):
@@ -4606,6 +4789,8 @@ def setup_chat_routes(
                                     yield chunk
                                 elif data.get("type") in (
                                     "tool_start", "tool_output", "agent_step",
+                                    # Readers exist in chat.js; the legacy loop emits them (spec #44).
+                                    "tool_progress", "compacted", "generated_image",
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "editor_progress", "ui_control", "email_open",
                                     "rounds_exhausted", "budget_exceeded",
@@ -4653,6 +4838,10 @@ def setup_chat_routes(
                                     _agent_round_endpoint_ids[_event_round] = _agent_actual_endpoint_id
                                     _agent_round_endpoint_labels[_event_round] = _agent_actual_endpoint_label
                                     data["selected_model"] = data.get("selected_model") or _requested_model
+                                    _stick_to_fallback(
+                                        sess, session, _foreground_candidates,
+                                        _foreground_route_descriptors, data,
+                                    )
                                     yield chunk
                                 elif data.get("type") == "model_actual":
                                     _actual_model = data.get("model") or _actual_model
@@ -4914,6 +5103,7 @@ def setup_chat_routes(
             media_type="text/event-stream",
             headers={
                 "X-Odysseus-Run-Id": _detached_run.run_id,
+                "X-Odysseus-Runtime": _detached_run.runtime,
                 "Cache-Control": "no-cache, no-transform",
                 "X-Accel-Buffering": "no",
             },
@@ -4934,6 +5124,7 @@ def setup_chat_routes(
             media_type="text/event-stream",
             headers={
                 "X-Odysseus-Run-Id": _active_run.run_id,
+                "X-Odysseus-Runtime": _active_run.runtime,
                 "Cache-Control": "no-cache, no-transform",
                 "X-Accel-Buffering": "no",
             },

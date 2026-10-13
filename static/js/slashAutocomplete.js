@@ -192,11 +192,14 @@ export function initSlashAutocomplete(textarea) {
   if (!textarea || textarea._slashAcWired) return;
   textarea._slashAcWired = true;
 
-  let all = _flatten();
+  const base = _flatten();
+  let all = base;
   let popup = null;
   let visible = false;
   let items = [];
   let selectedIdx = 0;
+  let skillKey = '[]';  // last catalog applied; an empty reply changes nothing
+  let skillSeq = 0;
 
   const hide = () => {
     if (!visible) return;
@@ -206,6 +209,7 @@ export function initSlashAutocomplete(textarea) {
 
   const show = () => {
     if (!popup) popup = _ensurePopup(textarea);
+    if (!visible) loadSkills();
     visible = true;
     popup.style.display = 'block';
     _position(popup, textarea);
@@ -240,18 +244,30 @@ export function initSlashAutocomplete(textarea) {
     _render(popup, items, selectedIdx, query);
   };
 
-  _loadSkillEntries().then(skillEntries => {
-    if (!skillEntries.length) return;
-    const seen = new Set(all.map(e => e.token));
-    const merged = all.slice();
-    for (const entry of skillEntries) {
-      if (seen.has(entry.token)) continue;
-      seen.add(entry.token);
-      merged.push(entry);
-    }
-    all = merged;
-    if (visible) refresh();
-  });
+  // Skills can be approved or unpublished while the page is open, so the
+  // catalog is fetched again each time the popup opens and `all` is rebuilt
+  // from the registry (which always wins a token collision). An unchanged
+  // catalog is a no-op so a reply landing mid-navigation keeps the selection.
+  // `base` is computed once because _flatten() only reads the static imports.
+  const loadSkills = () => {
+    const seq = ++skillSeq;
+    _loadSkillEntries().then(skillEntries => {
+      if (seq !== skillSeq) return;  // a later open already asked
+      const key = JSON.stringify(skillEntries);
+      if (key === skillKey) return;
+      skillKey = key;
+      const seen = new Set(base.map(e => e.token));
+      const merged = base.slice();
+      for (const entry of skillEntries) {
+        if (seen.has(entry.token)) continue;
+        seen.add(entry.token);
+        merged.push(entry);
+      }
+      all = merged;
+      if (visible) refresh();
+    });
+  };
+  loadSkills();
 
   const insert = (token) => {
     textarea.value = token + ' ';

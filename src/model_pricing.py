@@ -68,6 +68,13 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "codestral": (0.30, 0.90),
     "pixtral": (2.00, 6.00),
     # --- xAI ---
+    # <200k-prompt tier from docs.x.ai/developers/models.
+    "grok-4.7": (2.00, 6.00),
+    "grok-4.6": (2.00, 6.00),
+    "grok-4.5": (2.00, 6.00),
+    "grok-4.3": (1.25, 2.50),
+    "grok-4.20": (1.25, 2.50),
+    "grok-build": (1.00, 2.00),
     "grok-4": (3.00, 15.00),
     "grok-3": (3.00, 15.00),
     "grok-2": (2.00, 10.00),

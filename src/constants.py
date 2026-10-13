@@ -100,6 +100,14 @@ SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 GALLERY_DIR = os.path.join(DATA_DIR, "gallery")
 GALLERY_UPLOADS_DIR = os.path.join(DATA_DIR, "gallery_uploads")
 MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
+# Per-user store of the chat_agent runtime (runtime switch, permission rules).
+CHAT_AGENT_DIR = os.path.join(DATA_DIR, "chat_agent")
+# Per-user instruction files (AGENTS.md / CLAUDE.md) of the chat_agent runtime,
+# one folder per user; the Settings Instructions panel and the host edit the same file.
+INSTRUCTIONS_DIR = os.path.join(DATA_DIR, "instructions")
+INSTRUCTION_FILENAMES = ("AGENTS.md", "CLAUDE.md")
+# Characters loaded from one instruction file; the rest is cut and marked.
+INSTRUCTION_FILE_MAX_CHARS = 12_000
 
 # The only part of DATA_DIR the agent's file tools and subprocesses may touch.
 # Everything else under DATA_DIR is application state (session store, auth

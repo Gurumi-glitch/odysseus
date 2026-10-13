@@ -24,6 +24,8 @@ from src.session_image_cleanup import _generated_image_path_for_cleanup, session
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
+from src.chat_agent import prompt as chat_agent_prompt, store as chat_agent_store
+from src import agent_runs
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -369,6 +371,22 @@ def _pick_endpoint_for_sort(owner=None):
     if url and model:
         return url, model, headers
     return None, None, None
+
+
+def _context_info_instruction_files(request: Request, owner: str | None, cwd: str | None) -> list[dict]:
+    """Instruction files the chat_agent runtime loads for this composer workspace."""
+    if chat_agent_store.chat_runtime(owner) != chat_agent_store.RUNTIME_NEW:
+        return []
+    # Relies on: the chat route's resolver returns "" for non-admin callers and
+    # the vetted backend path otherwise, so the list matches what a turn loads.
+    from routes.chat_routes import _resolve_request_workspace
+
+    workspace, _rejected = _resolve_request_workspace(request, cwd)
+    return [
+        {"path": item.path, "truncated": item.truncated}
+        for item in chat_agent_prompt.instruction_files(owner, workspace)
+    ]
+
 
 def setup_session_routes(
     session_manager: SessionManager,
@@ -800,9 +818,9 @@ def setup_session_routes(
         return {"ok": True, "count": len(messages)}
 
     @router.post("/session/{sid}/delete")
-    def delete_session_beacon(request: Request, sid: str):
+    async def delete_session_beacon(request: Request, sid: str):
         """Delete session via POST (for navigator.sendBeacon on page close)."""
-        return delete_session(request, sid)
+        return await delete_session(request, sid)
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
@@ -827,6 +845,7 @@ def setup_session_routes(
                 finally:
                     db.close()
 
+                await agent_runs.stop_and_wait(sid)
                 if session_manager.delete_session(sid):
                     from routes.chat_helpers import remove_session_sft_trace_rows
                     remove_session_sft_trace_rows(effective_user(request), sid)
@@ -847,7 +866,7 @@ def setup_session_routes(
             db.close()
 
     @router.delete("/session/{sid}")
-    def delete_session(request: Request, sid: str, delete_images: bool = False):
+    async def delete_session(request: Request, sid: str, delete_images: bool = False):
         """Permanently delete a session and all its messages."""
         _verify_session_owner(request, sid, session_manager)
         try:
@@ -863,6 +882,9 @@ def setup_session_routes(
             finally:
                 db.close()
 
+            # Stop the chat's run first: its cancel path saves the partial
+            # turn, which the delete then removes with the rest.
+            await agent_runs.stop_and_wait(sid)
             # Delete the session and all its messages
             if (session_manager.delete_session(sid, delete_images=True) if delete_images
                     else session_manager.delete_session(sid)):
@@ -1282,7 +1304,11 @@ def setup_session_routes(
                 "timestamp": utcnow_naive().isoformat(),
             },
         )
-        new_history = [summary_msg] + recent
+        from src.chat_agent.transcript import compacted_history
+
+        # The summary keeps the egress provenance of the rows it replaces, and
+        # kept new-runtime rows drop the usage that measured the old history.
+        new_history = compacted_history(summary_msg, older, recent)
         if not session_manager.replace_messages(session_id, new_history):
             raise HTTPException(500, "Failed to save compacted history")
 
@@ -1608,6 +1634,7 @@ def setup_session_routes(
 
         _host_paths_visible = owner_is_admin_or_single_user(owner)
         agents_md = _context_info_agents_md_inventory(cwd) if _host_paths_visible else []
+        instructions = _context_info_instruction_files(request, owner, cwd)
         # Workspace visibility: lets the TUI answer "can the backend actually
         # see this directory?" (mounted vs bridge-only) without probing.
         from src.workspace_paths import backend_workspace_path, workspace_mount_pairs
@@ -1642,6 +1669,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }
@@ -1654,6 +1682,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }
@@ -1663,6 +1692,7 @@ def setup_session_routes(
                 "skills": skills,
                 "tools": tools,
                 "agents_md": agents_md,
+                "instructions": instructions,
                 "workspace": _workspace,
                 "tool_policy": _policy,
             }

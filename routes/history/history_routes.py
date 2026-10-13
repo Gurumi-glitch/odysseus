@@ -182,6 +182,17 @@ def _history_display_content(content: Any) -> Any:
     return content
 
 
+def _display_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Message metadata as the history view returns it: without ``agent_v2``.
+
+    The turn record is the chat_agent runtime's replay source (ADR 0007); the
+    browser renders its projections and never needs the record itself.
+    """
+    if "agent_v2" not in metadata:
+        return metadata
+    return {key: value for key, value in metadata.items() if key != "agent_v2"}
+
+
 def _merge_continue_rows_to_delete(db_messages, db1, db2):
     """DB rows to delete when merging the last two assistant messages.
 
@@ -271,6 +282,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 meta = json.loads(m.meta_data) or {}
             except (json.JSONDecodeError, ValueError):
                 meta = {}
+        meta = _display_metadata(meta)
         meta["_db_id"] = m.id
         if m.timestamp and "timestamp" not in meta:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
@@ -343,7 +355,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     continue
                 entry = {"role": msg.role, "content": strip_tui_local_context(_history_display_content(msg.content))}
                 if msg.metadata:
-                    entry["metadata"] = msg.metadata
+                    entry["metadata"] = _display_metadata(msg.metadata)
                 history_dict.append(entry)
             elif isinstance(msg, dict):
                 if msg.get("metadata", {}).get("hidden"):
@@ -353,7 +365,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     "content": strip_tui_local_context(_history_display_content(msg.get("content", ""))),
                 }
                 if msg.get("metadata"):
-                    entry["metadata"] = msg["metadata"]
+                    entry["metadata"] = _display_metadata(msg["metadata"])
                 history_dict.append(entry)
 
         # Fallback: load from DB if in-memory renders empty. Display only —
@@ -640,7 +652,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         _verify_session_owner(request, session_id)
         try:
             body = await request.json()
-            meta_update = body.get("metadata", {})
+            meta_update = sanitize_client_message_metadata(body.get("metadata")) or {}
             session = session_manager.get_session(session_id)
 
             # Update in-memory
@@ -718,6 +730,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             meta1 = (msg1.metadata if isinstance(msg1, ChatMessage) else msg1.get('metadata')) or {}
             meta2 = (msg2.metadata if isinstance(msg2, ChatMessage) else msg2.get('metadata')) or {}
             merged_meta = {**meta1, **meta2}
+            # Both rows' calls stay in context; the egress gate reads them here.
+            tool_events = [*(meta1.get('tool_events') or []), *(meta2.get('tool_events') or [])]
+            if tool_events:
+                merged_meta['tool_events'] = tool_events
             thinking1 = str(meta1.get('thinking') or '').strip()
             thinking2 = str(meta2.get('thinking') or '').strip()
             if thinking1 and thinking2:
@@ -726,6 +742,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 merged_meta['thinking'] = thinking1
             merged_meta.pop('stopped', None)  # no longer stopped after continue
             merged_meta.pop('thinking_interrupted', None)
+            if 'agent_v2' in merged_meta:
+                # The turn record covers one reply, not the merged text: render
+                # and replay this row from its content (spec #44 Transcript).
+                merged_meta['edited'] = True
 
             # Update first message, remove second
             if isinstance(msg1, ChatMessage):
@@ -867,8 +887,14 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             from src.model_context import estimate_tokens, get_context_length
             from src.model_profiles import supports_user_thinking_toggle
 
+            from src.chat_agent.transcript import reported_context_tokens
+
             messages = session.get_context_messages()
-            used = int(estimate_tokens(messages))
+            # New-runtime chats: the last usage the provider reported (it
+            # includes the system prompt and tool schemas no estimate sees)
+            # plus the rows saved after it (#67).
+            reported = reported_context_tokens(session.history)
+            used = int(reported if reported is not None else estimate_tokens(messages))
             ctx_len = int(get_context_length(session.endpoint_url, session.model) or 0)
             thinking_supported = supports_user_thinking_toggle(session.model)
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0

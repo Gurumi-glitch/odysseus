@@ -1178,6 +1178,12 @@
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
           </button>
+          <!-- Auto mode (the new chat runtime's classifier answers asks); shown by app.js when the runtime switch and privilege allow -->
+          <button type="button" class="input-icon-btn" title="Auto mode" id="auto-mode-toggle-btn" data-mode-tool="true" aria-label="Auto mode" aria-pressed="false" hidden>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+          </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg class="workspace-indicator-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -1232,6 +1238,7 @@
       <!-- Hidden checkboxes for state -->
       <input type="checkbox" id="web-toggle" style="display:none;">
       <input type="checkbox" id="bash-toggle" style="display:none;">
+      <input type="checkbox" id="auto-mode-toggle" style="display:none;">
       <input type="checkbox" id="plan-toggle" style="display:none;">
     </div>
     <form id="chat-form" autocomplete="off" action="javascript:void(0);" style="display:none;"></form>
@@ -1647,6 +1654,75 @@
             </div>
           </div>
           <!-- Agent card moved to the Agent Tools tab. -->
+          <div class="admin-card" id="set-chatRuntimeCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>New Agent Runtime<span style="flex:1"></span><label class="admin-switch" title="Run agent-mode turns on the new chat runtime"><input type="checkbox" id="set-chatRuntimeToggle"><span class="admin-slider"></span></label></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Run agent-mode turns on the new chat runtime instead of the legacy agent loop. Applies from your next message.</div>
+            <div id="set-chatRuntimeMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+          </div>
+          <div class="admin-card" id="set-chatInstructionsCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>Instructions<span style="flex:1"></span><label class="admin-switch" title="Load your instructions file on the new runtime"><input type="checkbox" id="set-chatInstructionsToggle"><span class="admin-slider"></span></label></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Standing instructions the new runtime reads before every turn. The workspace's AGENTS.md or CLAUDE.md loads as well; the switch only affects this file.</div>
+            <div class="settings-col">
+              <textarea id="set-chatInstructionsText" rows="8" class="settings-select" style="font-family:inherit;resize:vertical" placeholder="e.g. Answer in the language I write in. Keep replies short and skip pleasantries."></textarea>
+              <div class="settings-row" style="margin-top:4px;align-items:center">
+                <span id="set-chatInstructionsPath" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);word-break:break-all;"></span>
+                <span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;flex-shrink:0">
+                  <span id="set-chatInstructionsCount" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></span>
+                  <button class="admin-btn-add" id="set-chatInstructionsSave" style="display:inline-flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>Save</button>
+                </span>
+              </div>
+              <div id="set-chatInstructionsMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card" id="set-chatRulesCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Permission Rules</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Rules the new runtime checks before every tool call, in Claude Code syntax: a tool name such as <code>bash</code> or <code>send_email</code>, or a tool with a specifier such as <code>read_file(docs/**)</code>, <code>web_fetch(domain:*.github.com)</code>, <code>manage_tasks(action:delete)</code> or <code>send_email(to:*@example.com)</code>. Deny wins over ask, ask over allow. Tools the admin disabled, composer toggles that are off and sensitive actions (email sends, deletes, vault reads) are fixed denies and asks that no allow rule lifts.</div>
+            <div data-chat-rules="allow">
+              <div class="admin-rag-section-label">Allow</div>
+              <div data-chat-rules-list></div>
+              <form class="admin-add-form" style="margin-top:4px">
+                <input type="text" autocomplete="off" spellcheck="false" placeholder="e.g. read_file(docs/**)">
+                <button type="submit" class="admin-btn-add">Add</button>
+              </form>
+            </div>
+            <div data-chat-rules="ask">
+              <div class="admin-rag-section-label">Ask</div>
+              <div data-chat-rules-list></div>
+              <form class="admin-add-form" style="margin-top:4px">
+                <input type="text" autocomplete="off" spellcheck="false" placeholder="e.g. web_fetch(domain:*.example.com)">
+                <button type="submit" class="admin-btn-add">Add</button>
+              </form>
+            </div>
+            <div data-chat-rules="deny">
+              <div class="admin-rag-section-label">Deny</div>
+              <div data-chat-rules-list></div>
+              <form class="admin-add-form" style="margin-top:4px">
+                <input type="text" autocomplete="off" spellcheck="false" placeholder="e.g. manage_tasks(action:delete)">
+                <button type="submit" class="admin-btn-add">Add</button>
+              </form>
+            </div>
+            <div id="set-chatRulesMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);margin-top:8px;"></div>
+          </div>
+          <div class="admin-card admin-only" id="set-classifierCard">
+            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Auto Mode Classifier</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Model that answers permission asks while auto mode is on in the new runtime. Leave both empty to judge with the chat's own model. A user who may not use this model is judged by their chat model instead.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label">Endpoint</label>
+                <select id="set-classifierEndpoint" class="settings-select">
+                  <option value="">Same as chat</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label">Model</label>
+                <span class="adm-model-logo" id="set-classifierModel-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
+                <select id="set-classifierModel" class="settings-select">
+                  <option value="">Same as chat</option>
+                </select>
+              </div>
+              <div id="set-classifierMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);margin-top:2px;"></div>
+            </div>
+          </div>
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>Image Generation<span style="flex:1"></span><label class="admin-switch"><input type="checkbox" id="set-imgEnabledToggle"><span class="admin-slider"></span></label></h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Configure which model to use for image generation.</div>
@@ -2016,6 +2092,11 @@
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
                 <span class="vis-label">Shell</span>
                 <input type="checkbox" checked data-ui-key="bash-toggle-btn"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+                <span class="vis-label">Auto Mode <span class="vis-hint">New chat runtime only</span></span>
+                <input type="checkbox" checked data-ui-key="auto-mode-toggle-btn"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></span>
@@ -2643,7 +2724,7 @@
 <script type="module" src="/static/js/dragSort.js"></script>
 <script type="module" src="/static/js/sessions.js"></script>
 <script type="module" src="/static/js/memory.js"></script>
-<script type="module" src="/static/js/skills.js?v=20260909kebabconsistency1"></script>
+<script type="module" src="/static/js/skills.js?v=20261012skillstate1"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
 <script type="module" src="/static/js/tourAutoplay.js"></script>
 <script type="module" src="/static/js/fileHandler.js?v=20260909mobileattachmentedit1"></script>

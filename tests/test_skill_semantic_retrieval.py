@@ -42,6 +42,8 @@ def _skill(name, description, *, requires=None, fallback_for=None):
         "fallback_for_toolsets": list(fallback_for or []),
         "status": "published",
         "confidence": 0.8,
+        # Ranking tests: usability is decided by is_usable, covered elsewhere.
+        "user_approved": True,
     }
 
 

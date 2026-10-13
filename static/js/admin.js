@@ -63,6 +63,7 @@ const PRIV_LABELS = {
   can_use_research: 'Deep research',
   can_generate_images: 'Image generation',
   can_manage_memory: 'Memory & skills',
+  can_use_auto_mode: 'Auto mode (new runtime)',
 };
 
 async function loadUsers() {

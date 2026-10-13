@@ -14,6 +14,7 @@ import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { matchModelKey } from './model/matchKey.js';
 import { getTools } from './appConfig.js';
 import { getShowPersonaName } from './presets.js?v=20260908personaname1';
+import Storage from './storage.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -433,6 +434,16 @@ function _toolDisplayInfo(tool, command, data = null) {
     };
   }
   return { label: '', commandHtml: '' };
+}
+
+/**
+ * The line a tool card shows when auto mode's classifier denied the call
+ * (#68): the output is the denial reason, so it is shown open instead of
+ * folded under "Output".
+ */
+export function toolDenialHtml(ev) {
+  if (!ev || ev.denied_by !== 'auto_mode' || !String(ev.output || '').trim()) return '';
+  return `<div class="agent-thread-denial">${uiModule.esc(String(ev.output))}</div>`;
 }
 
 function _suppressRawToolOutput(tool, ok) {
@@ -944,6 +955,13 @@ const MODEL_INFO = {
   'codestral':            { input: 0.30,  output: 0.90,  ctx: 32000 },
   'pixtral':              { input: 2.00,  output: 6.00,  ctx: 128000 },
   // --- xAI ---
+  // <200k-prompt tier from docs.x.ai/developers/models.
+  'grok-4.7':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.6':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.5':             { input: 2.00,  output: 6.00,  ctx: 500000 },
+  'grok-4.3':             { input: 1.25,  output: 2.50,  ctx: 1000000 },
+  'grok-4.20':            { input: 1.25,  output: 2.50,  ctx: 1000000 },
+  'grok-build':           { input: 1.00,  output: 2.00,  ctx: 256000 },
   'grok-4':               { input: 3.00,  output: 15.00, ctx: 131072 },
   'grok-3':               { input: 3.00,  output: 15.00, ctx: 131072 },
   'grok-2':               { input: 2.00,  output: 10.00, ctx: 131072 },
@@ -1162,12 +1180,21 @@ export function applyModelColor(roleEl, modelName) {
       } else if (info && info.ctx) {
         html += '<div><span class="ctx-label">Context</span> <span id="_ctx-val">' + _fmtCtx(info.ctx) + ' tokens</span></div>';
       }
-      // Fetch real context from server async
-      if (!_realCtx && window.sessionModule) {
+      // Fetch real context + the instruction files the new runtime loads, async.
+      // The server caches context length per (endpoint, model), so fetching on
+      // every open is cheap; the file list changes with the composer workspace.
+      // Nobody mode (incognito toggle) loads no instruction files at all.
+      const _nobody = !!(document.getElementById('incognito-toggle') || {}).checked;
+      if (window.sessionModule) {
         const _sid = window.sessionModule.getCurrentSessionId();
         if (_sid) {
-          fetch('/api/session/' + _sid + '/context_info').then(r => r.ok ? r.json() : null).then(d => {
-            if (d && d.context_length) {
+          // Same workspace chat.js posts with each turn, so the list matches
+          // what the next turn will load.
+          const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
+          const _qs = _ws ? '?cwd=' + encodeURIComponent(_ws) : '';
+          fetch('/api/session/' + _sid + '/context_info' + _qs).then(r => r.ok ? r.json() : null).then(d => {
+            if (!d) return;
+            if (!_realCtx && d.context_length) {
               if (!window._realContextLengths) window._realContextLengths = {};
               window._realContextLengths[modelName] = d.context_length;
               const el = document.getElementById('_ctx-val');
@@ -1178,6 +1205,15 @@ export function applyModelColor(roleEl, modelName) {
                 }
               }
             }
+            const _files = (!_nobody && Array.isArray(d.instructions)) ? d.instructions : [];
+            if (!_files.length) return;
+            let fh = '<div style="margin-top:4px;"><span class="ctx-label">Instructions</span>';
+            for (const f of _files) {
+              fh += '<div style="overflow-wrap:anywhere;">' + uiModule.esc(f.path);
+              if (f.truncated) fh += ' <span style="opacity:0.35">(truncated)</span>';
+              fh += '</div>';
+            }
+            popup.insertAdjacentHTML('beforeend', fh + '</div>');
           }).catch(() => {});
         }
       }
@@ -1941,7 +1977,7 @@ function _activateEntityAnchor(e, forcedAnchor = null) {
       else { const b = document.getElementById('tasks-btn'); if (b) b.click(); }
     }).catch(() => { const b = document.getElementById('tasks-btn'); if (b) b.click(); });
   } else if (kind === 'skill') {
-    import('./skills.js?v=20260909kebabconsistency1').then(mod => {
+    import('./skills.js?v=20261012skillstate1').then(mod => {
       const open = mod.openSkill || (mod.default && mod.default.openSkill);
       if (open) open(id);
     }).catch(() => {});
@@ -2936,6 +2972,32 @@ export function displayMetrics(messageElement, metrics) {
   if (uiModule) uiModule.scrollHistory();
 }
 
+/**
+ * A steering message: sent while a chat_agent turn ran, joined at the next
+ * round boundary (spec #44, #63). Not a `.msg-user`: regenerate, delete and
+ * the turn-rendering scan treat `.msg-user` as the turn's real message, and a
+ * steer never answers an ask (#65).
+ */
+export function renderSteerBubble(text) {
+  const box = document.getElementById('chat-history');
+  if (!box) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-steer';
+  wrap.title = 'Sent while the agent was working; it joined the turn at the next round';
+  const role = document.createElement('div');
+  role.className = 'role';
+  role.textContent = 'You';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = String(text || '');
+  wrap.appendChild(role);
+  wrap.appendChild(body);
+  wrap.dataset.raw = String(text || '');
+  box.appendChild(wrap);
+  if (uiModule) uiModule.scrollHistory();
+  return wrap;
+}
+
 /** Remove any unanswered multiple-choice cards currently in the chat. */
 export function removeAskUserCards(root) {
   const scope = root || document.getElementById('chat-history') || document;
@@ -2979,6 +3041,93 @@ function _answerAskUserCards(root, text) {
   scope.querySelectorAll('.ask-user-card:not(.ask-user-answered)').forEach((node) => {
     _markAskUserAnswered(node, text);
   });
+}
+
+const CHAT_AGENT_RUNTIME = 'chat_agent';
+// ask_expired causes (src/chat_agent/asks.py, transcript.py).
+const ASK_EXPIRED_CAUSES = {
+  timeout: 'no answer in time',
+  restart: 'the server restarted',
+  cancel: 'the turn was stopped',
+};
+
+/**
+ * Mark a chat_agent ask card read-only. `resolution` is the stream's
+ * ask_resolved / ask_expired event, or the stored card's `resolved` /
+ * `expired_cause` on reload.
+ */
+function _settleAskUserCard(card, aq, resolution) {
+  const r = resolution || {};
+  if (r.type === 'ask_expired' || r.resolved === 'expired') {
+    const cause = r.cause || r.expired_cause || '';
+    const settled = !card.classList.contains('ask-user-answered');
+    _markAskUserAnswered(card, ASK_EXPIRED_CAUSES[cause] || cause);
+    if (settled) card.querySelector('.ask-user-answer-label').textContent = 'Expired';
+    return;
+  }
+  const decision = r.decision || r.resolved || '';
+  const option = (Array.isArray(aq.options) ? aq.options : []).find((opt) => opt && opt.value === decision);
+  const label = option ? String(option.label) : (decision === 'answer' ? '' : decision);
+  _markAskUserAnswered(card, [label, r.reason].filter(Boolean).join(' — '));
+}
+
+/** Settle the live card of a chat_agent ask when its ask_resolved / ask_expired event arrives. */
+export function resolveAskUserCard(askId, event) {
+  if (!askId) return;
+  document.querySelectorAll('.ask-user-card').forEach((card) => {
+    if (card.dataset.askId === String(askId)) _settleAskUserCard(card, card._askUser || {}, event);
+  });
+}
+
+/**
+ * Answer a chat_agent ask. The only answer path: a chat_stream send would
+ * cancel the waiting run (spec #44, Asks). The turn's ask_resolved event
+ * settles the card; a refusal (409: the ask is no longer open) is shown.
+ */
+export async function answerChatAsk(sessionId, askId, decision, text) {
+  const apiBase = window.API_BASE || '';
+  let detail = '';
+  try {
+    const res = await fetch(`${apiBase}/api/chat/ask/${encodeURIComponent(sessionId)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ask_id: askId, decision, text: text || '' }),
+    });
+    if (res.ok) return;
+    const body = await res.json().catch(() => ({}));
+    detail = body.detail || `Could not answer (${res.status})`;
+  } catch (err) {
+    detail = `Could not answer: ${err.message}`;
+  }
+  if (uiModule?.showToast) uiModule.showToast(detail);
+}
+
+/** The unanswered chat_agent ask card of `sessionId`, if one is in the chat. */
+function _pendingAskCard(sessionId) {
+  const card = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)');
+  return card && card._askUser?.session_id === sessionId ? card : null;
+}
+
+/** Whether a chat_agent ask of `sessionId` is still waiting for an answer. */
+export function hasPendingAsk(sessionId) {
+  return !!_pendingAskCard(sessionId);
+}
+
+/**
+ * Answer the pending ask of `sessionId` with the composer text; returns
+ * whether it did. Only question asks take free text; on a permission or
+ * repeat-guard ask the text is the deny reason the model reads back
+ * (spec #44, Asks). An empty composer answers nothing.
+ */
+export function answerPendingAskFromComposer(sessionId, text) {
+  const card = _pendingAskCard(sessionId);
+  if (!card || !text) return false;
+  const aq = card._askUser;
+  const decision = aq.ask_kind === 'question' ? 'answer' : 'deny';
+  answerChatAsk(sessionId, aq.ask_id, decision, text);
+  resolveAskUserCard(aq.ask_id, { decision, reason: text });
+  return true;
 }
 
 // While a choice card is visible, let plain 1–3 activate the corresponding
@@ -3026,16 +3175,22 @@ document.addEventListener('keydown', _handleAskUserShortcut);
  */
 export function renderAskUserCard(payload, options) {
   const aq = payload || {};
-  if (aq.resolved) return null;
-  const opts = Array.isArray(aq.options) ? aq.options : [];
   const renderOptions = options || {};
+  // `runtime` is the live run's X-Odysseus-Runtime header (or the stored
+  // row's metadata.runtime). Only chat_agent asks answer through the ask
+  // endpoint and render resolved cards read-only (spec #44, Asks); legacy
+  // cards keep their composer / approval-event paths and stay hidden once
+  // resolved.
+  const chatAsk = renderOptions.runtime === CHAT_AGENT_RUNTIME && !!aq.ask_id;
+  if (aq.resolved && !chatAsk) return null;
+  const opts = Array.isArray(aq.options) ? aq.options : [];
   const chatBox = renderOptions.root || document.getElementById('chat-history');
   const onSubmit = typeof renderOptions.onSubmit === 'function'
     ? renderOptions.onSubmit
     : null;
   if (!chatBox || !aq.question || opts.length < 2) return null;
 
-  removeAskUserCards(chatBox);
+  if (!aq.resolved) removeAskUserCards(chatBox);
 
   const card = document.createElement('div');
   card.className = 'ask-user-card';
@@ -3044,6 +3199,11 @@ export function renderAskUserCard(payload, options) {
   const multi = !!aq.multi;
   const isToolApproval = aq.kind === 'tool_approval' && !!aq.approval_id;
   card.dataset.askUserKind = isToolApproval ? 'tool_approval' : 'question';
+  if (chatAsk) {
+    card.dataset.askId = String(aq.ask_id);
+    card._askUser = aq;
+  }
+  const isQuestion = aq.ask_kind === 'question';
   const emojiText = (value) => svgifyEmoji(uiModule.esc(String(value)));
 
   const question = document.createElement('div');
@@ -3052,6 +3212,15 @@ export function renderAskUserCard(payload, options) {
   question.innerHTML = emojiText(aq.question);
   card.appendChild(question);
   card.setAttribute('aria-labelledby', question.id);
+
+  if (chatAsk && aq.description) {
+    // Permission cards spell out what a scheduled task would run (#40).
+    const description = document.createElement('div');
+    description.className = 'ask-user-option-desc';
+    description.textContent = aq.description;
+    description.style.whiteSpace = 'pre-wrap';
+    card.appendChild(description);
+  }
 
   if (isToolApproval && aq.action) {
     const action = document.createElement('div');
@@ -3074,8 +3243,17 @@ export function renderAskUserCard(payload, options) {
   list.className = 'ask-user-options';
   card.appendChild(list);
 
+  const answerAsk = (decision, text) => {
+    answerChatAsk(aq.session_id, aq.ask_id, decision, text);
+    _settleAskUserCard(card, aq, { decision, reason: text });
+  };
+
   const send = (text) => {
     if (!text) return;
+    if (chatAsk) {
+      answerAsk('answer', text);
+      return;
+    }
     if (onSubmit) {
       const accepted = onSubmit({
         kind: 'answer',
@@ -3119,6 +3297,13 @@ export function renderAskUserCard(payload, options) {
     if (!multi) {
       row.type = 'button';
       row.addEventListener('click', () => {
+        if (chatAsk && !isQuestion) {
+          // Only Deny carries the typed reason: the runtime reads text on no
+          // other permission decision (loop._permission_decision).
+          const decision = String((opt && opt.value) || '').toLowerCase();
+          answerAsk(decision, decision === 'deny' ? otherInput.value.trim() : '');
+          return;
+        }
         if (isToolApproval) {
           const detail = {
             approval_id: aq.approval_id,
@@ -3153,17 +3338,26 @@ export function renderAskUserCard(payload, options) {
   const otherInput = document.createElement('input');
   otherInput.type = 'text';
   otherInput.className = 'styled-prompt-input ask-user-other-input';
-  otherInput.placeholder = multi ? 'Other (added to selection)…' : 'Other… (type your own answer)';
-  otherInput.setAttribute('aria-label', multi ? 'Add a custom option' : 'Type a custom answer');
+  // A permission ask's text box is the deny reason the model reads back; a
+  // repeat-guard Stop reads none, so that card gets no box.
+  const denyReason = chatAsk && aq.ask_kind === 'permission';
+  otherInput.placeholder = denyReason
+    ? 'Reason for denying (optional)…'
+    : (multi ? 'Other (added to selection)…' : 'Other… (type your own answer)');
+  otherInput.setAttribute('aria-label', denyReason
+    ? 'Reason for denying'
+    : (multi ? 'Add a custom option' : 'Type a custom answer'));
   const otherSend = document.createElement('button');
   otherSend.type = 'button';
   otherSend.className = 'confirm-btn confirm-btn-primary ask-user-other-send';
-  otherSend.setAttribute('aria-label', 'Send answer');
-  otherSend.title = multi ? 'Send selection' : 'Send answer';
+  otherSend.setAttribute('aria-label', denyReason ? 'Deny with this reason' : 'Send answer');
+  otherSend.title = denyReason ? 'Deny with this reason' : (multi ? 'Send selection' : 'Send answer');
   otherSend.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const submit = () => {
     const freeText = otherInput.value.trim();
-    if (multi) {
+    if (denyReason) {
+      if (freeText) answerAsk('deny', freeText);
+    } else if (multi) {
       const picked = Array.from(card.querySelectorAll('.ask-user-option input:checked')).map((input) => input.value);
       if (freeText) picked.push(freeText);
       if (picked.length) send(picked.join(', '));
@@ -3180,7 +3374,8 @@ export function renderAskUserCard(payload, options) {
   });
   other.appendChild(otherInput);
   other.appendChild(otherSend);
-  if (!isToolApproval) card.appendChild(other);
+  if (!isToolApproval || denyReason) card.appendChild(other);
+  if (aq.resolved) _settleAskUserCard(card, aq, aq);
 
   const previous = chatBox.lastElementChild;
   const previousIsThread = previous?.classList?.contains('agent-thread');
@@ -3204,6 +3399,57 @@ export function renderAskUserCard(payload, options) {
   return card;
 }
 
+// Set by a turn-stop note's Continue; handleChatSubmit reads it once into the
+// form's `source` field, so a continuation is marked from the live note and
+// from a reloaded row alike (spec #44 Transcript, #65).
+let _pendingTurnSource = '';
+
+/** The source of the next composer send ('continue' after Continue), consumed by the read. */
+export function takePendingTurnSource() {
+  const source = _pendingTurnSource;
+  _pendingTurnSource = '';
+  return source;
+}
+
+// The live event carries the numbers (rounds; used/limit); a stored row only
+// its stop_reason, so history keeps the generic wording.
+function _turnStopLabel(stopReason, detail) {
+  if (stopReason === 'budget') {
+    return detail.limit == null ? 'Reached the tool budget — not finished.' : `Tool budget reached (${detail.used}/${detail.limit} calls) — not finished.`;
+  }
+  return detail.rounds ? `Reached the ${detail.rounds}-step limit — not finished.` : 'Reached the step limit — not finished.';
+}
+
+/**
+ * The note a capped chat_agent turn ends with (stop_reason max_rounds or
+ * budget): why it stopped, plus Continue, which is a new turn marked
+ * source=continue (never the legacy merge). Both the live stream and
+ * history draw it here so the two cannot drift. `detail` is the live cap
+ * event's numbers; omitted for a stored row.
+ */
+export function renderTurnStopNote(stopReason, detail = {}) {
+  const note = document.createElement('div');
+  note.className = 'stopped-indicator rounds-exhausted';
+  const label = document.createElement('span');
+  label.className = 'rounds-exhausted-label';
+  label.textContent = _turnStopLabel(stopReason, detail);
+  note.appendChild(label);
+  const contBtn = document.createElement('button');
+  contBtn.className = 'continue-btn';
+  contBtn.title = 'Continue the task in a new turn';
+  contBtn.textContent = 'Continue ▸';
+  contBtn.addEventListener('click', () => {
+    note.remove();
+    const msgInput = document.getElementById('message');
+    if (!msgInput) return;
+    _pendingTurnSource = 'continue';
+    msgInput.value = 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.';
+    document.querySelector('.send-btn')?.click();
+  });
+  note.appendChild(contBtn);
+  return note;
+}
+
 /**
  * Add a message to the chat history.
  */
@@ -3223,11 +3469,17 @@ export function addMessage(role, content, modelName, metadata) {
     const textRaw = Array.isArray(content) ? markdownModule.renderContent(content) : content;
 
     // --- Agent multi-bubble reconstruction from saved metadata ---
+    // A chat_agent row's content is every round plus the steer quotes; its
+    // round_texts are the replay source (spec #44 Transcript, #65). An edited
+    // row renders content.
+    const agentRuntimeRow = role === 'assistant' && metadata?.runtime === CHAT_AGENT_RUNTIME
+      && Array.isArray(metadata.round_texts) && metadata.round_texts.length > 0;
     if (
       role === 'assistant'
       && metadata
       && (
-        (Array.isArray(metadata.tool_events) && metadata.tool_events.length > 0)
+        agentRuntimeRow
+        || (Array.isArray(metadata.tool_events) && metadata.tool_events.length > 0)
         || (Array.isArray(metadata.round_texts) && metadata.round_texts.length > 1)
       )
     ) {
@@ -3235,7 +3487,20 @@ export function addMessage(role, content, modelName, metadata) {
       const toolEvents = metadata.tool_events || [];
       const replacesTurn = metadata.replacement_scope === 'turn'
         && ['structured', 'streamed'].includes(metadata.render_owner);
-      if (replacesTurn) {
+      if (agentRuntimeRow) {
+        roundTexts = metadata.edited ? [typeof textRaw === 'string' ? textRaw : ''] : [...roundTexts];
+        // A Shorter/Simpler rewrite is stored as the chosen variant (rewriteWith
+        // in chat.js, variants[0] is the original); it replaced the last bubble
+        // live, so it replaces the last round's text here.
+        const variants = Array.isArray(metadata.variants) ? metadata.variants : [];
+        const variantIndex = Number(metadata.variantIndex ?? variants.length - 1);
+        const variant = !metadata.edited && variantIndex > 0 ? variants[variantIndex] : null;
+        if (variant && variant.raw) {
+          let lastTextIdx = roundTexts.length - 1;
+          while (lastTextIdx > 0 && !String(roundTexts[lastTextIdx] || '').trim()) lastTextIdx--;
+          roundTexts[lastTextIdx] = variant.raw;
+        }
+      } else if (replacesTurn) {
         // Persisted content owns the answer. Round metadata still owns the
         // reasoning/tool chronology, but its drafts must not become answers.
         roundTexts = (Array.isArray(roundTexts) ? roundTexts : []).map(text =>
@@ -3387,9 +3652,18 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
-            const ok = (ev.exit_code === 0 || ev.exit_code == null);
-            let outHtml = '';
-            if (!_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
+            else if (ev.ask_user && metadata.runtime === CHAT_AGENT_RUNTIME) {
+              // Answered and expired asks stay in the timeline, read-only (#60).
+              renderAskUserCard(ev.ask_user, { runtime: metadata.runtime, focus: false, scroll: false });
+            }
+            // chat_agent events carry status (done | failed | denied | cancelled |
+            // pending, spec #44 Transcript); legacy ones only an exit code.
+            const evStatus = ev.status || ((ev.exit_code === 0 || ev.exit_code == null) ? 'done' : 'failed');
+            const ok = evStatus === 'done';
+            const evIcon = ok ? '✓' : evStatus === 'pending' ? '▶' : '✗';
+            let outHtml = toolDenialHtml(ev);
+            const evDenied = !!outHtml;
+            if (!evDenied && !_suppressRawToolOutput(ev.tool, ok) && ev.output && ev.output.trim()) {
               outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
             }
             const screenshotSrc = safeToolScreenshotSrc(ev.screenshot);
@@ -3424,14 +3698,14 @@ export function addMessage(role, content, modelName, metadata) {
             }
             const node = document.createElement('div');
             const browserTool = _isPrivateBrowserTool(ev.tool);
-            node.className = 'agent-thread-node' + (ok ? '' : ' error') + (browserTool ? ' open browser-preview-node' : '');
+            node.className = 'agent-thread-node' + (ok || evStatus === 'pending' ? '' : ' error') + (browserTool ? ' open browser-preview-node' : evDenied ? ' open' : '');
             // Hide raw JSON for high-level app tools and diffs; show the same
             // compact command summary that live streaming uses.
             const evToolInfo = _toolDisplayInfo(ev.tool, ev.command, ev);
             const evHeaderAction = evToolInfo.headerActionHtml || '';
             const evToolIcon = renderToolIcon(ev.tool, ev.command, ev);
             const evCmdHtml = browserTool ? '' : (evToolInfo.commandHtml || ((ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : ''));
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span>${evToolIcon}<span class="agent-thread-tool">${esc(evToolInfo.label || ev.tool)}</span>${evHeaderAction}<span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${evIcon}</span>${evToolIcon}<span class="agent-thread-tool">${esc(evToolInfo.label || ev.tool)}</span>${evHeaderAction}<span class="agent-thread-status">${esc(evStatus)}</span><span class="agent-thread-chevron" aria-hidden="true"></span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }
@@ -3447,6 +3721,29 @@ export function addMessage(role, content, modelName, metadata) {
             }
           }
         }
+
+        // Steers joined the turn after this round (metadata.steers, #63).
+        for (const steer of (agentRuntimeRow && Array.isArray(metadata.steers)) ? metadata.steers : []) {
+          if (Number(steer.round) === roundNum && steer.text) lastWrap = renderSteerBubble(steer.text) || lastWrap;
+        }
+      }
+
+      if (agentRuntimeRow && (metadata.stop_reason === 'max_rounds' || metadata.stop_reason === 'budget')) {
+        box.appendChild(renderTurnStopNote(metadata.stop_reason));
+      } else if (agentRuntimeRow && metadata.stop_reason) {
+        // Why the turn ended early (transcript.STOP_*); nothing to continue.
+        const stopLabels = {
+          interrupted: '[Message interrupted]',
+          repeat_guard: '[Agent guard: the same call repeated]',
+          ask_expired: '[Stopped: the question was not answered]',
+          error: '[The turn failed]',
+        };
+        const note = document.createElement('div');
+        note.className = 'stopped-indicator';
+        const label = document.createElement('span');
+        label.textContent = stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`;
+        note.appendChild(label);
+        box.appendChild(note);
       }
 
       const firstWrap = lastMsgAi || lastWrap;
@@ -3464,7 +3761,7 @@ export function addMessage(role, content, modelName, metadata) {
         // Session history is rendered oldest-to-newest.  A later user message
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
-        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+        renderAskUserCard(pendingAskUser, { runtime: metadata.runtime, focus: false, scroll: false });
       }
       return lastWrap;
     }
@@ -3688,8 +3985,10 @@ export function addMessage(role, content, modelName, metadata) {
         : '[Message interrupted]';
       stoppedIndicator.appendChild(stoppedLabel);
       // Continue button only makes sense when there's partial content to
-      // resume from \u2014 skip it for fully-cancelled (empty) turns.
-      if (!metadata.cancelled) {
+      // resume from \u2014 skip it for fully-cancelled (empty) turns. A
+      // chat_agent row never gets it: this Resume is the legacy merge
+      // (merge-last-assistant), which the new runtime never does (spec #44).
+      if (!metadata.cancelled && metadata.runtime !== CHAT_AGENT_RUNTIME) {
         const continueBtn = document.createElement('button');
         continueBtn.className = 'continue-btn resume-btn';
         continueBtn.title = 'Resume response';
@@ -3857,8 +4156,16 @@ const chatRenderer = {
   copyMessageText,
   safeToolScreenshotSrc,
   safeDisplayImageSrc,
+  toolDenialHtml,
   removeAskUserCards,
   renderAskUserCard,
+  resolveAskUserCard,
+  answerChatAsk,
+  hasPendingAsk,
+  answerPendingAskFromComposer,
+  renderTurnStopNote,
+  takePendingTurnSource,
+  renderSteerBubble,
   buildSourcesBox,
   buildFindingsBox,
   buildRagSourcesBox,

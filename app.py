@@ -712,6 +712,10 @@ app.include_router(setup_chat_routes(
     skills_manager=skills_manager,
 ))
 
+# chat_agent runtime control plane (runtime switch)
+from routes.chat_agent_routes import setup_chat_agent_routes
+app.include_router(setup_chat_agent_routes(session_manager))
+
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
 app.include_router(setup_research_routes(research_handler, session_manager=session_manager))
@@ -1124,6 +1128,13 @@ async def _startup_event():
             _db.close()
     except Exception as e:
         logger.debug(f"Incognito purge skipped: {e}")
+    # chat_agent turns a previous process left in progress become interrupted
+    # and their open asks expire (ADR 0007).
+    try:
+        from src.chat_agent.transcript import sweep_interrupted_turns
+        sweep_interrupted_turns()
+    except Exception as e:
+        logger.warning(f"chat_agent interrupted-turn sweep failed: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])

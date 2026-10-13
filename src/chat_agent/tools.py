@@ -1,0 +1,491 @@
+"""Tool catalog and per-call execution wrapper of the chat_agent runtime.
+
+The catalog is the native schemas minus the deferred table (ADR 0003); the
+tool list never changes with the user's wording. The wrapper runs one admitted
+call through the legacy executor whole, with a fresh request authority that
+binds resources and decides nothing (#34): the permission gate already did.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field, replace
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from uuid import uuid4
+
+# Relies on: _apply_tool_surface_to_schemas returns [] for "none" and
+# description-stripped schemas for "compact"; _load_mcp_disabled_map reads
+# every server's disabled_tools from the database on each call, as
+# {server_id: set of server-local tool names}.
+from src.agent_loop import _apply_tool_surface_to_schemas, _load_mcp_disabled_map
+from src.agent_runtime.authority import OperationGrant, RequestAuthority, _owner as authority_owner
+# Relies on: create_request_authority(prompt, owner=...) carries the grants a
+# task created from the UI is sealed with (seal_task_authority, no parent).
+from src.agent_runtime.authority import create_request_authority
+# Relies on: seal_backends seals the backends the listed tools may reach from
+# the client runtime context, as create_request_authority does.
+from src.agent_runtime.remote_resources import seal_backends
+from src.agent_tools import FUNCTION_TOOL_SCHEMAS
+# Relies on: execute_tool_block returns (description, result dict) and, given
+# NO_TOOL_SECURITY_CONTEXT and an explicit authority, applies no taint gate and
+# intersects with no parent authority when none is bound.
+from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
+from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
+from src.turn_contract import canonical_tool
+from src.chat_agent.permissions import mcp_server, task_args
+# Relies on: False only for the legacy text-only Qwen tool routers, which
+# reject image parts.
+from src.agent_loop import _allow_visual_tool_evidence_for_model
+from src.prompt_security import untrusted_context_message
+# Relies on: _load_for_user(owner) returns a copy of that user's prefs, {} when
+# there are none (so a missing toggle means on, as legacy reads it).
+from routes.prefs_routes import _load_for_user
+# Relies on: is_usable(skill) is the one usability predicate (ADR 0008) over a
+# dict from SkillsManager.load(owner); it ignores disable_model_invocation,
+# which callers check themselves (slash keeps user-only skills).
+from services.memory.skills import is_usable
+# get_mcp_manager: the process-wide MCP manager, None before startup.
+from src.tool_utils import get_mcp_manager
+
+# Rare built-ins the model finds with tool search instead of seeing upfront
+# (#27, ADR 0003). The split is this one table.
+DEFERRED_TOOLS = frozenset({
+    # model ops
+    "adopt_served_model", "cancel_download", "download_model", "list_cached_models",
+    "list_cookbook_servers", "list_downloads", "list_models", "list_serve_presets",
+    "list_served_models", "search_hf_models", "serve_model", "serve_preset",
+    "stop_served_model", "tail_serve_output",
+    # admin and settings
+    "manage_endpoints", "manage_tokens", "manage_webhooks", "manage_settings",
+    "manage_mcp", "manage_skills", "manage_bg_jobs", "host_shell",
+    # sessions and other models
+    "create_session", "list_sessions", "manage_session", "send_to_session",
+    "chat_with_model", "ask_teacher",
+    # raw access
+    "api_call", "app_api", "pipeline",
+})
+
+# The runtime's own tool: it loads deferred schemas and never reaches the
+# legacy executor (spec #44, tools).
+TOOL_SEARCH = "tool_search"
+TOOL_SEARCH_MAX_SCHEMAS = 5
+TOOL_SEARCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": TOOL_SEARCH,
+        "description": (
+            "Load deferred tools listed in the system prompt so you can call them. "
+            "Pass keywords to match tool names and descriptions, or "
+            "'select:name_a,name_b' for exact names. Loads at most "
+            f"{TOOL_SEARCH_MAX_SCHEMAS} tools per call; they become callable from "
+            "your next step."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+}
+_SELECT_PREFIX = "select:"
+# The runtime's other own tool: view + view_ref of a usable skill (#33, #66).
+LOAD_SKILL = "load_skill"
+LOAD_SKILL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": LOAD_SKILL,
+        "description": (
+            "Load a skill from the skill index: returns its SKILL.md, and the "
+            "deferred tools it needs become callable from your next step. Pass "
+            "'path' to read a supporting file under the skill's folder instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+}
+USER_ONLY_REASON = "Only the user can start this with `/{name}`; suggest that, don't reproduce its steps."
+# MCP servers whose tools never enter the catalog: built-in email is upfront
+# under its bare names; raw Playwright always loses to private_browser.
+# The internal Python servers (memory, RAG, image generation) are already
+# left out by get_all_openai_schemas.
+_CATALOG_EXCLUDED_MCP_SERVERS = frozenset({"email", "builtin_browser"})
+
+STATUS_DONE = "done"
+STATUS_FAILED = "failed"
+STATUS_DENIED = "denied"
+STATUS_CANCELLED = "cancelled"
+# Shell conventions, so tool cards and transcripts read like a terminal.
+EXIT_DONE = 0
+EXIT_FAILED = 1
+EXIT_DENIED = 126
+EXIT_CANCELLED = 130
+
+
+def schema_name(schema: Dict[str, Any]) -> str:
+    return str((schema.get("function") or {}).get("name") or "")
+
+
+def upfront_tool_names() -> List[str]:
+    return [schema_name(s) for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in DEFERRED_TOOLS]
+
+
+def upfront_schemas(denied: Iterable[str], surface: str) -> List[Dict[str, Any]]:
+    denied = set(denied)
+    schemas = [
+        schema for schema in FUNCTION_TOOL_SCHEMAS
+        if schema_name(schema) not in DEFERRED_TOOLS and schema_name(schema) not in denied
+    ]
+    return _apply_tool_surface_to_schemas(schemas, surface)
+
+
+def unavailable_line(names: Iterable[str]) -> str:
+    names = sorted(set(names))
+    if not names:
+        return ""
+    return (
+        f"Unavailable (disabled by user/admin): {', '.join(names)}. "
+        "Don't call them; tell the user or use an alternative."
+    )
+
+
+def deferred_catalog(denied: Iterable[str], *, include_mcp: bool) -> List[Dict[str, Any]]:
+    """Deferred built-ins, then MCP tools, minus what this turn denies."""
+    denied = set(denied)
+    catalog = [
+        schema for schema in FUNCTION_TOOL_SCHEMAS
+        if schema_name(schema) in DEFERRED_TOOLS and schema_name(schema) not in denied
+    ]
+    manager = get_mcp_manager()
+    if include_mcp and manager is not None:
+        # Relies on: get_all_openai_schemas names each tool
+        # mcp__<server_id>__<tool> and skips disabled_map's tools and the
+        # internal Python servers.
+        catalog += [
+            schema for schema in manager.get_all_openai_schemas(_load_mcp_disabled_map())
+            if mcp_server(schema_name(schema)) not in _CATALOG_EXCLUDED_MCP_SERVERS
+            and schema_name(schema) not in denied
+        ]
+    return catalog
+
+
+def catalog_section(catalog: Sequence[Dict[str, Any]]) -> str:
+    if not catalog:
+        return ""
+    built_in = [schema_name(s) for s in catalog if not mcp_server(schema_name(s))]
+    by_server: Dict[str, List[str]] = {}
+    for schema in catalog:
+        server = mcp_server(schema_name(schema))
+        if server:
+            by_server.setdefault(server, []).append(schema_name(schema))
+    lines = [f"Deferred tools exist but are not loaded; load them with {TOOL_SEARCH} before calling them."]
+    if built_in:
+        lines.append(f"Built-in: {', '.join(built_in)}")
+    lines += [f"MCP server {server}: {', '.join(names)}" for server, names in by_server.items()]
+    return "\n".join(lines)
+
+
+def _words(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def search(catalog: Sequence[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Exact names after ``select:``, else catalog entries ranked by how many
+    query words their name and description share (catalog order breaks ties)."""
+    query = query.strip()
+    if query.lower().startswith(_SELECT_PREFIX):
+        by_name = {schema_name(schema): schema for schema in catalog}
+        wanted = dict.fromkeys(name.strip() for name in query[len(_SELECT_PREFIX):].split(","))
+        return [by_name[name] for name in wanted if name in by_name][:TOOL_SEARCH_MAX_SCHEMAS]
+    terms = _words(query)
+    scored = []
+    for index, schema in enumerate(catalog):
+        function = schema.get("function") or {}
+        score = len(terms & _words(f"{function.get('name', '')} {function.get('description', '')}"))
+        if score:
+            scored.append((-score, index))
+    return [catalog[index] for _, index in sorted(scored)[:TOOL_SEARCH_MAX_SCHEMAS]]
+
+
+def loaded_names(conversation: Iterable[Dict[str, Any]]) -> List[str]:
+    """Tools that tool_search or load_skill loaded in the replayed turns, in load order.
+    Compaction drops those rounds, so their tools unload with them."""
+    names: Dict[str, None] = {}
+    for message in conversation:
+        if message.get("role") == "tool":
+            names.update(dict.fromkeys(message.get("loaded") or ()))
+    return list(names)
+
+
+def offered_schemas(
+    upfront: List[Dict[str, Any]], catalog: Sequence[Dict[str, Any]], loaded: Iterable[str], surface: str,
+    *, skills: bool = False,
+) -> List[Dict[str, Any]]:
+    """The round's tool list: upfront, tool_search, load_skill (when skills are
+    on), then loaded tools in load order, so within a chat the list only grows
+    and the prompt cache holds."""
+    if not upfront:
+        return []
+    by_name = {schema_name(schema): schema for schema in catalog}
+    own = [TOOL_SEARCH_SCHEMA] if catalog else []
+    own += [LOAD_SKILL_SCHEMA] if skills else []
+    # The model searched for these to learn how to call them, so they keep
+    # their full descriptions on the compact surface too (spec #44).
+    searched = [by_name[name] for name in dict.fromkeys(loaded) if name in by_name]
+    return upfront + _apply_tool_surface_to_schemas(own, surface) + searched
+
+
+def skills_enabled(owner: str, sess: Any, incognito: bool) -> bool:
+    """The Skill injection toggles as legacy reads them (Settings, then the
+    chat's own); Nobody mode has no skills (#44, Skills)."""
+    return (
+        not incognito
+        and bool(_load_for_user(owner).get("skills_enabled", True))
+        and getattr(sess, "skill_injection_enabled", True) is not False
+    )
+
+
+def _usable_skill(skills: Any, owner: str, name: str) -> Optional[Dict[str, Any]]:
+    # Relies on: load(owner) returns only this owner's skills plus ownerless
+    # built-ins, the same visibility read_skill_md applies.
+    skill = next((s for s in skills.load(owner=owner) if s.get("name") == name), None)
+    return skill if skill is not None and is_usable(skill) else None
+
+
+def _required_tools(skill: Dict[str, Any], catalog: Sequence[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The skill's requires_toolsets that are deferred and offered this turn;
+    upfront ones are already there and denied ones stay out."""
+    deferred = {schema_name(schema) for schema in catalog}
+    return tuple(dict.fromkeys(t for t in skill.get("requires_toolsets") or () if t in deferred))
+
+
+def invoked_skill_tools(skills: Any, owner: str, name: str, catalog: Sequence[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The deferred tools a /name invocation loads for its turn; user-only
+    skills count, since the user started them."""
+    if skills is None or not name:
+        return ()
+    skill = _usable_skill(skills, owner, name)
+    return _required_tools(skill, catalog) if skill is not None else ()
+
+
+def run_load_skill(call: Dict[str, Any], skills: Any, owner: str, catalog: Sequence[Dict[str, Any]]) -> "ToolOutcome":
+    """Answer one load_skill call; the loop adds the skill's tools next round."""
+    try:
+        arguments = json.loads(call["arguments"] or "{}")
+    except (TypeError, ValueError):
+        arguments = None
+    name = arguments.get("name") if isinstance(arguments, dict) else None
+    path = arguments.get("path") if isinstance(arguments, dict) else None
+    if not isinstance(name, str) or not name.strip() or (path is not None and not isinstance(path, str)):
+        return ToolOutcome(call["call_id"], LOAD_SKILL, str(call["arguments"]), STATUS_FAILED,
+                           EXIT_FAILED, f"{LOAD_SKILL}: pass a 'name' string and optionally a 'path' string.")
+    name, path = name.strip(), (path or "").strip()
+    command = f"{name} {path}".strip()
+    skill = _usable_skill(skills, owner, name)
+    if skill is None:
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                           f"Skill '{name}' is not available. Use a name from the skill index.")
+    if skill.get("disable_model_invocation"):
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DENIED, EXIT_DENIED,
+                           USER_ONLY_REASON.format(name=name))
+    if path:
+        # Relies on: read_skill_reference confines path to the skill's folder
+        # and returns None for traversal, the folder itself or a missing file.
+        text = skills.read_skill_reference(name, path, owner=owner)
+        if text is None:
+            return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                               f"Reference '{path}' not found under '{name}'.")
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DONE, EXIT_DONE, text)
+    text = skills.read_skill_md(name, owner=owner)
+    if text is None:
+        return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_FAILED, EXIT_FAILED,
+                           f"Skill '{name}' is not available. Use a name from the skill index.")
+    skills.record_use(name, owner=owner)
+    loaded = _required_tools(skill, catalog)
+    if loaded:
+        text += f"\n\n[Loaded {', '.join(loaded)}; callable from your next step.]"
+    return ToolOutcome(call["call_id"], LOAD_SKILL, command, STATUS_DONE, EXIT_DONE, text, loaded=loaded)
+
+
+def run_search(call: Dict[str, Any], catalog: Sequence[Dict[str, Any]]) -> "ToolOutcome":
+    """Answer one tool_search call; the loop adds the loaded tools next round."""
+    try:
+        arguments = json.loads(call["arguments"] or "{}")
+    except (TypeError, ValueError):
+        arguments = None
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("query"), str):
+        return ToolOutcome(call["call_id"], TOOL_SEARCH, str(call["arguments"]), STATUS_FAILED,
+                           EXIT_FAILED, f"{TOOL_SEARCH}: pass a 'query' string.")
+    query = arguments["query"]
+    found = [schema_name(schema) for schema in search(catalog, query)]
+    if found:
+        text = f"Loaded {', '.join(found)}; callable from your next step."
+    else:
+        text = f"No deferred tool matched '{query}'. Use names from the deferred tools list."
+    return ToolOutcome(call["call_id"], TOOL_SEARCH, query, STATUS_DONE, EXIT_DONE, text,
+                       loaded=tuple(found))
+
+
+@dataclass(frozen=True)
+class ExecutionScope:
+    """What a tool call is bound to: the real user, chat and workspace."""
+
+    owner: str
+    session_id: str
+    workspace: Optional[str]
+    client_runtime_context: Optional[Dict[str, Any]]
+    denied_names: frozenset
+    # The open editor document: document tools without an explicit id edit
+    # this one, never the owner's most recent document in another chat.
+    active_document_id: Optional[str] = None
+    # This call is a manage_tasks create/edit the user approved on its own
+    # card (Allow once), so the task may carry its prompt's grants.
+    approved_task: bool = False
+
+
+@dataclass
+class ToolOutcome:
+    """One call's result: the model-facing envelope plus the tool-card fields."""
+
+    call_id: str
+    tool: str
+    command: str
+    status: str
+    exit_code: int
+    model_text: str
+    desc: str = ""
+    result: Dict[str, Any] = field(default_factory=dict)
+    # Tools a tool_search or load_skill call loaded; replayed turns carry them (loaded_names).
+    loaded: Tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.status == STATUS_DONE
+
+    def envelope(self) -> Dict[str, Any]:
+        """The shared tool-result shape (src/chat_agent/providers/__init__.py)."""
+        envelope = {"call_id": self.call_id, "ok": self.ok, "content": self.model_text,
+                    "error": None if self.ok else self.status}
+        if self.loaded:
+            envelope["loaded"] = list(self.loaded)
+        return envelope
+
+    def tool_event(self, round_number: int, model: str) -> Dict[str, Any]:
+        """The legacy ``tool_events`` projection, plus ``status`` and ``call_id``."""
+        event = {
+            "round": round_number, "model": model, "tool": self.tool, "desc": self.desc,
+            "command": self.command, "output": self.model_text, "exit_code": self.exit_code,
+            "status": self.status, "call_id": self.call_id,
+        }
+        if not self.ok:
+            event["error"] = True
+        return event
+
+
+# Some OpenAI-compatible servers reject a request with more than three images
+# (legacy _append_tool_results, ODYSSEUS_MAX_VISUAL_EVIDENCE_FRAMES default).
+VISUAL_EVIDENCE_MAX_FRAMES = 3
+
+
+def visual_evidence(results: Sequence[Dict[str, Any]], model: str) -> Optional[Dict[str, Any]]:
+    """The first image-bearing result of a round as one user message for the
+    next round, frames evenly spaced; None when there is nothing to show."""
+    if not _allow_visual_tool_evidence_for_model(model):
+        return None
+    for result in results:
+        images = [
+            image for image in result.get("images") or ()
+            if isinstance(image, dict) and isinstance(image.get("data"), str) and image["data"]
+            and str(image.get("mimeType") or image.get("mime_type") or "").startswith("image/")
+        ]
+        if images:
+            break
+    else:
+        return None
+    if len(images) > VISUAL_EVIDENCE_MAX_FRAMES:
+        last = len(images) - 1
+        images = [images[round(i * last / (VISUAL_EVIDENCE_MAX_FRAMES - 1))]
+                  for i in range(VISUAL_EVIDENCE_MAX_FRAMES)]
+    message = untrusted_context_message("tool visual evidence", "Visual evidence returned by tool execution.")
+    message["content"] = [{"type": "text", "text": message["content"]}, *(
+        {"type": "image_url", "image_url": {
+            "url": f"data:{image.get('mimeType') or image.get('mime_type')};base64,{image['data']}",
+        }}
+        for image in images
+    )]
+    return message
+
+
+def refused_outcome(call: Dict[str, Any], block: Any, reason: str, *, denied: bool) -> ToolOutcome:
+    """A call the gate did not run: denied, or failed for unusable arguments."""
+    tool, command = (block.tool_type, block.content) if block is not None else (call["name"], call["arguments"])
+    if denied:
+        return ToolOutcome(call["call_id"], tool, command, STATUS_DENIED, EXIT_DENIED, reason)
+    return ToolOutcome(call["call_id"], tool, command, STATUS_FAILED, EXIT_FAILED, reason)
+
+
+# manage_tasks actions that seal the task's authority from its prompt.
+_TASK_SEALING_ACTIONS = frozenset({"create", "edit"})
+
+
+def _task_prompt_grants(block: Any, scope: ExecutionScope) -> Tuple[OperationGrant, ...]:
+    """A task create/edit the user approved on a card showing its prompt is
+    sealed as if created from the UI: the per-call authority is the ceiling
+    seal_task_authority intersects with, and it gains the prompt's grants (#40)."""
+    if not scope.approved_task or block.tool_type != "manage_tasks":
+        return ()
+    if _action_from_content(block.tool_type, block.content) not in _TASK_SEALING_ACTIONS:
+        return ()
+    # The same prompt the card showed (permissions.task_card).
+    prompt = str((task_args(block.content) or {}).get("prompt") or "")
+    if not prompt.strip():
+        return ()
+    return create_request_authority(prompt, owner=scope.owner).grants
+
+
+async def execute(
+    call_id: str, block: Any, scope: ExecutionScope,
+    progress_cb: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+) -> ToolOutcome:
+    """Run one admitted call through the legacy executor; long-running tools
+    report ``{elapsed_s, tail}`` payloads through ``progress_cb``."""
+    # Same owner strings as the legacy path: tools get the AuthManager key as
+    # is (stores key rows by it), and only the authority is casefolded, as
+    # create_request_authority does. Casefolding the tool owner would merge
+    # accounts such as "straße" and "strasse".
+    authority = RequestAuthority(
+        uuid4().hex, authority_owner(scope.owner), scope.session_id, scope.workspace or "",
+        (OperationGrant(canonical_tool(block.tool_type)), *_task_prompt_grants(block, scope)),
+    )
+    if scope.client_runtime_context is not None:
+        authority = replace(authority, backend_resources=seal_backends(
+            (g.tool for g in authority.grants), context=scope.client_runtime_context, owner=authority.owner))
+    desc, result = await execute_tool_block(
+        block,
+        session_id=scope.session_id,
+        disabled_tools=set(scope.denied_names),
+        owner=scope.owner,
+        workspace=scope.workspace,
+        tool_policy=None,
+        progress_cb=progress_cb,
+        security_context=NO_TOOL_SECURITY_CONTEXT,
+        exact_approval=None,
+        client_runtime_context=scope.client_runtime_context,
+        request_authority=authority,
+        active_document_id=scope.active_document_id,
+    )
+    if tool_result_is_successful(result):
+        status, exit_code = STATUS_DONE, EXIT_DONE
+    elif tool_result_was_denied(result):
+        status, exit_code = STATUS_DENIED, EXIT_DENIED
+    else:
+        code = result.get("exit_code")
+        status = STATUS_FAILED
+        exit_code = code if isinstance(code, int) and code != EXIT_DONE else EXIT_FAILED
+    return ToolOutcome(
+        call_id, block.tool_type, block.content, status, exit_code,
+        format_tool_result(desc, result), desc=desc, result=result,
+    )

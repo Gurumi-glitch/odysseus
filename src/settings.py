@@ -171,6 +171,10 @@ DEFAULT_SETTINGS = {
     # Max relevant skills injected into the prompt for one request. The skills
     # library can grow beyond this; cleanup/retirement is an explicit review flow.
     "skill_max_injected": 3,
+    # Auto mode's classifier model (#68); empty means the chat's own model.
+    # A model the user may not use falls back to the chat's model.
+    "classifier_endpoint_id": "",
+    "classifier_model": "",
     # Reminders
     "reminder_channel": "browser",   # "browser" | "email" | "ntfy" | "webhook"
     "reminder_llm_synthesis": False,

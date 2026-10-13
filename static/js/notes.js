@@ -4686,6 +4686,8 @@ async function _agentSolveNote(id) {
     fd.append('session', sid);
     fd.append('mode', 'agent');
     fd.append('disabled_tools', JSON.stringify(['manage_notes']));
+    // Nobody watches this run: asks are denied at once instead of waiting (#61).
+    fd.append('interactive', 'false');
     fetch(`${API_BASE}/api/chat_stream`, { method: 'POST', credentials: 'same-origin', body: fd })
       .then(async (res) => {
         if (!res.ok || !res.body) return;

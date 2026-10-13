@@ -667,6 +667,7 @@ async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
     allow_tool_preprocessing: bool = True,
+    prefetch: bool = True,
 ) -> PreprocessedMessage:
     """Run chat_handler.preprocess_message and wrap the result."""
     enhanced, user_content, text_ctx, yt_transcripts, att_meta = (
@@ -676,6 +677,7 @@ async def preprocess(
             sess,
             auto_opened_docs=auto_opened_docs,
             allow_tool_preprocessing=allow_tool_preprocessing,
+            prefetch=prefetch,
         )
     )
     return PreprocessedMessage(
@@ -750,6 +752,7 @@ def add_user_message(
     incognito: bool = False,
     interaction_mode: str | None = None,
     auto_escalated: bool = False,
+    source: str | None = None,
 ):
     """Add user message to session history and update session name.
     Incognito messages must not mutate persistent session history, even in
@@ -763,6 +766,8 @@ def add_user_message(
         user_meta["interaction_mode"] = interaction_mode
     if auto_escalated:
         user_meta["auto_escalated"] = True
+    if source:
+        user_meta["source"] = source
     clean_content = strip_tui_local_context(preprocessed.user_content)
     sess.add_message(ChatMessage("user", clean_content, metadata=user_meta or None))
     chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
@@ -1030,6 +1035,8 @@ async def build_chat_context(
     interaction_mode: str | None = None,
     auto_escalated: bool = False,
     context_resolution=None,
+    prefetch: bool = True,
+    source: str | None = None,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -1038,6 +1045,13 @@ async def build_chat_context(
 
     ``context_resolution`` is the turn's already resolved context window. When
     supplied, history shaping sizes against it instead of probing the endpoint.
+
+    ``prefetch=False`` skips web pre-search, URL auto-fetch and YouTube fetch
+    (attachments, OCR and vision still run); the chat_agent runtime's model
+    calls those tools itself.
+
+    ``source`` is stored as the persisted user row's ``metadata.source``
+    (the chat_agent Continue sends ``"continue"``).
     """
     # Preset
     preset = extract_preset(chat_handler, preset_id)
@@ -1051,6 +1065,7 @@ async def build_chat_context(
         chat_handler, message, att_ids or [], sess,
         auto_opened_docs=auto_opened_docs,
         allow_tool_preprocessing=allow_tool_preprocessing,
+        prefetch=prefetch,
     )
 
     # Add user message to history. Nobody/incognito uses a request-local
@@ -1073,6 +1088,7 @@ async def build_chat_context(
             incognito=False,
             interaction_mode=interaction_mode,
             auto_escalated=auto_escalated,
+            source=source,
         )
 
     # Fire events
@@ -1140,6 +1156,7 @@ async def build_chat_context(
     # web searches before the agent even saw the tool surface.
     skip_web = (
         bool(search_context)
+        or not prefetch
         or not allow_tool_preprocessing
         or casual_low_signal
         or bool(agent_mode and _PERSONAL_TOOL_CONTEXT_RE.search(context_message or ""))
@@ -1170,6 +1187,7 @@ async def build_chat_context(
         agent_mode=agent_mode,
         incognito=incognito,
         use_skills=skills_enabled,
+        fetch_urls=prefetch,
     )
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val

@@ -8133,34 +8133,31 @@ If a calendar create/update request lacks a required date, time, or target event
     "list_cached_models": "- ```list_cached_models``` — List models already on disk. Args (JSON, all optional): {\"host\": \"server-name or user@gpu-box\"?, \"model_dir\": \"/data/models,/extra\"?}. Friendly Cookbook server names work. Use for 'what models do I have' / 'show cached models' / 'is X downloaded'.",
     "app_api": """\
 ```app_api
-{"action": "call", "method": "GET", "path": "/api/cookbook/gpus"}
+{"action": "call", "method": "GET", "path": "/api/gallery/albums"}
 ```
-GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the user wants something the UI can do but there's NO named tool for it. Many UI buttons hit /api/* endpoints — you can hit allowed ones. Auth is handled automatically.
+GENERIC LOOPBACK to Odysseus's own API, for what the UI can do but no named tool covers. Auth is handled automatically.
 
-**Discovery first.** If you're not sure of the path, call `{"action":"endpoints","filter":"<keyword>"}` (e.g. filter='calendar' or 'gallery' or 'theme') to list available endpoints with their methods + summaries. Then call with action='call'.
+**Discovery first.** If you're not sure of the path, call `{"action":"endpoints","filter":"<keyword>"}` (e.g. filter='gallery' or 'theme') to list endpoints with their methods + summaries. Then call with action='call'.
 
-**Common surfaces (use `endpoints` with filter to discover the full set per domain):**
-- Calendar: `/api/calendar/events`, `/api/calendar/calendars`, `/api/calendar/events/{uid}`
-- Cookbook: `/api/cookbook/gpus`, `/api/cookbook/state`, `/api/cookbook/setup`, `/api/cookbook/packages`, `/api/cookbook/hf-latest`, `/api/model/cached`. Do NOT use `app_api` for package installs, engine rebuilds, or PID signalling.
-- Gallery: `/api/gallery/list`, `/api/gallery/delete`, `/api/gallery/{id}`, `/api/gallery/albums`
-- Library / Documents: list all via `/api/documents/library`; docs in a session via `/api/documents/{session_id}`; a single doc via `/api/document/{id}` (singular) and its history via `/api/document/{id}/versions` (singular). Note the plural `/api/documents/...` vs singular `/api/document/{id}` split.
-- Memory: `/api/memory`, `/api/memory/{id}`, `/api/memory/search`
-- Notes: `/api/notes`, `/api/notes/{id}`
-- Tasks: `/api/tasks`, `/api/tasks/{id}/run`, `/api/tasks/notifications`
-- Sessions: `/api/sessions`, `/api/session/{id}`, `/api/session/{id}/truncate`
-- Themes: `/api/prefs/themes`, `/api/prefs/custom-themes`
-- Settings: `/api/settings`, `/api/prefs/{key}`
-- Research: `/api/research/start`, `/api/research/tasks` (note: `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint)
-- Compare: `/api/compare/sessions`, `/api/compare/start`
-- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
-- Endpoints (model providers): `/api/endpoints`, `/api/endpoints/{id}`
-- Shell: do NOT use `app_api` for `/api/shell/*`; use named command tooling instead.
+**What it may do (an allowlist; everything else is refused):**
+- Reads: GET is allowed, except routes that return secrets or credentials: `/api/auth`, `/api/tokens`, `/api/export`, `/api/email/accounts`, `/api/search`, `/api/tasks`, `/api/mcp`, `/api/email/oauth`, `/api/webhooks`, `/api/prefs`.
+- Writes: only gallery organisation, which has no named tool: POST `/api/gallery/albums`, PUT `/api/gallery/albums/{album_id}`, POST `/api/gallery/albums/{album_id}/add`, POST `/api/gallery/albums/{album_id}/remove`, POST `/api/gallery/{image_id}/favorite`, POST `/api/gallery/{image_id}/rename`, PATCH `/api/gallery/{image_id}`.
+- Every other POST/PUT/PATCH/DELETE is refused: use the named tool for that domain (manage_notes, manage_calendar, manage_tasks, manage_skills, trigger_research, serve_model / serve_preset, download_model, the email tools, ...).
 
-Body for POST/PUT/PATCH goes in `body` (object). Query params in `query` (object). Returns the parsed JSON of the response.
+**Useful reads:**
+- Calendar: `/api/calendar/events`, `/api/calendar/calendars`
+- Cookbook: `/api/cookbook/gpus`, `/api/cookbook/state`, `/api/model/cached`
+- Gallery: `/api/gallery/library`, `/api/gallery/tags`, `/api/gallery/albums`, `/api/gallery/{image_id}`
+- Library / Documents: all via `/api/documents/library`; one doc via `/api/document/{id}` (singular) and its history via `/api/document/{id}/versions`.
+- Memory: `/api/memory`
+- Sessions: `/api/sessions`
+- Model endpoints: `/api/model-endpoints`
+- Research: `/api/research/library` (`/api/research/report/{id}` renders HTML; read a report with `manage_research` `action:read`).
+- Email: use the named email tools; `/api/email/accounts` is refused.
 
-**When to prefer named tools over app_api:** if a named wrapper exists (list_email_accounts, list_emails, read_email, scan_email_unsubscribes, manage_calendar, manage_notes, list_served_models, etc.) USE IT — it has nicer output formatting and clearer schema. Reach for `app_api` only when there's no wrapper for what you need.
+Body for the allowed writes goes in `body` (object). Query params in `query` (object). Returns the parsed JSON of the response.
 
-Blocked paths/routes (refused for safety): /api/auth/, /api/users/, /api/tokens/, /api/admin/, /api/shell/, /api/backup/restore, /api/email/accounts, POST /api/cookbook/packages/install, POST /api/cookbook/rebuild-engine, POST /api/cookbook/kill-pid.""",
+**Prefer named tools:** if a named wrapper exists (list_email_accounts, list_emails, read_email, manage_calendar, manage_notes, list_served_models, etc.) USE IT — it has nicer output and a clearer schema.""",
 }
 
 def get_builtin_overrides() -> dict:

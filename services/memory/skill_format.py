@@ -80,8 +80,11 @@ def slugify(text: str, fallback: str = "skill") -> str:
 # and block lists with `-`. That covers everything in our schema and avoids
 # a new dependency.
 
-_FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_]*):\s*(.*)$", re.IGNORECASE)
-_FM_BLOCK_LIST_RE = re.compile(r"^\s*-\s*(.*)$")
+# Hyphens are allowed for Claude-style keys such as `disable-model-invocation`.
+# No `\s*` before the value group: it overlapped `(.*)` (polynomial backtracking);
+# callers strip the value themselves.
+_FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_-]*):(.*)$", re.IGNORECASE)
+_FM_BLOCK_LIST_RE = re.compile(r"^\s*-(.*)$")
 
 
 def _parse_scalar(raw: str) -> Any:
@@ -371,6 +374,8 @@ class Skill:
     teacher_model: Optional[str] = None
     owner: Optional[str] = None
     created: str = ""                                  # ISO8601
+    # User-only: started with /name, never offered to the model (#44).
+    disable_model_invocation: bool = False
     when_to_use: str = ""
     procedure: List[str] = field(default_factory=list)
     pitfalls: List[str] = field(default_factory=list)
@@ -402,6 +407,7 @@ class Skill:
         fm["source"] = self.source
         if self.teacher_model: fm["teacher_model"] = self.teacher_model
         if self.owner:         fm["owner"] = self.owner
+        if self.disable_model_invocation: fm["disable-model-invocation"] = True
         fm["created"] = self.created or _now_iso()
         return fm
 
@@ -422,6 +428,7 @@ class Skill:
             "teacher_model": self.teacher_model,
             "owner": self.owner,
             "created": self.created,
+            "disable_model_invocation": self.disable_model_invocation,
             "when_to_use": self.when_to_use,
             "procedure": list(self.procedure),
             "pitfalls": list(self.pitfalls),
@@ -459,6 +466,7 @@ class Skill:
             teacher_model=str(fm.get("teacher_model")) if fm.get("teacher_model") else None,
             owner=str(fm.get("owner")) if fm.get("owner") else None,
             created=str(fm.get("created") or _now_iso()),
+            disable_model_invocation=fm.get("disable-model-invocation") is True,
             when_to_use=sections["when_to_use"],
             procedure=list(sections["procedure"]),
             pitfalls=list(sections["pitfalls"]),

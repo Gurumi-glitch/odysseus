@@ -288,6 +288,7 @@ def test_stop_before_response_headers_waits_for_exact_run_identity():
       {{
         const streamSessionId = 'normal-session';
         const streamGeneration = 1;
+        let streamRuntime = '';
         _streamGenerations.set(streamSessionId, streamGeneration);
         const res = {{ headers: {{ get(name) {{
           return name === 'X-Odysseus-Run-Id' ? 'normal-run' : null;
@@ -300,6 +301,7 @@ def test_stop_before_response_headers_waits_for_exact_run_identity():
       {{
         const streamSessionId = 'session-1';
         const streamGeneration = 1;
+        let streamRuntime = '';
         _streamGenerations.set(streamSessionId, streamGeneration);
         _stopExactRun(streamSessionId);
         beforeHeaders = calls.length;
@@ -425,6 +427,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
       {{
         const streamSessionId = 'session-1';
         const streamGeneration = oldGeneration;
+        let streamRuntime = '';
         const res = {{ headers: {{ get(name) {{
           return name === 'X-Odysseus-Run-Id' ? 'old-run' : null;
         }} }} }};

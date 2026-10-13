@@ -401,6 +401,143 @@ def test_url_outside_inline_code_is_still_autolinked(node_available):
     assert 'href="https://example.com/page"' in html
 
 
+def test_url_after_fullwidth_cjk_punctuation_is_autolinked(node_available):
+    # CJK answers put a full-width colon/paren directly before the URL with no
+    # space, so the old `(^|[\s(<])` prefix left it as plain text.
+    html = _run_markdown_case("來源：https://a.com/x")
+    assert 'href="https://a.com/x"' in html
+
+    html = _run_markdown_case("路透通稿（Reuters）：https://www.internazionale.it/a")
+    assert 'href="https://www.internazionale.it/a"' in html
+
+    html = _run_markdown_case("見（https://a.com/x）")
+    assert 'href="https://a.com/x"' in html
+
+
+def test_url_stops_at_fullwidth_punctuation_but_keeps_cjk_letters(node_available):
+    # CJK text has no spaces, so the URL body must stop at full-width
+    # punctuation instead of swallowing the following sentence.
+    html = _run_markdown_case("來源：https://a.com。下一句")
+    assert 'href="https://a.com/"' in html
+    assert ">https://a.com</a>。下一句" in html
+
+    html = _run_markdown_case("（https://a.com）後文")
+    assert 'href="https://a.com/"' in html
+    assert ">https://a.com</a>）後文" in html
+
+    # CJK letters are valid in URL paths (zh.wikipedia) and must stay linked.
+    html = _run_markdown_case("見 https://zh.wikipedia.org/wiki/火山 。")
+    assert 'href="https://zh.wikipedia.org/wiki/%E7%81%AB%E5%B1%B1"' in html
+
+
+def test_fullwidth_punct_before_url_inside_inline_code_is_not_autolinked(node_available):
+    html = _run_markdown_case("`x https://a.com` and `來源：https://a.com/y`")
+    assert "<a " not in html
+    assert "<code>x https://a.com</code>" in html
+
+
+def test_url_directly_after_cjk_letter_is_autolinked(node_available):
+    # CJK text has no spaces, so the URL often follows a letter directly.
+    html = _run_markdown_case("網址https://a.com/x 結尾")
+    assert html.count("<a ") == 1
+    assert 'href="https://a.com/x"' in html
+
+    html = _run_markdown_case("請看https://a.com，謝謝")
+    assert html.count("<a ") == 1
+    assert 'href="https://a.com"' in html or 'href="https://a.com/"' in html
+    assert ">https://a.com</a>，謝謝" in html
+
+
+def test_url_after_hiragana_is_autolinked(node_available):
+    # Body keeps CJK letters (zh.wikipedia paths), so the trailing hiragana
+    # is swallowed into the URL; recorded here as the current behaviour.
+    html = _run_markdown_case("URLはhttps://a.com/です")
+    assert html.count("<a ") == 1
+    assert 'href="https://a.com/%E3%81%A7%E3%81%99"' in html
+    assert ">https://a.com/です</a>" in html
+
+
+def test_markdown_link_is_not_double_wrapped_by_autolink(node_available):
+    for src in ("[例子](https://a.com)", "看[例子](https://a.com)"):
+        html = _run_markdown_case(src)
+        assert html.count("<a ") == 1, html
+        assert html.count("</a>") == 1, html
+
+
+def test_url_after_ascii_letter_is_not_autolinked(node_available):
+    html = _run_markdown_case("xhttps://a.com")
+    assert "<a " not in html
+
+
+def test_english_source_url_still_autolinked(node_available):
+    html = _run_markdown_case("Source: https://a.com")
+    assert 'href="https://a.com/"' in html
+
+
+_IMG_PREFIX = '<img src="https://nonexistent.invalid/x.png" '
+_IMG_SUFFIX = ' loading="lazy" decoding="async">'
+
+
+def test_autolink_does_not_run_inside_image_alt(node_available):
+    # The image pass emits <img alt="..."> into the working string, then the
+    # bare-URL / domain autolinks used to rewrite the URL inside that attribute,
+    # breaking out of alt= and injecting attacker-chosen attributes (onerror=,
+    # style=). The alt text must survive as plain escaped text.
+    for alt in (
+        "x https://x.com/x/onerror=alert(1)//",
+        "看https://x.com/x/onerror=alert(1)//",
+        "see techcrunch.com/ai",
+    ):
+        html = _run_markdown_case(f"![{alt}](https://nonexistent.invalid/x.png)")
+        assert html.count("<img ") == 1, html
+        assert "<a " not in html, html
+        assert f'{_IMG_PREFIX}alt="{alt}"{_IMG_SUFFIX}' in html, html
+
+
+def test_autolink_does_not_run_inside_image_title(node_available):
+    for title in ("x https://x.com/x/onerror=alert(1)//", "看https://x.com/x/onerror=alert(1)//"):
+        html = _run_markdown_case(f'![x](https://nonexistent.invalid/x.png "{title}")')
+        assert "<a " not in html, html
+        assert f'{_IMG_PREFIX}alt="x" title="{title}"{_IMG_SUFFIX}' in html, html
+
+
+def test_autolink_does_not_nest_an_anchor_inside_a_markdown_link(node_available):
+    for src in ("[看https://evil.com](https://a.com)", "[see https://evil.com](https://a.com)"):
+        html = _run_markdown_case(src)
+        assert html.count("<a ") == 1, html
+        assert html.count("</a>") == 1, html
+        assert 'href="https://a.com/"' in html, html
+        assert 'href="https://evil.com' not in html, html
+
+
+def test_domain_autolink_still_runs_in_text_next_to_a_markdown_link(node_available):
+    html = _run_markdown_case("[x](https://a.com) and www.example.com")
+    assert html.count("<a ") == 2, html
+    assert 'rel="noopener noreferrer">x</a> and <a href="https://www.example.com/"' in html, html
+
+
+def test_markdown_link_inside_details_block_is_restored(node_available):
+    # Links are stashed as placeholders before the <details> block that
+    # contains them, so stashing the outer block must expand the inner
+    # placeholder (the sanitizer has to see the final markup).
+    html = _run_markdown_case("<details><summary>More</summary>[x](https://a.com)</details>")
+    assert "___ALLOWED_HTML_" not in html, html
+    assert '<details><summary>More</summary><a href="https://a.com/"' in html, html
+
+
+def test_literal_placeholder_text_renders_as_itself(node_available):
+    # Placeholders carry a per-render nonce, so text that spells the fixed
+    # part of one is ordinary text: the link's own placeholder must not be
+    # consumed by the literal, and the literal must not be swapped for the link.
+    html = _run_markdown_case("___ALLOWED_HTML_0___ [x](https://a.com)")
+    assert "___ALLOWED_HTML_0___" in html, html
+    assert html.count("<a ") == 1, html
+    assert html.index("___ALLOWED_HTML_0___") < html.index("<a "), html
+
+    html = _run_markdown_case("___ALLOWED_HTML_0___")
+    assert html == "<p>___ALLOWED_HTML_0___</p>", html
+
+
 def test_inline_code_content_is_html_escaped(node_available):
     # Inline code is now extracted before the global escape pass, so it must be
     # escaped at extraction time (matching the fenced-code-block handling).
