@@ -17,7 +17,7 @@ import routes.chat_routes as chat_routes
 import src.constants as constants
 import src.foreground_model_routing as foreground_model_routing
 import src.settings as settings
-from src.chat_agent import store, transcript
+from src.chat_agent import loop, store, transcript
 from src.chat_agent.providers import chat_completions, xai_responses
 from src.tool_capabilities import capabilities_for_action
 
@@ -123,6 +123,9 @@ class _Harness:
         # A window no scripted history comes near: the turn never compacts
         # unless a test says so (and never probes a real endpoint for it).
         monkeypatch.setattr(transcript, "get_context_length", lambda url, model: 128_000)
+        # Unmeasured, so the prompt budget (#94) leaves the request as built;
+        # budget tests patch a measured window.
+        monkeypatch.setattr(loop, "get_context_length_known", lambda url, model: (128_000, False))
         session_manager = SimpleNamespace(
             get_session=lambda session_id: self.session,
             save_sessions=lambda: None,

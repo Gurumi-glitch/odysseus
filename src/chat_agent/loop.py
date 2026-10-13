@@ -35,7 +35,7 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, capabilities, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools,
+    asks, budget, capabilities, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools,
     transcript, turn_context,
 )
 from src.chat_agent.providers import (
@@ -393,9 +393,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             global_disabled_tools=settings.get_setting("disabled_tools", []),
             rules=rules,
         )
-        surface = _configured_model_tool_surface(
+        window, measured = get_context_length_known(endpoint.url, endpoint.model)
+        surface = budget.tool_surface(_configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
-        )
+        ), tools.upfront_schemas(layers.denied_names, ""), window, measured)
+        logger.info("chat_agent: %s tool surface %s (window %s, measured %s)",
+                    endpoint.model, surface or "full", window, measured)
         upfront = tools.upfront_schemas(layers.denied_names, surface)
         # Non-admins never see MCP tools (spec #44, managed deny layer).
         catalog = tools.deferred_catalog(
@@ -461,6 +464,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             end = None
             streamed.clear()
             thought.clear()
+            # The prompt gate (spec #89): Auto refuses only the first request.
+            if not record.rounds:
+                refused = budget.overflow(conversation, round_tools, window, measured)
+                if refused is not None:
+                    failure, saved = ProviderError(None, refused), True
+                    break
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
             degenerate_guard = degenerate.RoundGuard(endpoint.model)
             # Leaving the block closes the provider stream, so a tripped

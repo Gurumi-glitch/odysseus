@@ -144,14 +144,17 @@ async def test_set_max_tokens_is_not_clamped_on_an_unmeasured_window(harness, mo
 
 
 @pytest.mark.asyncio
-async def test_unset_max_tokens_never_measures_the_window(harness, monkeypatch):
+async def test_unset_max_tokens_stays_unset_on_a_measured_window(harness, monkeypatch):
+    # The window is measured every turn since #94 (prompt budget); an unset
+    # max_tokens still sends nothing.
     _switch_on()
-    calls = _window(monkeypatch, 4096, True)
+    _window(monkeypatch, 16_384, True)
     harness.provider_rounds = [_stream([{"content": "Done."}])]
 
     await harness.send(_Request("agent"))
 
-    assert calls == []
+    [payload] = harness.captured["provider_requests"]
+    assert "max_tokens" not in payload and "max_completion_tokens" not in payload
 
 
 # --- finish_reason=length --------------------------------------------------------
