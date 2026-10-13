@@ -10,7 +10,7 @@ CSS = app_css()
 
 def test_queued_prompts_are_persisted_per_session_and_restored_on_return():
     assert "odysseus-queued-agent-requests-v1" in CHAT
-    assert "function _persistQueuedRequests()" in CHAT
+    assert "function _persistQueuedRequests(removedSid = '')" in CHAT
     assert "function _restoreQueuedRequestsForCurrentSession()" in CHAT
     assert "_restoreQueuedRequestsForCurrentSession();" in CHAT
     assert "_drainQueuedAgentRequests();" in CHAT

@@ -1457,11 +1457,13 @@ import { invalidateSettings } from './appConfig.js';
     } catch (_) { return {}; }
   }
 
-  function _persistQueuedRequests() {
+  function _persistQueuedRequests(removedSid = '') {
     const all = _readPersistedQueuedRequests();
     const touched = new Set(_queuedAgentRequests.map(item => String(item.sessionId || '')).filter(Boolean));
     const currentSid = _queuedSessionId();
     if (currentSid) touched.add(currentSid);
+    // The chat whose last queued item just left has no row to rewrite it from.
+    if (removedSid) touched.add(removedSid);
     for (const sid of touched) {
       const rows = _queuedAgentRequests
         .filter(item => item.sessionId === sid)
@@ -1640,7 +1642,7 @@ import { invalidateSettings } from './appConfig.js';
     if (idx < 0) return null;
     const [item] = _queuedAgentRequests.splice(idx, 1);
     if (item && item.el && item.el.parentNode) item.el.remove();
-    _persistQueuedRequests();
+    _persistQueuedRequests(item ? String(item.sessionId || '') : '');
     return item;
   }
 
@@ -1759,13 +1761,21 @@ import { invalidateSettings } from './appConfig.js';
       return;
     }
     try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
+    // An empty composer keeps the submit handler on its stop branch: a draft
+    // would answer a waiting ask instead (and the queued message replaces it).
     const input = uiModule.el('message');
-    const submitBtn = document.querySelector('.send-btn');
     if (input) {
       input.value = '';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    if (submitBtn) submitBtn.click();
+    // Stop through the submit handler itself: the send button dispatches on
+    // its visual mode, and an idle-looking button with an empty composer is
+    // the New Chat button, which wiped the chat instead of stopping. A send
+    // still in flight has nothing to stop; _sendQueuedWhenIdle waits it out.
+    if (isStreaming) {
+      window.__odysseusQueueStreamingSubmit = 0;
+      handleChatSubmit({ preventDefault() {} }).catch(err => console.error('queued promote stop failed', err));
+    }
     _sendQueuedWhenIdle(item);
   }
 
@@ -6351,6 +6361,14 @@ import { invalidateSettings } from './appConfig.js';
     if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
+      // A resumed reader (resumeStream) raised isStreaming without a registry
+      // entry, so no stream finally re-derives the flag when the chat is left;
+      // every send in the next chat then queued behind it.
+      _syncForegroundStreamGlobals();
+      if (!isStreaming) {
+        const submitBtn = document.querySelector('.send-btn');
+        if (submitBtn) updateSubmitButton('idle', submitBtn);
+      }
       return;
     }
     // The backend owns the detached run. Stop this tab's subscriber and its
@@ -6389,6 +6407,43 @@ import { invalidateSettings } from './appConfig.js';
     // Reset submit button so the new chat is ready to send
     const submitBtn = document.querySelector('.send-btn');
     if (submitBtn) updateSubmitButton('idle', submitBtn);
+  }
+
+  /**
+   * Hard stop for a deleted chat on this tab: abort its readers, drop its
+   * queued messages and per-chat stream state, then re-derive the foreground
+   * flags. The DELETE itself cancels the server run (agent_runs.stop_and_wait),
+   * so no Stop is posted here.
+   */
+  export function forgetSessionStreams(sessionId) {
+    if (!sessionId) return;
+    for (const entry of [_activeStreams.get(sessionId), _backgroundStreams.get(sessionId), _sendStates.get(sessionId)]) {
+      const abortCtrl = entry && entry.abortCtrl;
+      if (abortCtrl && !abortCtrl.signal.aborted) {
+        abortCtrl._reason = 'user-stop';
+        abortCtrl.abort();
+      }
+    }
+    _activeStreams.delete(sessionId);
+    _backgroundStreams.delete(sessionId);
+    _resumingStreams.delete(sessionId);
+    _terminalSavedStreams.delete(sessionId);
+    _streamRunIds.delete(sessionId);
+    _streamRuntimes.delete(sessionId);
+    _sendStates.delete(sessionId);
+    if (_streamSessionId === sessionId) _streamSessionId = null;
+    _queuedAgentRequests
+      .filter(item => item.sessionId === sessionId)
+      .forEach(item => _removeQueuedRequest(item.id));
+    // Another chat in the foreground keeps its own state; only an emptied or
+    // self-deleted foreground re-derives (a resumed reader never would).
+    const currentSid = sessionModule.getCurrentSessionId();
+    if (currentSid && currentSid !== sessionId) return;
+    _syncForegroundStreamGlobals();
+    if (!isStreaming) {
+      const submitBtn = document.querySelector('.send-btn');
+      if (submitBtn) updateSubmitButton('idle', submitBtn);
+    }
   }
 
   // _notifyStreamComplete and _insertStreamDoneToast now in chatStream.js
@@ -8295,6 +8350,7 @@ import { invalidateSettings } from './appConfig.js';
     handleChatSubmit,
     abortCurrentRequest,
     detachCurrentStream,
+    forgetSessionStreams,
     checkBackgroundStream,
     checkAutoModePaused,
     resumeStream,
