@@ -6,6 +6,7 @@
 // ES6 module — IIFE removed
 
 import Storage from './storage.js';
+import { temperatureToSlider, sliderToTemperature, formatTemperature } from './generationSettings.js';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20261013turnerr1';
@@ -519,17 +520,17 @@ import { invalidateSettings } from './appConfig.js';
     const effort = document.getElementById('reasoning-effort-wrap');
     if (effort) popup.appendChild(effort);
 
-    const addGenerationSlider = (label, value, min, max, step, formatter, key) => {
+    const addGenerationSlider = (label, value, min, max, step, formatter, key, toStored = Number) => {
       const row = document.createElement('div');
       row.className = 'chat-context-threshold-row';
       row.innerHTML = `<div class="chat-context-threshold-top"><span>${label}</span><span>${formatter(value)}</span></div>`;
       const input = document.createElement('input');
       Object.assign(input, { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value), className: 'chat-context-threshold-slider preset-range' });
       input.addEventListener('input', () => { row.querySelector('.chat-context-threshold-top span:last-child').textContent = formatter(Number(input.value)); });
-      input.addEventListener('change', () => _saveChatGenerationSettings({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : Number(input.value) }));
+      input.addEventListener('change', () => _saveChatGenerationSettings({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : toStored(input.value) }));
       row.appendChild(input); popup.appendChild(row);
     };
-    addGenerationSlider('Temperature', d.temperature_override ?? 1, 0, 2, 0.1, v => Number(v).toFixed(1), 'temperature_override');
+    addGenerationSlider('Temperature', temperatureToSlider(d.temperature_override), 0, 2.1, 0.1, formatTemperature, 'temperature_override', sliderToTemperature);
     addGenerationSlider('Max tokens', d.max_tokens_override ?? 8448, 256, 8448, 256, v => Number(v) > 8192 ? 'No limit' : Number(v).toLocaleString(), 'max_tokens_override');
 
 	    const threshold = _clampAutoCompactThreshold(d.auto_compact_threshold || 85);
