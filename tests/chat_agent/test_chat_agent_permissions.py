@@ -43,6 +43,43 @@ def test_every_native_and_email_tool_has_a_written_posture():
     assert sorted(names - set(permissions.POSTURE)) == []
 
 
+# Written out on purpose: the sensitive and protected sets are derived from
+# POSTURE, so this is the independent record of what they were before (#03).
+_SENSITIVE_NAMES = {
+    "send_email", "reply_to_email", "bulk_email", "delete_email", "unsubscribe_email",
+    "block_sender", "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
+    "manage_tokens", "vault_unlock", "vault_get",
+}
+_PROTECTED_NAMES = {
+    "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
+    "vault_unlock", "vault_get", "bulk_email",
+}
+_NON_SENSITIVE_ASK_NAMES = {
+    "write_file", "edit_file", "apply_patch", "download_attachment",
+    "bash", "python", "host_shell", "manage_bg_jobs", "api_call", "app_api",
+    "download_model", "serve_model", "serve_preset", "stop_served_model",
+    "adopt_served_model", "cancel_download",
+}
+
+
+def test_sensitive_and_protected_sets_are_pinned():
+    assert set(permissions._SENSITIVE_TOOLS) == _SENSITIVE_NAMES
+    assert set(permissions._PROTECTED_TOOLS) == _PROTECTED_NAMES
+
+
+def test_protected_tools_are_a_subset_of_sensitive_tools():
+    assert permissions._PROTECTED_TOOLS <= permissions._SENSITIVE_TOOLS
+
+
+def test_posture_stays_allow_or_ask_and_asks_exactly_where_it_did():
+    # posture() hands back the table's value for a tool; the finer table levels
+    # must never leak out of it.
+    asking = _SENSITIVE_NAMES | _NON_SENSITIVE_ASK_NAMES
+    for tool in permissions.POSTURE:
+        expected = ASK if tool in asking else ALLOW
+        assert permissions.posture(tool, "") == expected, tool
+
+
 @pytest.mark.parametrize(("name", "content", "expected"), [
     ("manage_notes", json.dumps({"action": "add", "title": "dinner time with mom"}), ALLOW),
     ("manage_notes", json.dumps({"action": "delete", "id": "n1"}), ASK),

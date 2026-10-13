@@ -77,6 +77,10 @@ logger = logging.getLogger(__name__)
 
 ALLOW = "allow"
 ASK = "ask"
+# Table-only levels, both ask by default: sensitive always asks whatever the
+# allow rules say; protected is sensitive and asks even in auto mode.
+SENSITIVE = "sensitive"
+PROTECTED = "protected"
 DENY = "deny"
 # A call whose arguments the executor cannot take; it fails without a gate.
 INVALID = "invalid"
@@ -104,7 +108,10 @@ _PRIVILEGE_DENIED: Mapping[str, frozenset] = {
 # Default posture of every native tool and built-in email tool (spec #44,
 # Permissions; #25). Tools the decided table did not name got the posture
 # derived from their capability classification (_derived_posture) and are
-# written here so the whole table is reviewable in one place.
+# written here so the whole table is reviewable in one place. The sensitive and
+# protected sets are derived from it, so a tool cannot ask here and be missing
+# there. A SENSITIVE or PROTECTED row never reaches posture()'s lookup:
+# is_sensitive() answers first, from the same rows.
 POSTURE: Mapping[str, str] = {
     # user interaction
     "ask_user": ALLOW, "update_plan": ALLOW,
@@ -146,10 +153,12 @@ POSTURE: Mapping[str, str] = {
     "download_model": ASK, "serve_model": ASK, "serve_preset": ASK,
     "stop_served_model": ASK, "adopt_served_model": ASK, "cancel_download": ASK,
     # sensitive: always ask
-    "send_email": ASK, "reply_to_email": ASK, "bulk_email": ASK, "delete_email": ASK,
-    "unsubscribe_email": ASK, "block_sender": ASK, "manage_settings": ASK,
-    "manage_endpoints": ASK, "manage_mcp": ASK, "manage_webhooks": ASK,
-    "manage_tokens": ASK, "vault_unlock": ASK, "vault_get": ASK,
+    "send_email": SENSITIVE, "reply_to_email": SENSITIVE, "delete_email": SENSITIVE,
+    "unsubscribe_email": SENSITIVE, "block_sender": SENSITIVE,
+    # protected: auto mode never answers
+    "bulk_email": PROTECTED, "manage_settings": PROTECTED, "manage_endpoints": PROTECTED,
+    "manage_mcp": PROTECTED, "manage_webhooks": PROTECTED, "manage_tokens": PROTECTED,
+    "vault_unlock": PROTECTED, "vault_get": PROTECTED,
 }
 
 # Effects of a call that may run without asking (spec #44 default posture:
@@ -582,17 +591,10 @@ def session_rule(name: str, content: Any) -> Rule:
 
 # --- Sensitive and protected sets --------------------------------------------
 
-# Always ask, whatever the allow rules say (spec #44, Sensitive).
-_SENSITIVE_TOOLS = frozenset({
-    "send_email", "reply_to_email", "bulk_email", "delete_email", "unsubscribe_email",
-    "block_sender", "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks",
-    "manage_tokens", "vault_unlock", "vault_get",
-})
-# Ask even in auto mode (spec #44, Protected).
-_PROTECTED_TOOLS = frozenset({
-    "manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
-    "vault_unlock", "vault_get", "bulk_email",
-})
+# Always ask, whatever the allow rules say (spec #44, Sensitive); protected
+# tools are sensitive too, so they ask even in auto mode (spec #44, Protected).
+_SENSITIVE_TOOLS = frozenset(t for t, level in POSTURE.items() if level in (SENSITIVE, PROTECTED))
+_PROTECTED_TOOLS = frozenset(t for t, level in POSTURE.items() if level == PROTECTED)
 _RAW_API_TOOLS = frozenset({"app_api", "api_call"})
 _READ_METHOD = "GET"
 # Task triggers that fire from outside the user's session (#40).
@@ -965,7 +967,11 @@ def posture(name: str, content: Any) -> str:
     tool = policy_name(name)
     if is_sensitive(tool, content):
         return ASK
-    return POSTURE.get(tool) or _derived_posture(capabilities_for_action(canonical_tool(name), content).effects)
+    level = POSTURE.get(tool)
+    # Callers compare against ASK; a table-only level must never read as allow.
+    if level in (SENSITIVE, PROTECTED):
+        return ASK
+    return level or _derived_posture(capabilities_for_action(canonical_tool(name), content).effects)
 
 
 def _derived_posture(effects) -> str:
