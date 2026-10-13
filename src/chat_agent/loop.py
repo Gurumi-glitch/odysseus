@@ -41,6 +41,7 @@ from src.chat_agent.providers import (
     XAI,
     Endpoint,
     ProviderError,
+    ReasoningDelta,
     RoundEnd,
     RoundEvent,
     TextDelta,
@@ -304,6 +305,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         return contexts[-1]
 
     streamed: List[str] = []
+    thought: List[str] = []
     usage = _TurnUsage(time.monotonic(), turn.candidates[0])
 
     def hold_ask(call: Dict[str, Any], tool: str, command: str, card: dict) -> None:
@@ -411,6 +413,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         while True:
             end = None
             streamed.clear()
+            thought.clear()
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
             async for event in _round_with_fallback(
                 turn, endpoint, conversation, round_tools, history_start, current,
@@ -430,10 +433,16 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     usage.mark_output()
                     streamed.append(event.text)
                     yield _event({"delta": event.text})
+                elif isinstance(event, ReasoningDelta):
+                    usage.mark_output()
+                    thought.append(event.text)
+                    # The legacy thinking delta: the frontend's live block needs no change.
+                    yield _event({"delta": event.text, "thinking": True})
                 elif isinstance(event, RoundEnd):
                     usage.mark_output()
                     end = event
             streamed.clear()
+            thought.clear()
             round_record = _round_record(end)
             record.rounds.append(round_record)
             usage.add_round(len(record.rounds), end, conversation)
@@ -629,10 +638,17 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         message_id = writer.finish()
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
-        # Stop: keep the completed blocks and the text streamed so far; partial
-        # reasoning is dropped and unfinished calls get cancelled results.
+        # Stop: keep the completed blocks and the text and thinking streamed so
+        # far (display only: no replay fields); unfinished calls get cancelled results.
+        partial = []
+        if thought:
+            partial.append({
+                "type": "reasoning", "provider": record.provider, "model": record.model, "text": "".join(thought),
+            })
         if streamed:
-            record.rounds.append({"blocks": [{"type": "text", "text": "".join(streamed)}]})
+            partial.append({"type": "text", "text": "".join(streamed)})
+        if partial:
+            record.rounds.append({"blocks": partial})
         unused = steers.close()
         if record.rounds:
             if unused:

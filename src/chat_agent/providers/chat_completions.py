@@ -15,6 +15,7 @@ from src.chat_agent.providers import (
     Endpoint,
     ProviderError,
     RoundEnd,
+    ReasoningDelta,
     RoundEvent,
     TextDelta,
     Usage,
@@ -155,9 +156,9 @@ async def stream_round(
                 _format_upstream_error(response.status_code, body, endpoint.url),
             )
             return
-        text = ""
         details: List[Any] = []
         reasoning_content = ""
+        streamed = _RoundText()
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
         usage = None
@@ -183,18 +184,86 @@ async def stream_round(
                 # concatenating all chunks in order".
                 details.extend(delta.get("reasoning_details") or ())
                 reasoning_content += delta.get("reasoning_content") or ""
+                # vLLM >= 0.20 and OpenRouter send readable reasoning as
+                # "reasoning"; read one field so a server sending both isn't doubled.
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                for event in streamed.thought(reasoning or ""):
+                    yield event
                 if delta.get("content"):
-                    text += delta["content"]
-                    yield TextDelta(delta["content"])
+                    for event in streamed.feed(delta["content"]):
+                        yield event
                 for fragment in delta.get("tool_calls") or ():
                     _merge_tool_call(calls, fragment)
-        blocks = _blocks(endpoint, text, details, reasoning_content)
+        for event in streamed.flush():
+            yield event
+        blocks = _blocks(endpoint, streamed.text, details, reasoning_content, streamed.thinking)
         blocks += [
             {"type": "tool_call", "call_id": call["call_id"] or f"call_{uuid.uuid4().hex}",
              "name": call["name"], "arguments": call["arguments"]}
             for _, call in sorted(calls.items())
         ]
         yield RoundEnd(blocks, usage)
+
+
+# Inline thinking (spec #89): only these tags, only when they open a round's
+# content; <mm:think>, <thought> and a stray </think> stay answer text (#84 cut list).
+_INLINE_TAGS = {"<think>": "</think>", "<thinking>": "</thinking>"}
+
+
+class _RoundText:
+    """A round's answer and readable thinking. Content is split into the two,
+    holding back only what may still be part of a tag split across chunks."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.thinking = ""
+        self._held = ""
+        self._opening = True
+        self._close: Optional[str] = None
+
+    def feed(self, chunk: str) -> List[RoundEvent]:
+        if not self._opening and self._close is None:
+            return self._answer(chunk)
+        self._held += chunk
+        if self._opening:
+            head = self._held.lstrip()
+            tag = next((tag for tag in _INLINE_TAGS if head.startswith(tag)), None)
+            if tag is None:
+                if any(tag.startswith(head) for tag in _INLINE_TAGS):
+                    return []
+                self._opening = False
+                return self._answer(self._take(len(self._held)))
+            self._opening = False
+            self._close = _INLINE_TAGS[tag]
+            self._held = head[len(tag):]
+        index = self._held.find(self._close)
+        if index >= 0:
+            thought = self._take(index)
+            rest = self._held[len(self._close):]
+            self._held, self._close = "", None
+            return self.thought(thought) + self._answer(rest)
+        return self.thought(self._take(len(self._held) - _close_prefix(self._held, self._close)))
+
+    def flush(self) -> List[RoundEvent]:
+        held = self._take(len(self._held))
+        return self.thought(held) if self._close else self._answer(held)
+
+    def _take(self, size: int) -> str:
+        taken, self._held = self._held[:size], self._held[size:]
+        return taken
+
+    def _answer(self, text: str) -> List[RoundEvent]:
+        self.text += text
+        return [TextDelta(text)] if text else []
+
+    def thought(self, text: str) -> List[RoundEvent]:
+        self.thinking += text
+        return [ReasoningDelta(text)] if text else []
+
+
+def _close_prefix(held: str, close: str) -> int:
+    """Length of the longest end of ``held`` that could begin ``close``."""
+    return next((size for size in range(min(len(held), len(close) - 1), 0, -1) if close.startswith(held[-size:])), 0)
 
 
 def _usage(raw: Dict[str, Any]) -> Usage:
@@ -216,11 +285,15 @@ def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any])
     call["arguments"] += function.get("arguments") or ""
 
 
-def _blocks(endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str) -> List[Dict[str, Any]]:
+def _blocks(
+    endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str, thinking: str,
+) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
     reasoning = {
         field: value
-        for field, value in (("reasoning_details", details), ("reasoning_content", reasoning_content))
+        for field, value in (
+            ("reasoning_details", details), ("reasoning_content", reasoning_content), ("text", thinking),
+        )
         if value
     }
     if reasoning:

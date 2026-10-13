@@ -214,15 +214,16 @@ def close_open_calls(
 
 
 def _thinking(rounds: List[Dict[str, Any]]) -> str:
-    """Readable reasoning for the legacy ``thinking`` projection: Chat
-    Completions ``reasoning_content`` and xAI reasoning summaries."""
+    """Readable reasoning for the legacy ``thinking`` projection: the display
+    ``text`` (``reasoning_content`` on rows saved before it) and xAI summaries."""
     parts = []
     for turn_round in rounds:
         for block in turn_round["blocks"]:
             if block["type"] != "reasoning":
                 continue
-            if block.get("reasoning_content"):
-                parts.append(block["reasoning_content"])
+            readable = block.get("text") or block.get("reasoning_content")
+            if readable:
+                parts.append(readable)
             for summary in (block.get("item") or {}).get("summary") or ():
                 if summary.get("text"):
                     parts.append(summary["text"])

@@ -9,7 +9,8 @@ Canonical conversation, built by ``prompt`` and serialized by each adapter:
   ``error`` is ``failed | denied | cancelled`` when ``ok`` is false.
 
 Blocks: ``text {text}``, ``tool_call {call_id, name, arguments}`` and
-``reasoning {provider, model, ...opaque}``. A block that carries ``item`` (the
+``reasoning {provider, model, text?, ...opaque}``; ``text`` is the readable
+reasoning for display only and is never replayed. A block that carries ``item`` (the
 provider's own output item) also carries ``provider``; only that provider
 replays the item, unchanged (ADR 0004).
 """
@@ -45,6 +46,11 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ReasoningDelta:
+    text: str
+
+
+@dataclass(frozen=True)
 class ProviderError:
     status: Optional[int]
     message: str
@@ -64,7 +70,7 @@ class RoundEnd:
     usage: Optional[Usage]
 
 
-RoundEvent = Union[TextDelta, ProviderError, RoundEnd]
+RoundEvent = Union[TextDelta, ReasoningDelta, ProviderError, RoundEnd]
 
 
 def replays_reasoning(block: Dict[str, Any], provider: str, model: str) -> bool:
