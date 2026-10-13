@@ -6,6 +6,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
+import { createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013thinklevel1';
 
 const API_BASE = window.location.origin;
 
@@ -206,6 +207,7 @@ function _initModelPickerDropdown() {
   if (!wrap || !btn || !menu || !search || !listEl) return;
   if (wrap.dataset.modelPickerBound === '1') return;
   wrap.dataset.modelPickerBound = '1';
+  _mountThinkingLevel(wrap);
 
   function _close() {
     if (menu.classList.contains('hidden')) return;
@@ -991,6 +993,25 @@ export function updateModelPicker() {
     label.textContent = displayName;
   }
   _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint);
+  _thinkingLevel?.refresh(currentSessionId);
+}
+
+// ── Thinking level (chat_agent runtime) ──
+// Lives beside the picker button; the legacy Thinking toggle and effort menu are separate.
+let _thinkingLevel = null;
+function _mountThinkingLevel(wrap) {
+  if (_thinkingLevel) return;
+  _thinkingLevel = createThinkingLevelSelect({
+    onChange: async value => {
+      const sid = _deps.getCurrentSessionId();
+      return !!sid && (await saveChatAgentSetting(sid, 'thinking_level', value)) !== null;
+    },
+  });
+  wrap.appendChild(_thinkingLevel.el);
+  // A refused level is now learned server-side: re-read so it shows greyed.
+  window.addEventListener('odysseus:thinking-level-refused', () => {
+    _thinkingLevel.refresh(_deps.getCurrentSessionId());
+  });
 }
 
 // ── Reasoning effort control for models supporting reasoning levels ──

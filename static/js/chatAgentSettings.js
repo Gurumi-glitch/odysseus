@@ -90,3 +90,85 @@ export function createOverflowRow({ doc = document, onChange }) {
   };
   return { el, update };
 }
+
+// Values and order mirror store.CHAT_SETTINGS["thinking_level"]; the first is the default.
+export const THINKING_LEVEL_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'off', label: 'Off' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'XHigh' },
+  { value: 'max', label: 'Max' },
+];
+
+const GREY_REASONS = {
+  legacy: 'Thinking level applies to chats on the new agent runtime',
+  noLevel: "This model's API can't take a thinking level",
+};
+
+// The <select> beside the model picker. onChange(value) -> Promise<boolean>; false
+// keeps the old value. update({value, caps}) fills it from the settings value and
+// the capabilities payload; only a level the route calls "unsupported" is greyed
+// ("unknown" stays selectable, the loop learns from the model's answer).
+// refresh(sid) fetches both routes; an answer for an older call is dropped.
+export function createThinkingLevelSelect({
+  doc = document, onChange, fetchSettings = fetchChatAgentSettings, fetchCapabilities = fetchChatAgentCapabilities,
+}) {
+  const el = doc.createElement('select');
+  el.className = 'thinking-level-select';
+  el.setAttribute('aria-label', 'Thinking level');
+  const optionEls = new Map();
+  for (const { value, label } of THINKING_LEVEL_OPTIONS) {
+    const opt = doc.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    el.appendChild(opt);
+    optionEls.set(value, opt);
+  }
+
+  let current = THINKING_LEVEL_OPTIONS[0].value;
+  el.value = current;
+  el.disabled = true;
+
+  el.addEventListener('change', async () => {
+    const next = el.value;
+    el.disabled = true;
+    const ok = await onChange(next);
+    if (ok) current = next; else el.value = current;
+    el.disabled = false;
+  });
+
+  const grey = reason => {
+    el.disabled = true;
+    el.title = reason;
+  };
+
+  const update = ({ value, caps }) => {
+    current = THINKING_LEVEL_OPTIONS.some(o => o.value === value) ? value : THINKING_LEVEL_OPTIONS[0].value;
+    el.value = current;
+    const levels = caps?.thinking?.levels || {};
+    for (const { value: v } of THINKING_LEVEL_OPTIONS) {
+      const o = optionEls.get(v);
+      const refused = levels[v] === 'unsupported';
+      o.disabled = refused;
+      o.title = refused ? 'Not supported by this model' : '';
+    }
+    if (!caps) return grey('');
+    if (caps.route === 'legacy') return grey(GREY_REASONS.legacy);
+    if (!caps.thinking?.available) return grey(GREY_REASONS.noLevel);
+    el.disabled = false;
+    el.title = '';
+  };
+
+  let seq = 0;
+  const refresh = async sid => {
+    const mine = ++seq;
+    if (!sid) { update({ value: undefined, caps: null }); return; }
+    const [settings, caps] = await Promise.all([fetchSettings(sid), fetchCapabilities(sid)]);
+    if (mine !== seq) return;
+    update({ value: settings?.thinking_level, caps: settings ? caps : null });
+  };
+
+  return { el, update, refresh };
+}

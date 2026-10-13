@@ -37,7 +37,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
-import { createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013overflow1';
+import { createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013thinklevel1';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';
 
@@ -4744,6 +4744,18 @@ import { invalidateSettings } from './appConfig.js';
               } else if (json.type === 'trimmed') {
                 // chat_agent dropped old messages to fit the window; live only, not saved.
                 if (!_isBg) uiModule.showToast(json.message || 'Older messages dropped to fit the window');
+              } else if (json.type === 'thinking_level_refused') {
+                // The model rejected the chat's level and answered at its default;
+                // the line sits above the reply (the message body is re-rendered at
+                // finalize, which would wipe a note placed inside it). Live only.
+                if (!_isBg) {
+                  const note = document.createElement('div');
+                  note.className = 'thinking-level-note';
+                  note.textContent = json.message || 'This model does not support that thinking level.';
+                  if (holder && holder.parentNode) holder.parentNode.insertBefore(note, holder);
+                  else document.getElementById('chat-history')?.appendChild(note);
+                  window.dispatchEvent(new CustomEvent('odysseus:thinking-level-refused'));
+                }
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {
                   const d = json.data || {};
