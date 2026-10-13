@@ -55,11 +55,12 @@ def serve_probes(monkeypatch, routes, *, chat=None):
 
 @pytest.fixture(autouse=True)
 def _fresh_caches():
-    capabilities._verdicts.clear()
-    chat_helpers._lmstudio_models_cache.clear()
+    caches = (capabilities._reported, capabilities._learned, chat_helpers._lmstudio_models_cache)
+    for cache in caches:
+        cache.clear()
     yield
-    capabilities._verdicts.clear()
-    chat_helpers._lmstudio_models_cache.clear()
+    for cache in caches:
+        cache.clear()
 
 
 def _props(**caps):

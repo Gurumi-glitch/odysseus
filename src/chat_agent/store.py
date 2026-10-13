@@ -5,7 +5,9 @@ It holds the runtime switch (``chat_runtime``), the user-level
 instructions toggle (``instructions_enabled``), the user's permission rules
 (``rules``: allow/ask/deny lists of rule text) and the session rules "Allow
 for this chat" saved (``session_rules``: chat id -> rule records) and auto mode's classifier
-denials per chat (``auto_mode_denials``: chat id -> [in a row, total]). The user's instruction files
+denials per chat (``auto_mode_denials``: chat id -> [in a row, total]), per-chat settings
+(``chat_settings``: chat id -> {name: value}) and the owner's last-used value of each
+(``last_chat_settings``). The user's instruction files
 live in ``INSTRUCTIONS_DIR/<same encoded name>/``. User rename and delete move
 or remove both (``rename_owner`` / ``delete_owner``).
 """
@@ -32,6 +34,15 @@ CHAT_RUNTIME_VALUES = frozenset({RUNTIME_LEGACY, RUNTIME_NEW})
 RULE_LISTS = ("allow", "ask", "deny")
 # A session rule record: [tool, kind, value] (permissions.Rule.record).
 SESSION_RULE_FIELDS = 3
+
+THINKING_AUTO = "auto"
+THINKING_OFF = "off"
+THINKING_GRADED = ("low", "medium", "high", "xhigh", "max")
+THINKING_LEVEL = "thinking_level"
+# Per-chat settings and their fixed value sets; the first value is the default.
+CHAT_SETTINGS = {
+    THINKING_LEVEL: (THINKING_AUTO, THINKING_OFF) + THINKING_GRADED,
+}
 
 
 # The Settings Instructions panel edits this file; CLAUDE.md beside it loads too.
@@ -138,6 +149,35 @@ def set_auto_mode_denials(owner: str, session_id: str, in_a_row: int, total: int
     by_chat = data.get("auto_mode_denials") if isinstance(data.get("auto_mode_denials"), dict) else {}
     by_chat[session_id] = [in_a_row, total]
     data["auto_mode_denials"] = by_chat
+    atomic_write_json(store_path(owner), data, indent=2)
+
+
+def chat_setting(owner: str, session_id: str, name: str) -> str:
+    """The chat's value; a chat that never set one reads the owner's last-used
+    value, else the default. Entries of deleted chats are tolerated."""
+    values = CHAT_SETTINGS[name]
+    data = load(owner)
+    by_chat = data.get("chat_settings") if isinstance(data.get("chat_settings"), dict) else {}
+    chat = by_chat.get(session_id) if isinstance(by_chat.get(session_id), dict) else {}
+    last = data.get("last_chat_settings") if isinstance(data.get("last_chat_settings"), dict) else {}
+    for value in (chat.get(name), last.get(name)):
+        if value in values:
+            return value
+    return values[0]
+
+
+def set_chat_setting(owner: str, session_id: str, name: str, value: str) -> None:
+    if value not in CHAT_SETTINGS[name]:
+        raise ValueError(f"{name} must be one of {', '.join(CHAT_SETTINGS[name])}")
+    data = load(owner)
+    by_chat = data.get("chat_settings") if isinstance(data.get("chat_settings"), dict) else {}
+    chat = by_chat.get(session_id) if isinstance(by_chat.get(session_id), dict) else {}
+    chat[name] = value
+    by_chat[session_id] = chat
+    data["chat_settings"] = by_chat
+    last = data.get("last_chat_settings") if isinstance(data.get("last_chat_settings"), dict) else {}
+    last[name] = value
+    data["last_chat_settings"] = last
     atomic_write_json(store_path(owner), data, indent=2)
 
 

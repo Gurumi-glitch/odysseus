@@ -1,7 +1,9 @@
 """What an (endpoint, model) can do, as its server reports it (spec #89).
 
-Answers native tool support: YES, NO or UNKNOWN. UNKNOWN means the server
-reports nothing (or the probe failed); callers treat it as "try native tools".
+Answers native tool support (YES, NO or UNKNOWN; UNKNOWN means the server
+reports nothing or the probe failed, and callers treat it as "try native
+tools") and the thinking levels (per level SUPPORTED, UNSUPPORTED or UNKNOWN,
+plus whether the control is a binary off/on). One probe answers both.
 Values come from a lazy in-process cache: server-reported ones live 60s,
 values learned from a rejection live until the endpoint's model-list refresh
 or a restart. No model-name lists, no user override, no DB.
@@ -12,7 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, Iterable, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -28,6 +31,7 @@ from src.chat_helpers import _is_local_host, _lmstudio_models_cache, _probe_lmst
 # _origin is (scheme, host, port) with the scheme's default port filled in.
 from src.agent_runtime.context_resolution import _origin, _serving_base
 from src.chat_agent.providers import chat_completions
+from src.chat_agent.store import THINKING_AUTO, THINKING_GRADED, THINKING_OFF
 from src.endpoint_resolver import normalize_base
 # Relies on: _native_tool_transport_rejected(text) matches the legacy markers
 # of a provider refusing tool calls; plain (non-SSE) text is matched as is.
@@ -40,6 +44,13 @@ logger = logging.getLogger(__name__)
 YES = "yes"
 NO = "no"
 UNKNOWN = "unknown"
+SUPPORTED = "supported"
+UNSUPPORTED = "unsupported"
+# The levels a server can be asked about; Auto sends nothing and is always selectable.
+LEVELS = (THINKING_OFF,) + THINKING_GRADED
+# What a binary model's "on" is sent as: LM Studio /v1 answers "on" with a
+# 400 and treats "medium" exactly like its default "on" (#80 LM Studio probe).
+BINARY_ON = "medium"
 
 NATIVE_TOOLS_REJECTED = "This model doesn't support native tools; the next message uses legacy."
 
@@ -49,51 +60,91 @@ SERVER_REPORTED_TTL_SECONDS = 60.0
 _OLLAMA_TOOLS_REJECTED = "does not support tools"
 # Local servers on these ports have no capability endpoint (vLLM, SGLang).
 _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
+# The key a learned "no native tools" is kept under, beside learned levels.
+_TOOLS = "tools"
+
+
+@dataclass(frozen=True)
+class ThinkingLevels:
+    """Per level in LEVELS: SUPPORTED / UNSUPPORTED / UNKNOWN."""
+
+    support: Dict[str, str] = field(default_factory=lambda: dict.fromkeys(LEVELS, UNKNOWN))
+    binary: bool = False
+
+    def to_send(self, level: str) -> Optional[str]:
+        """The level the request carries; None sends no thinking parameter."""
+        if level == THINKING_AUTO or self.support.get(level, UNSUPPORTED) == UNSUPPORTED:
+            return None
+        if self.binary and level in THINKING_GRADED:
+            return BINARY_ON
+        return level
+
+
+@dataclass(frozen=True)
+class _Report:
+    tools: str = UNKNOWN
+    thinking: ThinkingLevels = field(default_factory=ThinkingLevels)
+
 
 _Key = Tuple[Tuple[str, str, Optional[int]], str]
-# (origin, model) -> (verdict, expiry); expiry None = learned, kept until refresh.
-_verdicts: Dict[_Key, Tuple[str, Optional[float]]] = {}
+# (origin, model) -> (report, expiry): what the server said, for 60s.
+_reported: Dict[_Key, Tuple[_Report, float]] = {}
+# (origin, model) -> {"tools" or a level: NO / UNSUPPORTED}: learned from a
+# rejection, outranks the server, kept until refresh.
+_learned: Dict[_Key, Dict[str, str]] = {}
 _now = time.monotonic
 
 
 async def native_tools(endpoint_url: str, model: str, headers: Any = None) -> str:
     """YES / NO / UNKNOWN for this (endpoint, model); never raises."""
     key = (_origin(endpoint_url), model)
-    cached = _verdicts.get(key)
-    if cached is not None and (cached[1] is None or cached[1] > _now()):
-        return cached[0]
-    try:
-        # A hard bound: per-request timeouts don't cover a body that trickles.
-        reported = await asyncio.wait_for(_probe(endpoint_url, model, headers), PROBE_TIMEOUT_SECONDS)
-    except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as exc:
-        logger.info("chat_agent: capability probe for %s failed (%s)", model, type(exc).__name__)
-        return UNKNOWN
-    if not reported:
-        return UNKNOWN
-    expiry = _now() + SERVER_REPORTED_TTL_SECONDS
-    for listed_model, verdict in reported.items():
-        listed = _verdicts.get((key[0], listed_model))
-        if listed is None or listed[1] is not None:  # a learned "no" outranks the server
-            _verdicts[(key[0], listed_model)] = (verdict, expiry)
-    verdict = reported.get(model, UNKNOWN)
+    if _TOOLS in _learned.get(key, {}):
+        return _learned[key][_TOOLS]
+    verdict = (await _report(key, endpoint_url, model, headers)).tools
     logger.info("chat_agent: %s reports native tools %s", model, verdict)
     return verdict
 
 
+async def thinking_levels(endpoint_url: str, model: str, headers: Any = None) -> ThinkingLevels:
+    """The thinking levels this (endpoint, model) takes; never raises."""
+    key = (_origin(endpoint_url), model)
+    reported = (await _report(key, endpoint_url, model, headers)).thinking
+    learned = _learned.get(key, {})
+    support = {level: learned.get(level, verdict) for level, verdict in reported.support.items()}
+    return ThinkingLevels(support, reported.binary)
+
+
 def learn_no_native_tools(endpoint_url: str, model: str) -> None:
-    _verdicts[(_origin(endpoint_url), model)] = (NO, None)
+    _learned.setdefault((_origin(endpoint_url), model), {})[_TOOLS] = NO
 
 
 def forget_endpoint(endpoint_url: str) -> None:
     """Drop everything known about this endpoint's server (model-list refresh)."""
     origin = _origin(endpoint_url)
     # Runs on the model-refresh thread: copy the keys, pop tolerantly.
-    for key in list(_verdicts):
-        if key[0] == origin:
-            _verdicts.pop(key, None)
+    for cache in (_reported, _learned):
+        for key in list(cache):
+            if key[0] == origin:
+                cache.pop(key, None)
     parsed = urlparse(endpoint_url)
     # Same key _probe_lmstudio_models stores under: hostname and explicit port.
     _lmstudio_models_cache.pop((parsed.hostname or "", parsed.port), None)
+
+
+async def _report(key: _Key, endpoint_url: str, model: str, headers: Any) -> _Report:
+    cached = _reported.get(key)
+    if cached is not None and cached[1] > _now():
+        return cached[0]
+    try:
+        # A hard bound: per-request timeouts don't cover a body that trickles.
+        reported = await asyncio.wait_for(_probe(endpoint_url, model, headers), PROBE_TIMEOUT_SECONDS)
+    except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as exc:
+        logger.info("chat_agent: capability probe for %s failed (%s)", model, type(exc).__name__)
+        return _Report()
+    expiry = _now() + SERVER_REPORTED_TTL_SECONDS
+    for listed_model, report in reported.items():
+        _reported[(key[0], listed_model)] = (report, expiry)
+    return reported.get(model, _Report())
 
 
 def is_tools_rejection(status: Optional[int], message: str) -> bool:
@@ -102,8 +153,8 @@ def is_tools_rejection(status: Optional[int], message: str) -> bool:
     return _native_tool_transport_rejected(message) or _OLLAMA_TOOLS_REJECTED in (message or "").lower()
 
 
-async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, str]:
-    """Verdicts the server reports, by model; empty when it reports nothing."""
+async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Report]:
+    """What the server reports, by model; empty when it reports nothing."""
     provider = _detect_provider(endpoint_url)
     if provider in ("openrouter", "mistral", "copilot"):
         return await _probe_catalog(provider, endpoint_url, headers)
@@ -119,13 +170,14 @@ async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, str]:
         )
         response.raise_for_status()
         record = ollama.record_from_show_payload(model, response.json())
-        return {model: _verdict(record)}
+        return {model: _Report(_verdict(record))}
     lmstudio_models = await asyncio.to_thread(_probe_lmstudio_models, endpoint_url)
     if lmstudio_models:
         # LM Studio reports trained_for_tool_use only inside "capabilities".
-        return _verdicts_by_model(
-            lmstudio.record_from_native_model(item) for item in lmstudio_models
-            if isinstance(item.get("capabilities"), dict)
+        listed = [item for item in lmstudio_models if isinstance(item.get("capabilities"), dict)]
+        return _reports_by_model(
+            listed, lmstudio.record_from_native_model,
+            lambda item: _lmstudio_levels(item["capabilities"].get("reasoning")),
         )
     response = await _client().get(
         f"{base}/props?model={quote(model, safe='')}", timeout=PROBE_TIMEOUT_SECONDS,
@@ -135,10 +187,10 @@ async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, str]:
     if not isinstance(props, dict) or not isinstance(props.get("chat_template_caps"), dict):
         return {}
     # /props names the loaded file, not the id the chat uses: it answers for `model`.
-    return {model: _verdict(llamacpp.record_from_props_payload(props))}
+    return {model: _Report(_verdict(llamacpp.record_from_props_payload(props)))}
 
 
-async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict[str, str]:
+async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict[str, _Report]:
     response = await _client().get(
         f"{normalize_base(endpoint_url)}/models",
         headers=_provider_headers(provider, headers if isinstance(headers, dict) else None),
@@ -150,11 +202,12 @@ async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict
         return {}
     items = [item for item in payload["data"] if isinstance(item, dict) and item.get("id")]
     if provider == "openrouter":
-        return _verdicts_by_model(
-            openrouter.record_from_model(item) for item in items
-            if isinstance(item.get("supported_parameters"), list)
+        return _reports_by_model(
+            [item for item in items if isinstance(item.get("supported_parameters"), list)],
+            openrouter.record_from_model,
+            lambda item: _openrouter_levels(item.get("reasoning")),
         )
-    verdicts = {}
+    reports = {}
     for item in items:
         flags = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
         if provider == "copilot":
@@ -164,12 +217,48 @@ async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict
         else:
             flag = flags.get("function_calling")
         if isinstance(flag, bool):
-            verdicts[item["id"]] = YES if flag else NO
-    return verdicts
+            reports[item["id"]] = _Report(YES if flag else NO)
+    return reports
 
 
-def _verdicts_by_model(records: Iterable[Any]) -> Dict[str, str]:
-    return {record.model_id: _verdict(record) for record in records if record is not None}
+def _reports_by_model(
+    items: Iterable[Dict[str, Any]], read: Callable[[Dict[str, Any]], Any],
+    levels: Callable[[Dict[str, Any]], ThinkingLevels],
+) -> Dict[str, _Report]:
+    reports = {}
+    for item in items:
+        record = read(item)
+        if record is not None:
+            reports[record.model_id] = _Report(_verdict(record), levels(item))
+    return reports
+
+
+def _openrouter_levels(reasoning: Any) -> ThinkingLevels:
+    # No reasoning object reports nothing: routers that take reasoning
+    # parameters omit it too (catalog of 2026-10-13).
+    if not isinstance(reasoning, dict):
+        return ThinkingLevels()
+    efforts = reasoning.get("supported_efforts")
+    support = {
+        level: SUPPORTED if efforts is None or level in efforts else UNSUPPORTED
+        for level in THINKING_GRADED
+    }
+    # "mandatory: true -> effort none is rejected"; Off is not in the effort list.
+    support[THINKING_OFF] = UNSUPPORTED if reasoning.get("mandatory") else SUPPORTED
+    return ThinkingLevels(support)
+
+
+def _lmstudio_levels(reasoning: Any) -> ThinkingLevels:
+    options = reasoning.get("allowed_options") if isinstance(reasoning, dict) else None
+    if not isinstance(options, list):
+        return ThinkingLevels()
+    # An off/on model: every graded level means "on" (#80 amendment).
+    binary = "on" in options
+    support = {
+        level: SUPPORTED if binary or level in options else UNSUPPORTED for level in THINKING_GRADED
+    }
+    support[THINKING_OFF] = SUPPORTED if THINKING_OFF in options else UNSUPPORTED
+    return ThinkingLevels(support, binary)
 
 
 def _verdict(record: Any) -> str:

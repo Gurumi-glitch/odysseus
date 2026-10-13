@@ -11,7 +11,7 @@ from routes.session_routes import _verify_session_owner
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import effective_user, is_delegated_credential, require_user
-from src.chat_agent import asks, classifier, permissions, store
+from src.chat_agent import asks, capabilities, classifier, permissions, routing, store
 from src.owner_identity import auth_disabled
 
 
@@ -43,10 +43,13 @@ def _require_interactive_answerer(request: Request, action: str) -> None:
         raise HTTPException(403, f"Only you, in an interactive session, can {action}.")
 
 
-def _settings(user: str) -> dict:
+def _settings(user: str, session_id: str = "") -> dict:
     available = not auth_disabled()
     runtime = store.chat_runtime(user) if available else store.RUNTIME_LEGACY
-    return {"chat_runtime": runtime, "available": available}
+    settings = {"chat_runtime": runtime, "available": available}
+    if available and session_id:
+        settings[store.THINKING_LEVEL] = store.chat_setting(user, session_id, store.THINKING_LEVEL)
+    return settings
 
 
 def setup_chat_agent_routes(session_manager) -> APIRouter:
@@ -54,17 +57,54 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
     router = APIRouter(tags=["chat_agent"])
 
     @router.get("/api/chat_agent/settings")
-    async def get_settings(request: Request) -> dict:
-        return _settings(require_user(request))
+    async def get_settings(request: Request, session_id: str = "") -> dict:
+        """The user's runtime switch; with ``session_id``, that chat's settings too."""
+        return _settings(require_user(request), session_id)
 
     @router.put("/api/chat_agent/settings")
     async def put_settings(request: Request, body: dict) -> dict:
         user = require_interactive_user(request)
-        value = body.get("chat_runtime")
-        if value not in store.CHAT_RUNTIME_VALUES:
+        if "chat_runtime" not in body and store.THINKING_LEVEL not in body:
+            raise HTTPException(400, "Nothing to change.")
+        if "chat_runtime" in body and body["chat_runtime"] not in store.CHAT_RUNTIME_VALUES:
             raise HTTPException(400, "chat_runtime must be 'legacy' or 'new'.")
-        store.set_chat_runtime(user, value)
-        return _settings(user)
+        session_id = body.get("session_id") or ""
+        if store.THINKING_LEVEL in body:
+            # The store is the owner's own file: a foreign chat id only keys
+            # an entry no other user reads, so no owner check is needed.
+            if not isinstance(session_id, str) or not session_id:
+                raise HTTPException(400, "thinking_level needs the chat's session_id.")
+            levels = store.CHAT_SETTINGS[store.THINKING_LEVEL]
+            if body[store.THINKING_LEVEL] not in levels:
+                raise HTTPException(400, f"thinking_level must be one of {', '.join(levels)}.")
+            store.set_chat_setting(user, session_id, store.THINKING_LEVEL, body[store.THINKING_LEVEL])
+        if "chat_runtime" in body:
+            store.set_chat_runtime(user, body["chat_runtime"])
+        return _settings(user, session_id if isinstance(session_id, str) else "")
+
+    @router.get("/api/chat_agent/capabilities/{session_id}")
+    async def get_capabilities(request: Request, session_id: str) -> dict:
+        """What the chat's next agent turn would run on, and the thinking
+        levels its (endpoint, model) takes. The composer asks after a model
+        change and after a turn that learned a rejection."""
+        user = require_user(request)
+        _verify_session_owner(request, session_id, session_manager)
+        try:
+            sess = session_manager.get_session(session_id)
+        except (KeyError, SessionNotFoundError):
+            raise HTTPException(404, "Session not found")
+        url, model, headers = sess.endpoint_url or "", sess.model or "", sess.headers
+        runtime, reason = await routing.next_turn_route(user, url, model, headers)
+        available = routing.has_adapter(url)
+        levels = (
+            await capabilities.thinking_levels(url, model, headers) if available
+            else capabilities.ThinkingLevels()
+        )
+        return {
+            "route": runtime,
+            "reason": reason,
+            "thinking": {"available": available, "binary": levels.binary, "levels": levels.support},
+        }
 
     @router.get("/api/chat_agent/instructions")
     async def get_instructions(request: Request) -> dict:

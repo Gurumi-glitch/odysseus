@@ -23,6 +23,7 @@ from src.chat_agent.providers import (
     replays_reasoning,
     tool_output_text,
 )
+from src.chat_agent.store import THINKING_OFF
 
 # Each helper below is module-level in llm_core and relied on as:
 #   _detect_provider: endpoint URL -> provider key ("openrouter", "openai", ...);
@@ -32,16 +33,13 @@ from src.chat_agent.providers import (
 #   _get_http_client: the shared AsyncClient (connection reuse, TLS overrides);
 #   _stream_timeout: streaming httpx.Timeout from a read timeout in seconds;
 #   _format_upstream_error: HTTP status + body -> user-readable sentence;
-#   _apply_hosted_thinking_mode / _apply_local_qwen_thinking_mode: mutate the
-#   payload in place for an "on"/"off" mode (anything else is a no-op), only
-#   for OpenRouter/Moonshot-Kimi and local Qwen-family models respectively.
+#   _host_match: the URL's hostname is the domain or a subdomain of it.
 from src.llm_core import (
     LLMConfig,
-    _apply_hosted_thinking_mode,
-    _apply_local_qwen_thinking_mode,
     _detect_provider,
     _format_upstream_error,
     _get_http_client,
+    _host_match,
     _normalize_openai_chat_url,
     _omit_temperature,
     _provider_headers,
@@ -65,8 +63,9 @@ def build_payload(
     temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
-    thinking_mode: Optional[str] = None,
+    thinking: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """``thinking``: a level to send (off, low ... max); None sends none."""
     provider = _detect_provider(endpoint.url)
     messages = _messages(conversation, provider_key(endpoint.url), endpoint.model)
     payload: Dict[str, Any] = {"model": endpoint.model, "messages": messages, "stream": True}
@@ -84,9 +83,15 @@ def build_payload(
     if max_tokens > 0:
         key = "max_completion_tokens" if _uses_max_completion_tokens(endpoint.model) else "max_tokens"
         payload[key] = max_tokens
-    target_url = _normalize_openai_chat_url(endpoint.url)
-    _apply_local_qwen_thinking_mode(payload, target_url, endpoint.model, thinking_mode)
-    _apply_hosted_thinking_mode(payload, provider, endpoint.model, thinking_mode)
+    if thinking is not None:
+        effort = "none" if thinking == THINKING_OFF else thinking
+        if provider == "openrouter":
+            payload["reasoning"] = {"effort": effort}
+        elif effort == "none" and _host_match(endpoint.url, "deepseek.com"):
+            # DeepSeek turns thinking off on its own axis, not with an effort.
+            payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["reasoning_effort"] = effort
     return payload
 
 
@@ -137,10 +142,10 @@ async def stream_round(
     temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
-    thinking_mode: Optional[str] = None,
+    thinking: Optional[str] = None,
 ) -> AsyncIterator[RoundEvent]:
     payload = build_payload(endpoint, conversation, temperature=temperature,
-                            max_tokens=max_tokens, tools=tools, thinking_mode=thinking_mode)
+                            max_tokens=max_tokens, tools=tools, thinking=thinking)
     target_url = _normalize_openai_chat_url(endpoint.url)
     client = _get_http_client()
     async with client.stream(

@@ -22,6 +22,7 @@ from src.chat_agent.providers import (
     replays_reasoning,
     tool_output_text,
 )
+from src.chat_agent.store import THINKING_OFF
 # Relied on: normalize_base strips a trailing /chat/completions, /responses,
 # /models (and "/"), leaving the configured API base such as .../v1.
 from src.endpoint_resolver import normalize_base
@@ -53,7 +54,9 @@ def build_payload(
     temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
+    thinking: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """``thinking``: a level to send (off, low ... max); None sends none."""
     payload: Dict[str, Any] = {
         "model": endpoint.model,
         "input": _input_items(conversation, endpoint.model),
@@ -69,6 +72,8 @@ def build_payload(
     if tools:
         payload["tools"] = [_function_tool(tool) for tool in tools]
         payload["tool_choice"] = "auto"
+    if thinking is not None:
+        payload["reasoning"] = {"effort": "none" if thinking == THINKING_OFF else thinking}
     return payload
 
 
@@ -145,10 +150,12 @@ async def stream_round(
     temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
+    thinking: Optional[str] = None,
 ) -> AsyncIterator[RoundEvent]:
     payload = build_payload(
         endpoint, conversation,
         cache_key=cache_key, temperature=temperature, max_tokens=max_tokens, tools=tools,
+        thinking=thinking,
     )
     events = _attempt(endpoint, payload)
     first = await anext(events, None)

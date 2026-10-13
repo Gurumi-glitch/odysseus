@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from src.chat_agent import capabilities, store
 from src.llm_core import _detect_provider
@@ -46,11 +46,14 @@ class TurnFacts:
     headers: Any
 
 
+# Why the next agent turn of a chat goes to legacy (capabilities route).
+REASON_AUTH_DISABLED = "auth_disabled"
+REASON_RUNTIME_OFF = "runtime_off"
+REASON_NO_ADAPTER = "no_adapter"
+REASON_NO_NATIVE_TOOLS = "no_native_tools"
+
+
 async def choose_runtime(facts: TurnFacts) -> str:
-    if auth_disabled() or not facts.owner:
-        return LEGACY
-    if store.chat_runtime(facts.owner) != store.RUNTIME_NEW:
-        return LEGACY
     if not facts.agent_turn:
         return LEGACY
     if (
@@ -62,16 +65,27 @@ async def choose_runtime(facts: TurnFacts) -> str:
         or facts.internal_tool_request
     ):
         return LEGACY
-    if not await endpoint_has_adapter(facts.endpoint_url, facts.model, facts.headers):
-        return LEGACY
-    return CHAT_AGENT
+    runtime, _ = await next_turn_route(facts.owner, facts.endpoint_url, facts.model, facts.headers)
+    return runtime
 
 
-async def endpoint_has_adapter(endpoint_url: str, model: str, headers: Any) -> bool:
-    # Relies on: _detect_provider maps a configured endpoint URL to its wire
-    # dialect, with "openai" as the Chat Completions default.
-    if _detect_provider(endpoint_url) in _PROVIDERS_WITHOUT_ADAPTER:
-        return False
+async def next_turn_route(owner: Optional[str], endpoint_url: str, model: str, headers: Any) -> Tuple[str, str]:
+    """The runtime an ordinary agent turn of this owner on this (endpoint,
+    model) takes, and why it is legacy ("" when it isn't)."""
+    if auth_disabled() or not owner:
+        return LEGACY, REASON_AUTH_DISABLED
+    if store.chat_runtime(owner) != store.RUNTIME_NEW:
+        return LEGACY, REASON_RUNTIME_OFF
+    if not has_adapter(endpoint_url):
+        return LEGACY, REASON_NO_ADAPTER
     # Only the server's report counts: supports_tools, the Cookbook regex and
     # model-name lists stay legacy-only (#79). Unknown -> try native tools.
-    return await capabilities.native_tools(endpoint_url, model, headers) != capabilities.NO
+    if await capabilities.native_tools(endpoint_url, model, headers) == capabilities.NO:
+        return LEGACY, REASON_NO_NATIVE_TOOLS
+    return CHAT_AGENT, ""
+
+
+def has_adapter(endpoint_url: str) -> bool:
+    # Relies on: _detect_provider maps a configured endpoint URL to its wire
+    # dialect, with "openai" as the Chat Completions default.
+    return _detect_provider(endpoint_url) not in _PROVIDERS_WITHOUT_ADAPTER

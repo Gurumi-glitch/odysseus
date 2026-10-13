@@ -161,8 +161,6 @@ class ChatAgentTurn:
     auto_mode: bool = False
     # The user's message as sent, for auto mode's classifier.
     message: str = ""
-    # The route's resolved thinking switch ("on"/"off", None = model default).
-    thinking_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -209,17 +207,18 @@ def _replayed_history(turn: ChatAgentTurn) -> List[Any]:
 
 def _stream_round(
     turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
-    tool_schemas: Sequence[Dict[str, Any]],
+    tool_schemas: Sequence[Dict[str, Any]], thinking: Optional[str],
 ) -> AsyncIterator[RoundEvent]:
     max_tokens = _max_tokens(turn.max_tokens, endpoint, conversation, tool_schemas)
     if provider == XAI:
         return xai_responses.stream_round(
             endpoint, conversation, cache_key=turn.session_id,
             temperature=turn.temperature, max_tokens=max_tokens, tools=tool_schemas,
+            thinking=thinking,
         )
     return chat_completions.stream_round(
         endpoint, conversation, temperature=turn.temperature, max_tokens=max_tokens,
-        tools=tool_schemas, thinking_mode=turn.thinking_mode,
+        tools=tool_schemas, thinking=thinking,
     )
 
 
@@ -250,18 +249,23 @@ async def _round_with_fallback(
     start = next(i for i, candidate in enumerate(candidates) if candidate.endpoint == endpoint)
     failures: List[Dict[str, Any]] = []
     reason = ""
+    level = store.chat_setting(turn.owner, turn.session_id, store.THINKING_LEVEL)
     for index in range(start, len(candidates)):
         candidate = candidates[index]
         request = conversation if index == start else await transcript.fit_request(
             conversation, history_start, current, candidate.endpoint, turn.owner,
         )
+        # Per candidate: a fallback model takes its own set of levels.
+        thinking = (await capabilities.thinking_levels(
+            candidate.endpoint.url, candidate.endpoint.model, candidate.endpoint.headers,
+        )).to_send(level)
         retry_left = len(candidates) == 1
         while True:
             failure = None
             committed = False
             held: List[RoundEvent] = []
             provider = provider_key(candidate.endpoint.url)
-            async with aclosing(_stream_round(turn, provider, candidate.endpoint, request, tool_schemas)) as events:
+            async with aclosing(_stream_round(turn, provider, candidate.endpoint, request, tool_schemas, thinking)) as events:
                 async for event in events:
                     if not committed:
                         if isinstance(event, ProviderError):
