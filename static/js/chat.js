@@ -6,7 +6,9 @@
 // ES6 module — IIFE removed
 
 import Storage from './storage.js';
-import { temperatureToSlider, sliderToTemperature, formatTemperature } from './generationSettings.js';
+import {
+  TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, temperatureToSlider, sliderToTemperature, formatTemperature,
+} from './generationSettings.js?v=20261013templeft1';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20261013turnerr1';
@@ -37,7 +39,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
-import { createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013thinklevel1';
+import { CAPABILITIES_CHANGED, createOverflowRow, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013review1';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';
 
@@ -414,13 +416,13 @@ import { invalidateSettings } from './appConfig.js';
     // the row starts greyed and fills in; a detached popup is harmless to update.
     const overflow = createOverflowRow({ onChange: _setChatContextOverflow });
     popup.appendChild(overflow.el);
-    _resolveCurrentSessionId().then(async (sid) => {
-      if (!sid) return;
-      const [settings, caps] = await Promise.all([fetchChatAgentSettings(sid), fetchChatAgentCapabilities(sid)]);
-      // Grey unless both routes say the new runtime answers this chat.
-      const legacy = !settings || settings.context_overflow === undefined || !caps || caps.route === 'legacy';
-      overflow.update({ value: settings?.context_overflow, legacy });
-    });
+    _resolveCurrentSessionId().then(overflow.refresh);
+    // The popup has no close hook: a closed one drops its listener on the next event.
+    const rereadOverflow = () => {
+      if (!overflow.el.isConnected) { window.removeEventListener(CAPABILITIES_CHANGED, rereadOverflow); return; }
+      _resolveCurrentSessionId().then(overflow.refresh);
+    };
+    window.addEventListener(CAPABILITIES_CHANGED, rereadOverflow);
 
 	    const memoryOn = d.memory_extraction_enabled !== false;
 	    const memoryRow = document.createElement('div');
@@ -543,7 +545,7 @@ import { invalidateSettings } from './appConfig.js';
       input.addEventListener('change', () => _saveChatGenerationSettings({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : toStored(input.value) }));
       row.appendChild(input); popup.appendChild(row);
     };
-    addGenerationSlider('Temperature', temperatureToSlider(d.temperature_override), 0, 2.1, 0.1, formatTemperature, 'temperature_override', sliderToTemperature);
+    addGenerationSlider('Temperature', temperatureToSlider(d.temperature_override), TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, formatTemperature, 'temperature_override', sliderToTemperature);
     addGenerationSlider('Max tokens', d.max_tokens_override ?? 8448, 256, 8448, 256, v => Number(v) > 8192 ? 'No limit' : Number(v).toLocaleString(), 'max_tokens_override');
 
 	    const threshold = _clampAutoCompactThreshold(d.auto_compact_threshold || 85);
@@ -4096,6 +4098,9 @@ import { invalidateSettings } from './appConfig.js';
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
                 _streamTerminalError = createTerminalStreamError(json);
+                // The error may be the model refusing native tools, which the server
+                // has now learned: the next turn is legacy, so the controls re-grey.
+                window.dispatchEvent(new CustomEvent(CAPABILITIES_CHANGED));
                 console.error('Stream error:', _streamTerminalError.message);
                 if (spinner && spinner.element) spinner.destroy();
                 break;
@@ -4754,7 +4759,7 @@ import { invalidateSettings } from './appConfig.js';
                   note.textContent = json.message || 'This model does not support that thinking level.';
                   if (holder && holder.parentNode) holder.parentNode.insertBefore(note, holder);
                   else document.getElementById('chat-history')?.appendChild(note);
-                  window.dispatchEvent(new CustomEvent('odysseus:thinking-level-refused'));
+                  window.dispatchEvent(new CustomEvent(CAPABILITIES_CHANGED));
                 }
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {

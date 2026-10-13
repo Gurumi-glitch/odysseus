@@ -21,8 +21,8 @@ from src.chat_agent.providers import (
     Usage,
     replays_reasoning,
     tool_output_text,
+    wire_effort,
 )
-from src.chat_agent.store import THINKING_OFF
 # Relied on: normalize_base strips a trailing /chat/completions, /responses,
 # /models (and "/"), leaving the configured API base such as .../v1.
 from src.endpoint_resolver import normalize_base
@@ -73,7 +73,7 @@ def build_payload(
         payload["tools"] = [_function_tool(tool) for tool in tools]
         payload["tool_choice"] = "auto"
     if thinking is not None:
-        payload["reasoning"] = {"effort": "none" if thinking == THINKING_OFF else thinking}
+        payload["reasoning"] = {"effort": wire_effort(thinking)}
     return payload
 
 

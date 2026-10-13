@@ -177,7 +177,7 @@ async def _turn(harness, level):
     from tests.chat_agent.test_chat_agent_route import _Request, _data_events, _switch_on
 
     _switch_on()
-    store.set_chat_setting("alice", "session-1", store.THINKING_LEVEL, level)
+    store.set_chat_settings("alice", "session-1", {store.THINKING_LEVEL: level})
     response, body = await harness.send(_Request("agent"))
     assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
     return _data_events(body), body
@@ -245,6 +245,34 @@ async def test_other_failures_still_fall_back(harness, monkeypatch, level, error
     assert [model for model, _ in _sent(harness)] == [PRIMARY_MODEL, BACKUP_MODEL]
     assert not [e for e in events if e.get("type") == "thinking_level_refused"]
     assert [e for e in events if e.get("type") == "fallback"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message", "refused"),
+    [
+        # LM Studio /v1 refusing a value it doesn't list (#80).
+        (400, "Invalid value for 'reasoning_effort': 'max'.", True),
+        (400, "Reasoning is mandatory for this endpoint and cannot be disabled.", True),
+        # A model whose name says reasoning, missing or down: not the level's fault.
+        (404, "model 'phi-4-reasoning' not found", False),
+        (503, "phi-4-reasoning is loading", False),
+        # A replayed thinking field the server doesn't take.
+        (400, "messages[2].reasoning_content: extra fields not permitted", False),
+    ],
+    ids=["lmstudio-effort", "openrouter-mandatory", "model-404", "model-503", "reasoning-content"],
+)
+async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, monkeypatch, status, message, refused):
+    from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
+
+    _provider(harness, monkeypatch, [(status, {"error": {"message": message}}), ["Hi"], ["Hi"]])
+
+    events, _ = await _turn(harness, "high")
+
+    handed_back = [e for e in events if e.get("type") == "thinking_level_refused"]
+    assert bool(handed_back) is refused
+    learned = (await capabilities.thinking_levels(harness.session.endpoint_url, PRIMARY_MODEL)).support["high"]
+    assert (learned == U) is refused
 
 
 @pytest.mark.asyncio

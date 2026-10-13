@@ -306,7 +306,7 @@ async def test_later_rounds_are_gated_against_the_fallbacks_window(harness, monk
     from tests.chat_agent.test_chat_agent_route import _sse_tool_calls
 
     _switch_on()
-    store.set_chat_setting("alice", "session-1", store.CONTEXT_OVERFLOW, store.OVERFLOW_STOP)
+    store.set_chat_settings("alice", "session-1", {store.CONTEXT_OVERFLOW: store.OVERFLOW_STOP})
     windows = {PRIMARY_MODEL: 128_000, BACKUP_MODEL: 16_384}
     monkeypatch.setattr(loop, "get_context_length_known", lambda url, model: (windows[model], True))
     # A ~12k-token call: the next request is over 85% of 16k, far under 128k.

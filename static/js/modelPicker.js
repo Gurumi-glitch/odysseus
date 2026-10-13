@@ -6,7 +6,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
-import { createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013thinklevel1';
+import { CAPABILITIES_CHANGED, createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013review1';
 
 const API_BASE = window.location.origin;
 
@@ -1008,8 +1008,8 @@ function _mountThinkingLevel(wrap) {
     },
   });
   wrap.appendChild(_thinkingLevel.el);
-  // A refused level is now learned server-side: re-read so it shows greyed.
-  window.addEventListener('odysseus:thinking-level-refused', () => {
+  // A refused level or tools rejection is now learned server-side: re-read so it shows greyed.
+  window.addEventListener(CAPABILITIES_CHANGED, () => {
     _thinkingLevel.refresh(_deps.getCurrentSessionId());
   });
 }

@@ -11,7 +11,7 @@ from routes.session_routes import _verify_session_owner
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import effective_user, is_delegated_credential, require_user
-from src.chat_agent import asks, capabilities, classifier, permissions, routing, store
+from src.chat_agent import asks, classifier, permissions, routing, store
 from src.owner_identity import auth_disabled
 
 
@@ -65,23 +65,22 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
     @router.put("/api/chat_agent/settings")
     async def put_settings(request: Request, body: dict) -> dict:
         user = require_interactive_user(request)
-        chat_settings = [name for name in store.CHAT_SETTINGS if name in body]
+        chat_settings = {name: body[name] for name in store.CHAT_SETTINGS if name in body}
         if "chat_runtime" not in body and not chat_settings:
             raise HTTPException(400, "Nothing to change.")
+        # Checked before the chat settings are written: a bad value changes nothing.
         if "chat_runtime" in body and body["chat_runtime"] not in store.CHAT_RUNTIME_VALUES:
             raise HTTPException(400, "chat_runtime must be 'legacy' or 'new'.")
         session_id = body.get("session_id") or ""
-        # Every value is checked before any is written: a bad one changes nothing.
-        for name in chat_settings:
+        if chat_settings:
             # The store is the owner's own file: a foreign chat id only keys
             # an entry no other user reads, so no owner check is needed.
             if not isinstance(session_id, str) or not session_id:
-                raise HTTPException(400, f"{name} needs the chat's session_id.")
-            values = store.CHAT_SETTINGS[name]
-            if body[name] not in values:
-                raise HTTPException(400, f"{name} must be one of {', '.join(values)}.")
-        for name in chat_settings:
-            store.set_chat_setting(user, session_id, name, body[name])
+                raise HTTPException(400, f"{next(iter(chat_settings))} needs the chat's session_id.")
+            try:
+                store.set_chat_settings(user, session_id, chat_settings)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         if "chat_runtime" in body:
             store.set_chat_runtime(user, body["chat_runtime"])
         return _settings(user, session_id if isinstance(session_id, str) else "")
@@ -97,18 +96,7 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
             sess = session_manager.get_session(session_id)
         except (KeyError, SessionNotFoundError):
             raise HTTPException(404, "Session not found")
-        url, model, headers = sess.endpoint_url or "", sess.model or "", sess.headers
-        runtime, reason = await routing.next_turn_route(user, url, model, headers)
-        available = routing.has_adapter(url)
-        levels = (
-            await capabilities.thinking_levels(url, model, headers) if available
-            else capabilities.ThinkingLevels()
-        )
-        return {
-            "route": runtime,
-            "reason": reason,
-            "thinking": {"available": available, "binary": levels.binary, "levels": levels.support},
-        }
+        return await routing.chat_capabilities(user, sess.endpoint_url or "", sess.model or "", sess.headers)
 
     @router.get("/api/chat_agent/instructions")
     async def get_instructions(request: Request) -> dict:

@@ -1,12 +1,7 @@
 """What an (endpoint, model) can do, as its server reports it (spec #89).
 
-Answers native tool support (YES, NO or UNKNOWN; UNKNOWN means the server
-reports nothing or the probe failed, and callers treat it as "try native
-tools") and the thinking levels (per level SUPPORTED, UNSUPPORTED or UNKNOWN,
-plus whether the control is a binary off/on). One probe answers both.
-Values come from a lazy in-process cache: server-reported ones live 60s,
-values learned from a rejection live until the endpoint's model-list refresh
-or a restart. No model-name lists, no user override, no DB.
+Native tool support and thinking levels, answered by one probe and cached in
+process; sources, verdicts and cache lifetimes: src/chat_agent/README.md.
 """
 
 from __future__ import annotations
@@ -31,8 +26,8 @@ from src.chat_helpers import _is_local_host, _lmstudio_models_cache, _probe_lmst
 # leaving the server root llama.cpp and Ollama serve native routes from;
 # _origin is (scheme, host, port) with the scheme's default port filled in.
 from src.agent_runtime.context_resolution import _origin, _serving_base
-from src.chat_agent.providers import chat_completions
-from src.chat_agent.store import THINKING_AUTO, THINKING_GRADED, THINKING_OFF
+from src.chat_agent.providers import THINKING_OFF, chat_completions, wire_effort
+from src.chat_agent.store import THINKING_AUTO, THINKING_GRADED
 from src.endpoint_resolver import normalize_base
 # Relies on: _native_tool_transport_rejected(text) matches the legacy markers
 # of a provider refusing tool calls; plain (non-SSE) text is matched as is.
@@ -62,9 +57,10 @@ SERVER_REPORTED_TTL_SECONDS = 60.0
 _OLLAMA_TOOLS_REJECTED = "does not support tools"
 # Local servers on these ports have no capability endpoint (vLLM, SGLang).
 _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
-# "Unexpected reasoning effort" (llama.cpp templates), LM Studio's
-# "reasoning_effort" 400, OpenRouter's mandatory-reasoning refusal (#80).
-_EFFORT_REJECTED = re.compile(r"reasoning|effort", re.IGNORECASE)
+# The effort parameter by name ("Unexpected reasoning effort" from llama.cpp
+# templates, LM Studio's "reasoning_effort" 400) or OpenRouter's refusal to turn
+# mandatory reasoning off (#80); bare "reasoning" also names models and fields.
+_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory", re.IGNORECASE)
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
 
@@ -231,8 +227,7 @@ async def _render(base: str, model: str, level: Optional[str]) -> Optional[str]:
     """The rendered prompt, or None when the template refuses the level (HTTP 500)."""
     body: Dict[str, Any] = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
     if level is not None:
-        # The wire value, as the Chat Completions adapter sends Off.
-        body["reasoning_effort"] = "none" if level == THINKING_OFF else level
+        body["reasoning_effort"] = wire_effort(level)
     response = await _client().post(f"{base}/apply-template", json=body, timeout=PROBE_TIMEOUT_SECONDS)
     if response.status_code == 500:
         return None

@@ -12,6 +12,7 @@ import pytest
 from src.chat_agent import loop, store
 from tests.chat_agent.test_chat_agent_route import _data_events, _Request, _sse_events, _sse_tool_calls, _switch_on
 from tests.chat_agent.test_chat_agent_route import harness  # noqa: F401
+from tests.chat_agent.test_chat_agent_fallback import harness as fallback_harness  # noqa: F401
 from tests.chat_agent.test_chat_agent_thinking_level import api  # noqa: F401
 
 # Bonsai's llama-server window (spec #89 acceptance setup); the harness's
@@ -26,7 +27,7 @@ def _window(monkeypatch, window=WINDOW, measured=True):
 
 
 def _policy(value):
-    store.set_chat_setting("alice", "session-1", store.CONTEXT_OVERFLOW, value)
+    store.set_chat_settings("alice", "session-1", {store.CONTEXT_OVERFLOW: value})
 
 
 def _padded_call(letter, words=PAD):
@@ -151,6 +152,31 @@ async def test_a_compact_summary_is_never_dropped(harness, monkeypatch):
 
     third = harness.captured["provider_requests"][2]
     assert _has(third, "the user likes tea") and not _has(third, "earlier question")
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_after_trimming_regates_later_rounds_from_the_untrimmed_chat(
+    fallback_harness, monkeypatch,
+):
+    from tests.chat_agent.test_chat_agent_fallback import BACKUP_MODEL, PRIMARY_MODEL, _script
+
+    _switch_on()
+    # Only the primary's window is small: on the backup nothing needs dropping.
+    windows = {PRIMARY_MODEL: WINDOW, BACKUP_MODEL: 128_000}
+    monkeypatch.setattr(loop, "get_context_length_known", lambda url, model: (windows[model], True))
+    _policy("rolling_window")
+    _script(monkeypatch, fallback_harness, {
+        PRIMARY_MODEL: [_padded_call("a"), _padded_call("b"), 503],
+        BACKUP_MODEL: [_sse_tool_calls(("no_such_tool", {})), _sse_events(["Done."])],
+    })
+
+    response, body = await fallback_harness.send(_Request("agent"))
+
+    requests = fallback_harness.captured["provider_requests"]
+    assert [request["model"] for request in requests] == [PRIMARY_MODEL] * 3 + [BACKUP_MODEL] * 2
+    assert not _has(requests[2], "a a a")
+    # The trim was the primary's request alone; the backup's next round has it all.
+    assert _has(requests[4], "earlier question") and _has(requests[4], "a a a")
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,22 @@ async def next_turn_route(owner: Optional[str], endpoint_url: str, model: str, h
     return CHAT_AGENT, ""
 
 
+async def chat_capabilities(owner: Optional[str], endpoint_url: str, model: str, headers: Any) -> dict:
+    """The capabilities route's answer: the route the chat's next agent turn
+    takes and the thinking levels its (endpoint, model) takes."""
+    runtime, reason = await next_turn_route(owner, endpoint_url, model, headers)
+    available = has_adapter(endpoint_url)
+    levels = (
+        await capabilities.thinking_levels(endpoint_url, model, headers) if available
+        else capabilities.ThinkingLevels()
+    )
+    return {
+        "route": runtime,
+        "reason": reason,
+        "thinking": {"available": available, "binary": levels.binary, "levels": levels.support},
+    }
+
+
 def has_adapter(endpoint_url: str) -> bool:
     # Relies on: _detect_provider maps a configured endpoint URL to its wire
     # dialect, with "openai" as the Chat Completions default.

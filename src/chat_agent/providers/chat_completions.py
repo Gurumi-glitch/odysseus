@@ -12,6 +12,7 @@ import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
 from src.chat_agent.providers import (
+    OFF_EFFORT,
     Endpoint,
     ProviderError,
     RoundEnd,
@@ -22,8 +23,8 @@ from src.chat_agent.providers import (
     provider_key,
     replays_reasoning,
     tool_output_text,
+    wire_effort,
 )
-from src.chat_agent.store import THINKING_OFF
 
 # Each helper below is module-level in llm_core and relied on as:
 #   _detect_provider: endpoint URL -> provider key ("openrouter", "openai", ...);
@@ -84,10 +85,10 @@ def build_payload(
         key = "max_completion_tokens" if _uses_max_completion_tokens(endpoint.model) else "max_tokens"
         payload[key] = max_tokens
     if thinking is not None:
-        effort = "none" if thinking == THINKING_OFF else thinking
+        effort = wire_effort(thinking)
         if provider == "openrouter":
             payload["reasoning"] = {"effort": effort}
-        elif effort == "none" and _host_match(endpoint.url, "deepseek.com"):
+        elif effort == OFF_EFFORT and _host_match(endpoint.url, "deepseek.com"):
             # DeepSeek turns thinking off on its own axis, not with an effort.
             payload["thinking"] = {"type": "disabled"}
         else:
@@ -195,7 +196,7 @@ async def stream_round(
                 # vLLM >= 0.20 and OpenRouter send readable reasoning as
                 # "reasoning"; read one field so a server sending both isn't doubled.
                 reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                for event in streamed.thought(reasoning or ""):
+                for event in streamed.feed_thinking(reasoning or ""):
                     yield event
                 if delta.get("content"):
                     for event in streamed.feed(delta["content"]):
@@ -249,12 +250,12 @@ class _RoundText:
             thought = self._take(index)
             rest = self._held[len(self._close):]
             self._held, self._close = "", None
-            return self.thought(thought) + self._answer(rest)
-        return self.thought(self._take(len(self._held) - _close_prefix(self._held, self._close)))
+            return self.feed_thinking(thought) + self._answer(rest)
+        return self.feed_thinking(self._take(len(self._held) - _close_prefix(self._held, self._close)))
 
     def flush(self) -> List[RoundEvent]:
         held = self._take(len(self._held))
-        return self.thought(held) if self._close else self._answer(held)
+        return self.feed_thinking(held) if self._close else self._answer(held)
 
     def _take(self, size: int) -> str:
         taken, self._held = self._held[:size], self._held[size:]
@@ -264,7 +265,7 @@ class _RoundText:
         self.text += text
         return [TextDelta(text)] if text else []
 
-    def thought(self, text: str) -> List[RoundEvent]:
+    def feed_thinking(self, text: str) -> List[RoundEvent]:
         self.thinking += text
         return [ReasoningDelta(text)] if text else []
 

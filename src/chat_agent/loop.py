@@ -244,14 +244,15 @@ def _max_tokens(
 
 
 async def _round_with_fallback(
-    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]], request: List[Dict[str, Any]],
     tool_schemas: Sequence[Dict[str, Any]], history_start: int, current: Dict[str, Any],
 ) -> AsyncIterator[Union[RoundEvent, Fallback, LevelRefused]]:
     """One round on the turn's current candidate; a failure before any output
     with an eligible status moves to the next candidate (spec #44 Providers).
     A failure after output passes through: switching would repeat streamed text.
-    A fallback whose window the history exceeds gets it compacted once
-    (``history_start`` and ``current``: see transcript.fit_request)."""
+    ``request`` is ``conversation`` as the overflow gate let it through; a
+    fallback starts again from ``conversation``, compacted once when its window
+    is exceeded (``history_start`` and ``current``: see transcript.fit_request)."""
     candidates = turn.candidates
     start = next(i for i, candidate in enumerate(candidates) if candidate.endpoint == endpoint)
     failures: List[Dict[str, Any]] = []
@@ -259,9 +260,10 @@ async def _round_with_fallback(
     level = store.chat_setting(turn.owner, turn.session_id, store.THINKING_LEVEL)
     for index in range(start, len(candidates)):
         candidate = candidates[index]
-        request = conversation if index == start else await transcript.fit_request(
-            conversation, history_start, current, candidate.endpoint, turn.owner,
-        )
+        if index != start:
+            # The gate's trim was for the failed model's window, and later
+            # rounds continue from this request: never a trimmed copy.
+            request = await transcript.fit_request(conversation, history_start, current, candidate.endpoint, turn.owner)
         # Per candidate: a fallback model takes its own set of levels.
         thinking = (await capabilities.thinking_levels(
             candidate.endpoint.url, candidate.endpoint.model, candidate.endpoint.headers,
@@ -498,7 +500,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             # Leaving the block closes the provider stream, so a tripped
             # guard stops the server generating at once.
             async with aclosing(_round_with_fallback(
-                turn, endpoint, request, round_tools, history_start, current,
+                turn, endpoint, conversation, request, round_tools, history_start, current,
             )) as round_events:
                 async for event in round_events:
                     if isinstance(event, Fallback):
@@ -554,7 +556,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     if not calls and record.stop_reason is None and not record.round_texts[-1].strip():
                         failure, saved = ProviderError(502, f"{endpoint.model} returned no answer"), True
                         # Whitespace is not an answer; the thinking stays.
-                        round_record["blocks"] = [b for b in end.blocks if b["type"] != "text"]
+                        round_record["blocks"] = _without_text(end.blocks)
                     break
                 conversation.append({"role": "assistant", "blocks": end.blocks})
                 _join_steers(record, conversation, auto, steers.take())
@@ -796,10 +798,14 @@ def _output_limit(
         return ProviderError(502, OUTPUT_LIMIT_TOOL_CALL.format(model=model))
     if not "".join(b["text"] for b in blocks if b["type"] == "text").strip():
         # Takes the place of the empty-answer error; whitespace is not an answer.
-        round_record["blocks"] = [b for b in blocks if b["type"] != "text"]
+        round_record["blocks"] = _without_text(blocks)
         return ProviderError(502, OUTPUT_LIMIT_THINKING.format(model=model))
     record.notice = OUTPUT_LIMIT_NOTICE
     return None
+
+
+def _without_text(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [b for b in blocks if b["type"] != "text"]
 
 
 def _finish_failed_turn(writer: transcript.TurnWriter, error: Optional[str] = None, *, save: bool = False) -> None:

@@ -131,7 +131,7 @@ async def _turn_payload(harness, monkeypatch, url, model, level, routes=None):
 
     store.set_chat_runtime("alice", store.RUNTIME_NEW)
     if level is not None:
-        store.set_chat_setting("alice", "session-1", store.THINKING_LEVEL, level)
+        store.set_chat_settings("alice", "session-1", {store.THINKING_LEVEL: level})
     harness.session.endpoint_url, harness.session.model = url, model
 
     def chat(request):

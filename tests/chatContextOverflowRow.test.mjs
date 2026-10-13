@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
-  OVERFLOW_OPTIONS, createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities,
+  OVERFLOW_OPTIONS, CAPABILITIES_CHANGED, createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities,
 } from '../static/js/chatAgentSettings.js';
 
 // Context overflow row of the chat context panel (spec #89, ticket #100).
@@ -71,6 +71,22 @@ test('choosing a value saves it; a failed save puts the old value back', async (
   assert.equal(sel.disabled, false);
 });
 
+test('refresh(sid) reads both routes: the new runtime enables the row, a legacy route greys it', async () => {
+  let route = 'chat_agent';
+  const fetchers = {
+    fetchSettings: async () => ({ available: true, context_overflow: 'rolling_window' }),
+    fetchCapabilities: async () => ({ route, reason: '' }),
+  };
+  const { el, refresh } = createOverflowRow({ doc: fakeDoc(), onChange: async () => true, ...fetchers });
+  await refresh('s1');
+  assert.equal(select(el).value, 'rolling_window');
+  assert.equal(select(el).disabled, false);
+  // The turn just learned the model takes no native tools: the next one is legacy.
+  route = 'legacy';
+  await refresh('s1');
+  assert.equal(select(el).disabled, true);
+});
+
 test('fetchChatAgentSettings reads the GET settings route for the chat', async () => {
   const calls = [];
   globalThis.fetch = async (url, opts) => { calls.push(url); return { ok: true, json: async () => ({ available: true, context_overflow: 'rolling_window' }) }; };
@@ -96,4 +112,8 @@ test('chat.js mounts the overflow row before the Memory extraction row', () => {
 });
 test('chat.js shows a toast for the live trimmed event', () => {
   assert.match(chat, /json\.type === 'trimmed'[\s\S]{0,300}showToast\(json\.message/);
+});
+test('chat.js re-reads the open row when a turn changes what the model takes', () => {
+  assert.match(chat, /const rereadOverflow = [\s\S]{0,300}overflow\.refresh[\s\S]{0,100}addEventListener\(CAPABILITIES_CHANGED, rereadOverflow\)/);
+  assert.equal(CAPABILITIES_CHANGED, 'odysseus:chat-agent-capabilities-changed');
 });

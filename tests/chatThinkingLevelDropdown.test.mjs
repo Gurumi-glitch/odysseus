@@ -122,10 +122,12 @@ test('refresh with no chat yet (pending) or failed routes leaves the control gre
 const chat = await readFile(new URL('../static/js/chat.js', import.meta.url), 'utf8');
 const picker = await readFile(new URL('../static/js/modelPicker.js', import.meta.url), 'utf8');
 test('chat.js turns thinking_level_refused into a notice in the turn and a refresh event', () => {
-  assert.match(chat, /json\.type === 'thinking_level_refused'[\s\S]{0,900}json\.message/);
-  assert.match(chat, /odysseus:thinking-level-refused/);
+  assert.match(chat, /json\.type === 'thinking_level_refused'[\s\S]{0,900}json\.message[\s\S]{0,400}CAPABILITIES_CHANGED/);
 });
-test('modelPicker mounts the control in the picker wrap and refreshes on picker update and refusal', () => {
+test('chat.js also sends the refresh event when a turn ends on an error (a tools rejection is one)', () => {
+  assert.match(chat, /_streamTerminalError = createTerminalStreamError\(json\);[\s\S]{0,300}dispatchEvent\(new CustomEvent\(CAPABILITIES_CHANGED\)\)/);
+});
+test('modelPicker mounts the control in the picker wrap and refreshes on picker update and the refresh event', () => {
   assert.match(picker, /createThinkingLevelSelect/);
-  assert.match(picker, /odysseus:thinking-level-refused/);
+  assert.match(picker, /addEventListener\(CAPABILITIES_CHANGED/);
 });

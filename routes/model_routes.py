@@ -1014,7 +1014,7 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.chat_agent.capabilities import forget_endpoint
     from src.endpoint_resolver import resolve_url
-    # A refresh is when a reloaded or swapped model must be re-detected (#89).
+    # Every model-list probe is a fresh read: a reloaded or swapped model is re-detected (#89).
     forget_endpoint(base_url)
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))

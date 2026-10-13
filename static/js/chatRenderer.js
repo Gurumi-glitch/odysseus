@@ -3484,6 +3484,9 @@ export function addMessage(role, content, modelName, metadata) {
     // row renders content.
     const agentRuntimeRow = role === 'assistant' && metadata?.runtime === CHAT_AGENT_RUNTIME
       && Array.isArray(metadata.round_texts) && metadata.round_texts.length > 0;
+    // A failed chat_agent turn's stored error text (spec #89), or false.
+    const storedError = metadata?.runtime === CHAT_AGENT_RUNTIME && metadata.stop_reason === 'error'
+      && typeof metadata.error === 'string' && metadata.error;
     if (
       role === 'assistant'
       && metadata
@@ -3748,8 +3751,7 @@ export function addMessage(role, content, modelName, metadata) {
           ask_expired: '[Stopped: the question was not answered]',
           error: '[The turn failed]',
         };
-        // The stored error text (spec #89) is more useful than the generic label.
-        const storedError = metadata.stop_reason === 'error' && typeof metadata.error === 'string' && metadata.error;
+        // The stored error text is more useful than the generic label.
         box.appendChild(renderTurnNote(storedError || stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`));
       }
       // A mid-answer output-limit cut keeps its text; the notice sits under it.
@@ -3993,8 +3995,6 @@ export function addMessage(role, content, modelName, metadata) {
       // and "cancelled before any content" — the latter has no Continue affordance.
       // A chat_agent round-1 failure saves a row with no rounds to replay; it
       // lands here and shows the stored error (spec #89).
-      const storedError = metadata.runtime === CHAT_AGENT_RUNTIME && metadata.stop_reason === 'error'
-        && typeof metadata.error === 'string' && metadata.error;
       stoppedLabel.textContent = metadata.cancelled
         ? '[Cancelled by user]'
         : (storedError || '[Message interrupted]');

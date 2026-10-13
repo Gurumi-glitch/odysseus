@@ -27,10 +27,18 @@ from typing import Any, Dict, List, Optional, Union
 from src.llm_core import _detect_provider, _host_match
 
 XAI = "xai"
+# The chat's Off thinking level; every dialect spells it "none" on its effort scale (spec #89).
+THINKING_OFF = "off"
+OFF_EFFORT = "none"
 
 
 def provider_key(url: str) -> str:
     return XAI if _host_match(url, "x.ai") else _detect_provider(url)
+
+
+def wire_effort(level: str) -> str:
+    """A thinking level as the effort value a request carries."""
+    return OFF_EFFORT if level == THINKING_OFF else level
 
 
 @dataclass(frozen=True)
