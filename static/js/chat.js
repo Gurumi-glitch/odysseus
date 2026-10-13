@@ -37,6 +37,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { createOverflowRow, fetchChatAgentSettings, fetchChatAgentCapabilities, saveChatAgentSetting } from './chatAgentSettings.js?v=20261013overflow1';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';
 
@@ -409,6 +410,18 @@ import { invalidateSettings } from './appConfig.js';
 	      popup.appendChild(row);
 	    });
 
+    // Above Memory extraction. The routes answer after the popup is drawn, so
+    // the row starts greyed and fills in; a detached popup is harmless to update.
+    const overflow = createOverflowRow({ onChange: _setChatContextOverflow });
+    popup.appendChild(overflow.el);
+    _resolveCurrentSessionId().then(async (sid) => {
+      if (!sid) return;
+      const [settings, caps] = await Promise.all([fetchChatAgentSettings(sid), fetchChatAgentCapabilities(sid)]);
+      // Grey unless both routes say the new runtime answers this chat.
+      const legacy = !settings || settings.context_overflow === undefined || !caps || caps.route === 'legacy';
+      overflow.update({ value: settings?.context_overflow, legacy });
+    });
+
 	    const memoryOn = d.memory_extraction_enabled !== false;
 	    const memoryRow = document.createElement('div');
 	    memoryRow.className = 'chat-context-toggle-row';
@@ -645,6 +658,20 @@ import { invalidateSettings } from './appConfig.js';
       _showContextHeaderPopup(pill);
     });
 	  }
+
+  async function _setChatContextOverflow(value) {
+    const sid = await _resolveCurrentSessionId({ adopt: true });
+    if (!sid) {
+      uiModule.showToast('Open a chat first');
+      return false;
+    }
+    const saved = await saveChatAgentSetting(sid, 'context_overflow', value);
+    if (saved === null) {
+      uiModule.showToast('Could not save context overflow; kept the previous setting');
+      return false;
+    }
+    return true;
+  }
 
 	  async function _setChatMemoryExtraction(enabled, toggleBtn, stateText) {
 	    const sid = await _resolveCurrentSessionId({ adopt: true });
@@ -4714,6 +4741,9 @@ import { invalidateSettings } from './appConfig.js';
                 if (!_isBg) {
                   uiModule.showToast('Context compacted — older messages summarized');
                 }
+              } else if (json.type === 'trimmed') {
+                // chat_agent dropped old messages to fit the window; live only, not saved.
+                if (!_isBg) uiModule.showToast(json.message || 'Older messages dropped to fit the window');
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {
                   const d = json.data || {};

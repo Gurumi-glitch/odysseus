@@ -7870,3 +7870,16 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       font-size: 12px; white-space: nowrap; transition: all 0.15s;
       font-family: inherit; width: 100%;
     }
+.chat-context-select {
+  flex: 0 0 auto;
+  max-width: 130px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 6px;
+  padding: 2px 4px;
+}
+.chat-context-overflow-row.disabled { opacity: 0.5; }
+.chat-context-overflow-row.disabled .chat-context-select { cursor: not-allowed; }
