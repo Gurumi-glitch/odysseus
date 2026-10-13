@@ -82,6 +82,8 @@ ASK = "ask"
 # allow rules say; protected is sensitive and asks even in auto mode.
 SENSITIVE = "sensitive"
 PROTECTED = "protected"
+# The table levels that always ask (one spelling for the sets and posture()).
+_ASKING_LEVELS = (SENSITIVE, PROTECTED)
 DENY = "deny"
 # A call whose arguments the executor cannot take; it fails without a gate.
 INVALID = "invalid"
@@ -594,7 +596,7 @@ def session_rule(name: str, content: Any) -> Rule:
 
 # Always ask, whatever the allow rules say (spec #44, Sensitive); protected
 # tools are sensitive too, so they ask even in auto mode (spec #44, Protected).
-_SENSITIVE_TOOLS = frozenset(t for t, level in POSTURE.items() if level in (SENSITIVE, PROTECTED))
+_SENSITIVE_TOOLS = frozenset(t for t, level in POSTURE.items() if level in _ASKING_LEVELS)
 _PROTECTED_TOOLS = frozenset(t for t, level in POSTURE.items() if level == PROTECTED)
 _RAW_API_TOOLS = frozenset({"app_api", "api_call"})
 _READ_METHOD = "GET"
@@ -982,7 +984,7 @@ def posture(name: str, content: Any) -> str:
         return ASK
     level = POSTURE.get(tool)
     # Callers compare against ASK; a table-only level must never read as allow.
-    if level in (SENSITIVE, PROTECTED):
+    if level in _ASKING_LEVELS:
         return ASK
     return level or _derived_posture(capabilities_for_action(canonical_tool(name), content).effects)
 

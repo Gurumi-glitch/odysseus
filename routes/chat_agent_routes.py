@@ -49,10 +49,8 @@ def _settings(user: str) -> dict:
     return {"chat_runtime": runtime, "available": available}
 
 
-def setup_chat_agent_routes(session_manager=None) -> APIRouter:
+def setup_chat_agent_routes(session_manager) -> APIRouter:
     # Full paths, not a router prefix: ask/steer keep their /api/chat paths.
-    # Only steer needs the session manager; the settings-only callers (and
-    # their tests) pass none.
     router = APIRouter(tags=["chat_agent"])
 
     @router.get("/api/chat_agent/settings")

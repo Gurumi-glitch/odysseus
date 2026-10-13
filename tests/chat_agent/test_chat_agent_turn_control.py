@@ -7,6 +7,7 @@ caps write, and Finish (one more round with no tools).
 import pytest
 
 import src.agent_runs as agent_runs
+import src.chat_agent.asks as asks
 import src.settings as settings
 import src.tool_execution as tool_execution
 from tests.chat_agent.test_chat_agent_route import (
@@ -94,6 +95,34 @@ async def test_continue_at_the_repeat_guard_ask_runs_the_call_and_the_turn_goes_
     assert row.content.endswith("Done.")
     assert "stop_reason" not in row.metadata
     assert row.metadata["tool_events"][11]["ask_user"]["resolved"] == "once"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["approve", "ONCE", "", "answer"])
+async def test_an_unknown_repeat_guard_reply_stops_the_turn_like_a_non_continue(
+    monkeypatch, harness, executor, decision,
+):
+    # The reply is injected where the loop receives it, so the loop's own
+    # mapping (anything but "once" stops) is under test, not the HTTP endpoint.
+    calls, _ = executor
+
+    async def reply(session_id, owner, card):
+        return asks.Answer(decision)
+
+    monkeypatch.setattr(asks, "wait", reply)
+    harness.provider_rounds = [_sse_tool_calls(LIST_NOTES) for _ in range(13)]
+
+    async def ignore(card):
+        return None
+
+    body = await send_and_answer(harness, _Request("agent"), ignore)
+
+    assert len(calls) == 11
+    assert _outputs(body)[-1]["exit_code"] == 126
+    [stop] = [e for e in _data_events(body) if e.get("type") == "loop_breaker_triggered"]
+    assert stop["reason"] == "repeat_guard"
+    [row] = harness.saved
+    assert row.metadata["stop_reason"] == "repeat_guard"
 
 
 @pytest.mark.asyncio

@@ -141,7 +141,7 @@ def panel(monkeypatch, tmp_path):
     monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
     monkeypatch.setattr(constants, "INSTRUCTIONS_DIR", str(tmp_path / "instructions"))
     monkeypatch.setenv("AUTH_ENABLED", "true")
-    router = setup_chat_agent_routes()
+    router = setup_chat_agent_routes(SimpleNamespace())
     return {
         method: next(
             route.endpoint for route in router.routes

@@ -33,7 +33,7 @@ def _request(user="alice", *, headers=None, api_token=False):
 
 
 def _endpoint(method):
-    router = setup_chat_agent_routes()
+    router = setup_chat_agent_routes(SimpleNamespace())
     return next(
         route.endpoint for route in router.routes
         if route.path == "/api/chat_agent/settings" and method in route.methods
@@ -99,7 +99,7 @@ async def test_switch_is_unavailable_when_auth_is_disabled(monkeypatch, _store_d
 
 
 def _rules_endpoint(method):
-    router = setup_chat_agent_routes()
+    router = setup_chat_agent_routes(SimpleNamespace())
     return next(
         route.endpoint for route in router.routes
         if route.path == "/api/chat_agent/rules" and method in route.methods

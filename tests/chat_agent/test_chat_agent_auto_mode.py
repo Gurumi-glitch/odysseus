@@ -320,7 +320,7 @@ def test_the_model_cannot_toggle_auto_mode_through_ui_control():
 async def test_the_composer_reads_a_chats_paused_state(harness):
     from routes.chat_agent_routes import setup_chat_agent_routes
 
-    [get_auto_mode] = [r.endpoint for r in setup_chat_agent_routes().routes
+    [get_auto_mode] = [r.endpoint for r in setup_chat_agent_routes(SimpleNamespace()).routes
                        if r.path == "/api/chat_agent/auto_mode/{session_id}"]
     store.set_auto_mode_denials("alice", "session-1", classifier.PAUSE_AFTER_DENIALS_IN_A_ROW, 3)
 
