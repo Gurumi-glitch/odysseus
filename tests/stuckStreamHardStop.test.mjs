@@ -76,13 +76,13 @@ function buildChat(overrides = {}) {
       getElementById: () => null,
       body: { classList: { toggle() {} } },
     };
-    var uiModule = { el: () => null, showToast: () => {}, showError: () => {} };
+    var uiModule = { el: id => (id === 'message' ? scope.composer || null : null), showToast: () => {}, showError: () => {} };
     var sessionModule = { getCurrentSessionId: () => scope.currentSessionId, markStreaming() {}, clearStreaming() {} };
     var _setForegroundChatBusy = active => scope.calls.push(['busy', !!active]);
     var _startStallWatchdog = () => scope.calls.push(['watchdog', 'start']);
     var _stopStallWatchdog = () => scope.calls.push(['watchdog', 'stop']);
     var _stopExactRun = () => { throw new Error('server stop must not be posted here'); };
-    var handleChatSubmit = scope.handleChatSubmit || (async () => scope.calls.push(['submit']));
+    var handleChatSubmit = async () => scope.calls.push(['submit', scope.composer ? scope.composer.value : undefined]);
     var _sendQueuedWhenIdle = item => scope.calls.push(['send-when-idle', item && item.message]);
     var console = { error() {} };
     ${chatSource}
@@ -92,6 +92,7 @@ function buildChat(overrides = {}) {
       get streamSessionId() { return _streamSessionId; },
       resumingStreams: _resumingStreams, streamRunIds: _streamRunIds, streamRuntimes: _streamRuntimes,
       setStreamSessionId(v) { _streamSessionId = v; },
+      setSendInFlight(v) { _sendInFlight = !!v; },
     };
   `;
   const mod = new Function('scope', body)(scope);
@@ -192,8 +193,42 @@ test('send-now on a queued bubble stops through the submit handler, never the se
   await Promise.resolve();
 
   assert.equal(clicked, 0);
-  assert.deepEqual(calls.filter(c => c[0] !== 'busy' && c[0] !== 'watchdog'), [['submit'], ['send-when-idle', 'hello']]);
+  assert.deepEqual(calls.filter(c => c[0] !== 'busy' && c[0] !== 'watchdog'), [['submit', undefined], ['send-when-idle', 'hello']]);
   assert.equal(scope.queued.length, 0);
+});
+
+function fakeComposer(value) {
+  const events = [];
+  return { value, events, dispatchEvent(ev) { events.push(ev.type); } };
+}
+
+test('send-now clears a draft before stopping, so the stop branch runs instead of answering an ask', async () => {
+  const composer = fakeComposer('a draft that would answer the waiting ask');
+  const { mod, scope, sendBtn, calls } = buildChat({ currentSessionId: 'A', composer });
+  scope.queued.push({ id: 'q1', message: 'hello', createdAt: 1, sessionId: 'A', el: null });
+  mod.updateSubmitButton('streaming', sendBtn);
+  calls.length = 0;
+
+  mod._promoteQueuedRequest('q1');
+  await Promise.resolve();
+
+  assert.deepEqual(calls.filter(c => c[0] === 'submit'), [['submit', '']], 'the composer is empty when the submit handler runs');
+  assert.deepEqual(composer.events, ['input']);
+});
+
+test('send-now with only a send in flight waits it out and never submits', async () => {
+  const composer = fakeComposer('typed meanwhile');
+  const { mod, scope, calls } = buildChat({ currentSessionId: 'A', composer });
+  scope.queued.push({ id: 'q1', message: 'hello', createdAt: 1, sessionId: 'A', el: null });
+  mod.setSendInFlight(true);
+  assert.equal(mod.isStreaming, false);
+
+  mod._promoteQueuedRequest('q1');
+  await Promise.resolve();
+
+  assert.deepEqual(calls.filter(c => c[0] === 'submit'), [], 'a submit here would be a second send of the composer text');
+  assert.deepEqual(calls.filter(c => c[0] === 'send-when-idle'), [['send-when-idle', 'hello']]);
+  assert.equal(composer.value, '');
 });
 
 test('removing a deleted session from local state forgets its streams first', () => {

@@ -1761,11 +1761,21 @@ import { invalidateSettings } from './appConfig.js';
       return;
     }
     try { uiModule.showToast && uiModule.showToast('Sending queued request now'); } catch (_) {}
+    // An empty composer keeps the submit handler on its stop branch: a draft
+    // would answer a waiting ask instead (and the queued message replaces it).
+    const input = uiModule.el('message');
+    if (input) {
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     // Stop through the submit handler itself: the send button dispatches on
     // its visual mode, and an idle-looking button with an empty composer is
-    // the New Chat button, which wiped the chat instead of stopping.
-    window.__odysseusQueueStreamingSubmit = 0;
-    handleChatSubmit({ preventDefault() {} }).catch(err => console.error('queued promote stop failed', err));
+    // the New Chat button, which wiped the chat instead of stopping. A send
+    // still in flight has nothing to stop; _sendQueuedWhenIdle waits it out.
+    if (isStreaming) {
+      window.__odysseusQueueStreamingSubmit = 0;
+      handleChatSubmit({ preventDefault() {} }).catch(err => console.error('queued promote stop failed', err));
+    }
     _sendQueuedWhenIdle(item);
   }
 
