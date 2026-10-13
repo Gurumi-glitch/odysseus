@@ -371,6 +371,7 @@ function _deselectCurrentSession(sid) {
 function _removeSessionFromLocalState(sid) {
   if (!sid) return;
   const id = String(sid);
+  if (window.chatModule && window.chatModule.forgetSessionStreams) window.chatModule.forgetSessionStreams(id);
   sessions = sessions.filter(s => String(s.id) !== id);
   _selectedIds.delete(id);
   try {
@@ -1456,6 +1457,7 @@ function _renderSessionListImpl() {
         try {
           await fetch(_sessionDeletionUrl(s.id), { method: 'DELETE' });
           _deselectCurrentSession(s.id);
+          if (window.chatModule && window.chatModule.forgetSessionStreams) window.chatModule.forgetSessionStreams(s.id);
         } catch (err) {
           console.error('Failed to delete session:', s.id, err);
         }
@@ -1568,6 +1570,7 @@ function _renderSessionListImpl() {
         try {
           await fetch(_sessionDeletionUrl(s.id), { method: 'DELETE' });
           _deselectCurrentSession(s.id);
+          if (window.chatModule && window.chatModule.forgetSessionStreams) window.chatModule.forgetSessionStreams(s.id);
         } catch (err) {
           console.error('Failed to delete session:', s.id, err);
         }
@@ -1848,6 +1851,7 @@ function _initBulkSelect() {
         try {
           const res = await fetch(_sessionDeletionUrl(sid), { method: 'DELETE' });
           if (res.ok) deletedIds.push(sid);
+          if (res.ok && window.chatModule && window.chatModule.forgetSessionStreams) window.chatModule.forgetSessionStreams(sid);
         } catch (_) {}
       }
       await _animateSessionRowsRemoving(deletedIds, '#session-list .list-item[data-session-id]');
