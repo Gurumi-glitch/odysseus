@@ -848,9 +848,6 @@ import { invalidateSettings } from './appConfig.js';
     } catch (_) {}
   }
   let _pendingContinue = null; // Stores the stopped AI element to merge with new response
-  // The next send's form field `source`: 'continue' after a capped chat_agent
-  // turn, so its user row records metadata.source (spec #44 Transcript).
-  let _pendingTurnSource = '';
   function _createChatSendPerf() {
     const started = (performance && performance.now) ? performance.now() : Date.now();
     let last = started;
@@ -1790,14 +1787,6 @@ import { invalidateSettings } from './appConfig.js';
     return true;
   }
 
-  // budget_exceeded.kind is tokens | cost | tool_calls; a missing kind keeps
-  // the legacy tool-call text (spec #44, Stream events).
-  function _budgetExceededText(json) {
-    if (json.kind === 'tokens') return 'Token budget reached';
-    if (json.kind === 'cost') return 'Cost budget reached';
-    return `Tool budget reached (${json.used}/${json.limit} calls)`;
-  }
-
   export function queueStreamingComposerRequest() {
     if (!isStreaming) return false;
     const queuedInput = uiModule.el('message');
@@ -2699,10 +2688,8 @@ import { invalidateSettings } from './appConfig.js';
 	        fd.append('invoked_skill', window.__odysseusPendingInvokedSkill);
 	        window.__odysseusPendingInvokedSkill = '';
 	      }
-	      if (_pendingTurnSource) {
-	        fd.append('source', _pendingTurnSource);
-	        _pendingTurnSource = '';
-	      }
+	      const _turnSource = chatRenderer.takePendingTurnSource();
+	      if (_turnSource) fd.append('source', _turnSource);
 	      if (el('web-toggle').checked) {
 	        if (!isAgentMode) {
 	          fd.append('use_web', 'true');
@@ -4589,7 +4576,19 @@ import { invalidateSettings } from './appConfig.js';
                     }
                   }
                 }
-              } else if (json.type === 'rounds_exhausted' || (json.type === 'budget_exceeded' && streamRuntime === 'chat_agent')) {
+              } else if (streamRuntime === 'chat_agent' && (json.type === 'rounds_exhausted' || json.type === 'budget_exceeded')) {
+                // A capped chat_agent turn: the renderer's note, at the bottom
+                // of the chat-history container like the legacy one below.
+                const _chatBox = document.getElementById('chat-history');
+                if (!_isBg && _chatBox) {
+                  _cancelThinkingTimer();
+                  _removeThinkingSpinner();
+                  _chatBox.querySelector('.rounds-exhausted')?.remove();
+                  const note = chatRenderer.renderTurnStopNote(json.type === 'budget_exceeded' ? 'budget' : 'max_rounds', json);
+                  _chatBox.appendChild(note);
+                  try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
+                }
+              } else if (json.type === 'rounds_exhausted') {
                 // The agent hit the per-turn step limit while still working.
                 // Offer a Continue button instead of stalling silently.
                 // NOTE: append to the chat-history container (bottom), NOT the
@@ -4597,8 +4596,6 @@ import { invalidateSettings } from './appConfig.js';
                 // finalize, which would wipe a note placed inside it.
                 const _chatBox = document.getElementById('chat-history');
                 if (!_isBg && _chatBox) {
-                  _cancelThinkingTimer();
-                  _removeThinkingSpinner();
                   // Drop any prior box so repeated cap-hits each get a fresh
                   // Continue at the bottom (multiple continues in a row).
                   const _old = _chatBox.querySelector('.rounds-exhausted');
@@ -4607,9 +4604,7 @@ import { invalidateSettings } from './appConfig.js';
                   note.className = 'stopped-indicator rounds-exhausted';
                   const label = document.createElement('span');
                   label.className = 'rounds-exhausted-label';
-                  label.textContent = json.type === 'budget_exceeded'
-                    ? `${_budgetExceededText(json)} — not finished.`
-                    : `Reached the ${json.rounds || ''}-step limit — not finished.`;
+                  label.textContent = `Reached the ${json.rounds || ''}-step limit — not finished.`;
                   note.appendChild(label);
                   const contBtn = document.createElement('button');
                   contBtn.className = 'continue-btn';
@@ -4618,20 +4613,11 @@ import { invalidateSettings } from './appConfig.js';
                   const _holder = holder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
-                    // On chat_agent, Continue is a new turn with its own user
-                    // bubble; the legacy merge into the capped bubble is never
-                    // used (spec #44 Transcript, #65).
-                    if (streamRuntime !== 'chat_agent') {
-                      _hideUserBubble = true;
-                      _pendingContinue = _holder;
-                    } else {
-                      _pendingTurnSource = 'continue';
-                    }
+                    _hideUserBubble = true;
+                    _pendingContinue = _holder;
                     const msgInput = uiModule.el('message');
                     if (msgInput) {
-                      msgInput.value = streamRuntime === 'chat_agent'
-                        ? 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.'
-                        : 'You hit the step limit before finishing — the task is not complete. Continue from exactly where you left off and keep going until it is done. Do NOT repeat work already done.';
+                      msgInput.value = 'You hit the step limit before finishing — the task is not complete. Continue from exactly where you left off and keep going until it is done. Do NOT repeat work already done.';
                       const sb = document.querySelector('.send-btn');
                       if (sb) sb.click();
                     }
@@ -5278,7 +5264,7 @@ import { invalidateSettings } from './appConfig.js';
                 _removeThinkingSpinner();
                 const budgetDiv = document.createElement('div');
                 budgetDiv.style.cssText = 'font-size:11px;opacity:0.6;font-style:italic;padding:4px 8px;margin:4px 0;';
-                budgetDiv.textContent = `${_budgetExceededText(json)}. Agent stopped.`;
+                budgetDiv.textContent = `Tool budget reached (${json.used}/${json.limit} calls). Agent stopped.`;
                 const chatBox = document.getElementById('chat-history');
                 chatBox.appendChild(budgetDiv);
 

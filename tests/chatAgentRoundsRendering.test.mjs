@@ -62,7 +62,7 @@ async function setup() {
     window.applyModelRouteEventState = (await import('/static/js/chatModelProvenance.js')).applyModelRouteEventState;
     window.createTerminalStreamError = (await import('/static/js/chatStreamErrors.js')).createTerminalStreamError;
     window.generatedImageResult = (await import('/static/js/generatedImageResult.js')).generatedImageResult;
-    const cards = new Function(askCards + '\nreturn { renderSteerBubble, renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards };')();
+    const cards = new Function(askCards + '\nreturn { renderSteerBubble, renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards, renderTurnStopNote, takePendingTurnSource };')();
     Object.assign(window, cards);
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
@@ -147,6 +147,55 @@ test('history: stop reasons — max_rounds offers Continue as a new turn, interr
     assert.ok(result.composer.length > 0);
     assert.equal(result.sends, 1);
     assert.deepEqual(result.interrupted, ['ai:Half', 'tools:cancelled!', 'stop:[Message interrupted]']);
+  } finally { await page.close(); }
+});
+
+const CONTINUE_TEXT = 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.';
+
+test('history: Continue on a capped row marks the next send as a continuation (source=continue), as the live note does', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(([meta, content]) => {
+      addMessage('assistant', content, 'test', { ...meta, stop_reason: 'max_rounds' });
+      const before = takePendingTurnSource();
+      document.querySelector('.stopped-indicator .continue-btn').click();
+      // The marker belongs to the one send Continue triggers: read once, then gone.
+      return { before, source: takePendingTurnSource(), again: takePendingTurnSource(), sends: window.sends, composer: document.getElementById('message').value, notes: document.querySelectorAll('.stopped-indicator').length };
+    }, [threeRounds, content]);
+    assert.deepEqual(result, { before: '', source: 'continue', again: '', sends: 1, composer: CONTINUE_TEXT, notes: 0 });
+  } finally { await page.close(); }
+});
+
+test('one renderer: the live round-cap note, the live budget note and the history notes are the same DOM apart from the label words', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(([meta, content]) => {
+      const box = document.querySelector('#chat-history');
+      const history = stopReason => { box.replaceChildren(); addMessage('assistant', content, 'test', { ...meta, stop_reason: stopReason }); return box.querySelector('.stopped-indicator'); };
+      // The live stream passes the cap event (loop.py: rounds_exhausted carries rounds, budget_exceeded used/limit).
+      const notes = {
+        liveRounds: renderTurnStopNote('max_rounds', { type: 'rounds_exhausted', rounds: 10 }),
+        liveBudget: renderTurnStopNote('budget', { type: 'budget_exceeded', kind: 'tool_calls', used: 8, limit: 8 }),
+        historyRounds: history('max_rounds'),
+        historyBudget: history('budget'),
+      };
+      const shape = note => { const copy = note.cloneNode(true); copy.querySelector('.rounds-exhausted-label').textContent = '*'; return copy.outerHTML; };
+      const shapes = Object.values(notes).map(shape);
+      const labels = Object.fromEntries(Object.entries(notes).map(([k, n]) => [k, n.querySelector('.rounds-exhausted-label').textContent]));
+      // Continue on the live-shaped note takes the same path as history: marker, composer text, send.
+      box.replaceChildren(notes.liveBudget);
+      notes.liveBudget.querySelector('.continue-btn').click();
+      return { shape: shapes[0], same: shapes.every(s => s === shapes[0]), labels, source: takePendingTurnSource(), composer: document.getElementById('message').value, sends: window.sends };
+    }, [threeRounds, content]);
+    assert.equal(result.shape, '<div class="stopped-indicator rounds-exhausted"><span class="rounds-exhausted-label">*</span><button class="continue-btn" title="Continue the task in a new turn">Continue ▸</button></div>');
+    assert.ok(result.same);
+    assert.deepEqual(result.labels, {
+      liveRounds: 'Reached the 10-step limit — not finished.',
+      liveBudget: 'Tool budget reached (8/8 calls) — not finished.',
+      historyRounds: 'Reached the step limit — not finished.',
+      historyBudget: 'Reached the tool budget — not finished.',
+    });
+    assert.deepEqual({ source: result.source, composer: result.composer, sends: result.sends }, { source: 'continue', composer: CONTINUE_TEXT, sends: 1 });
   } finally { await page.close(); }
 });
 

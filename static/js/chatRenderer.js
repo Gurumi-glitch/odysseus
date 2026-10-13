@@ -3399,6 +3399,57 @@ export function renderAskUserCard(payload, options) {
   return card;
 }
 
+// Set by a turn-stop note's Continue; handleChatSubmit reads it once into the
+// form's `source` field, so a continuation is marked from the live note and
+// from a reloaded row alike (spec #44 Transcript, #65).
+let _pendingTurnSource = '';
+
+/** The source of the next composer send ('continue' after Continue), consumed by the read. */
+export function takePendingTurnSource() {
+  const source = _pendingTurnSource;
+  _pendingTurnSource = '';
+  return source;
+}
+
+// The live event carries the numbers (rounds; used/limit); a stored row only
+// its stop_reason, so history keeps the generic wording.
+function _turnStopLabel(stopReason, detail) {
+  if (stopReason === 'budget') {
+    return detail.limit == null ? 'Reached the tool budget — not finished.' : `Tool budget reached (${detail.used}/${detail.limit} calls) — not finished.`;
+  }
+  return detail.rounds ? `Reached the ${detail.rounds}-step limit — not finished.` : 'Reached the step limit — not finished.';
+}
+
+/**
+ * The note a capped chat_agent turn ends with (stop_reason max_rounds or
+ * budget): why it stopped, plus Continue, which is a new turn marked
+ * source=continue (never the legacy merge). Both the live stream and
+ * history draw it here so the two cannot drift. `detail` is the live cap
+ * event's numbers; omitted for a stored row.
+ */
+export function renderTurnStopNote(stopReason, detail = {}) {
+  const note = document.createElement('div');
+  note.className = 'stopped-indicator rounds-exhausted';
+  const label = document.createElement('span');
+  label.className = 'rounds-exhausted-label';
+  label.textContent = _turnStopLabel(stopReason, detail);
+  note.appendChild(label);
+  const contBtn = document.createElement('button');
+  contBtn.className = 'continue-btn';
+  contBtn.title = 'Continue the task in a new turn';
+  contBtn.textContent = 'Continue ▸';
+  contBtn.addEventListener('click', () => {
+    note.remove();
+    const msgInput = document.getElementById('message');
+    if (!msgInput) return;
+    _pendingTurnSource = 'continue';
+    msgInput.value = 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.';
+    document.querySelector('.send-btn')?.click();
+  });
+  note.appendChild(contBtn);
+  return note;
+}
+
 /**
  * Add a message to the chat history.
  */
@@ -3677,38 +3728,21 @@ export function addMessage(role, content, modelName, metadata) {
         }
       }
 
-      if (agentRuntimeRow && metadata.stop_reason) {
-        // Why the turn ended early (transcript.STOP_*). A capped turn offers
-        // Continue, which is a new turn: never the legacy merge (spec #44).
+      if (agentRuntimeRow && (metadata.stop_reason === 'max_rounds' || metadata.stop_reason === 'budget')) {
+        box.appendChild(renderTurnStopNote(metadata.stop_reason));
+      } else if (agentRuntimeRow && metadata.stop_reason) {
+        // Why the turn ended early (transcript.STOP_*); nothing to continue.
         const stopLabels = {
           interrupted: '[Message interrupted]',
-          max_rounds: 'Reached the step limit — not finished.',
-          budget: 'Reached the tool budget — not finished.',
           repeat_guard: '[Agent guard: the same call repeated]',
           ask_expired: '[Stopped: the question was not answered]',
           error: '[The turn failed]',
         };
-        const capped = metadata.stop_reason === 'max_rounds' || metadata.stop_reason === 'budget';
         const note = document.createElement('div');
-        note.className = 'stopped-indicator' + (capped ? ' rounds-exhausted' : '');
+        note.className = 'stopped-indicator';
         const label = document.createElement('span');
-        if (capped) label.className = 'rounds-exhausted-label';
         label.textContent = stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`;
         note.appendChild(label);
-        if (capped) {
-          const contBtn = document.createElement('button');
-          contBtn.className = 'continue-btn';
-          contBtn.title = 'Continue the task in a new turn';
-          contBtn.textContent = 'Continue ▸';
-          contBtn.addEventListener('click', () => {
-            note.remove();
-            const msgInput = document.getElementById('message');
-            if (!msgInput) return;
-            msgInput.value = 'Continue from exactly where you left off and keep going until the task is done. Do not repeat work already done.';
-            document.querySelector('.send-btn')?.click();
-          });
-          note.appendChild(contBtn);
-        }
         box.appendChild(note);
       }
 
@@ -4129,6 +4163,8 @@ const chatRenderer = {
   answerChatAsk,
   hasPendingAsk,
   answerPendingAskFromComposer,
+  renderTurnStopNote,
+  takePendingTurnSource,
   renderSteerBubble,
   buildSourcesBox,
   buildFindingsBox,
