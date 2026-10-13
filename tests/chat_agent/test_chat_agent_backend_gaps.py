@@ -1,5 +1,6 @@
 """Backend gaps found by the #65 UI pass (spec #44), driven through the chat route."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +45,7 @@ async def test_refused_and_unoffered_calls_get_a_tool_start_before_their_output(
     ]
     first, second = [e for e in events if e.get("type") == "tool_start"]
     assert (first["tool"], first["round"]) == ("web_fetch", 1)
-    assert "example.com" in first["full_command"]
+    assert json.loads(first["full_command"]) == {"url": "https://example.com"}
     assert second["tool"] == "no_such_tool"
 
 
