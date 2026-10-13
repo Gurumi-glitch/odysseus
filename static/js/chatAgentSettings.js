@@ -19,24 +19,32 @@ async function getJson(url) {
 }
 
 // -> {available, chat_runtime, context_overflow?, thinking_level?} or null.
+// No sid (a new chat before its first message): the owner's last-used values.
 export function fetchChatAgentSettings(sid) {
-  return getJson(`/api/chat_agent/settings?session_id=${encodeURIComponent(sid)}`);
+  return getJson(sid ? `/api/chat_agent/settings?session_id=${encodeURIComponent(sid)}` : '/api/chat_agent/settings');
 }
 
 // -> {route: 'chat_agent'|'legacy', reason, thinking: {available, binary, levels}} or null.
 // Shared with the thinking-level control (#101): one place for the fetch.
-export function fetchChatAgentCapabilities(sid) {
-  return getJson(`/api/chat_agent/capabilities/${encodeURIComponent(sid)}`);
+// No sid: keyed by the pending chat's pick ({url, modelId, endpointId}), as its first message will send it.
+export async function fetchChatAgentCapabilities(sid, pending = null) {
+  if (sid) return getJson(`/api/chat_agent/capabilities/${encodeURIComponent(sid)}`);
+  if (!pending?.modelId) return null;
+  const query = new URLSearchParams({
+    model: pending.modelId, endpoint_id: pending.endpointId || '', endpoint_url: pending.url || '',
+  });
+  return getJson(`/api/chat_agent/capabilities?${query}`);
 }
 
 // Returns the new value on success, null when the save was refused.
+// No sid: only the owner's last-used value, which the new chat inherits.
 export async function saveChatAgentSetting(sid, name, value) {
   try {
     const res = await fetch('/api/chat_agent/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ session_id: sid, [name]: value }),
+      body: JSON.stringify(sid ? { session_id: sid, [name]: value } : { [name]: value }),
     });
     return res.ok ? value : null;
   } catch (_) {
@@ -81,14 +89,15 @@ function saveOnChange(sel, onChange) {
   return saved;
 }
 
-// refresh(sid) reads both routes and hands them to apply(settings, caps);
-// an answer for an older call is dropped. No chat yet applies (null, null).
+// refresh(sid, pending) reads both routes and hands them to apply(settings, caps);
+// an answer for an older call is dropped. Without sid the pending chat's pick
+// is asked; with neither, (null, null) applies.
 function latestRoutes(fetchSettings, fetchCapabilities, apply) {
   let seq = 0;
-  return async sid => {
+  return async (sid, pending = null) => {
     const mine = ++seq;
-    if (!sid) { apply(null, null); return; }
-    const [settings, caps] = await Promise.all([fetchSettings(sid), fetchCapabilities(sid)]);
+    if (!sid && !pending) { apply(null, null); return; }
+    const [settings, caps] = await Promise.all([fetchSettings(sid || ''), fetchCapabilities(sid || '', sid ? null : pending)]);
     if (mine === seq) apply(settings, caps);
   };
 }

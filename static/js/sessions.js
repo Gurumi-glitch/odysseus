@@ -5,7 +5,8 @@ import Storage from './storage.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js?v=20260916largetoolscroll1';
 import chatRenderer from './chatRenderer.js?v=20261013turnerr1';
 import { providerLogo } from './providers.js';
-import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20261013review1';
+import { initModelPicker, refreshThinkingLevel, updateModelPicker } from './modelPicker.js?v=20261014pending1';
+import { applyPendingGeneration, dropPendingGeneration } from './pendingChatSettings.js?v=20261014pending1';
 import themeModule from './theme.js?v=20260911organsrain1';
 import spinnerModule from './spinner.js';
 import { actionMenuRank, orderActionMenuItems, SELECT_MENU_ICON } from './actionMenuOrder.js';
@@ -2061,6 +2062,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     if (_pendingChat) {
       _pendingChat = null;
       _pendingMaterializePromise = null;
+      dropPendingGeneration();
     }
     _clearHistoryPager();
     // Re-archive peeked session when navigating away
@@ -2447,6 +2449,8 @@ export function createDirectChat(url, modelId, endpointId, opts = {}) {
 
   // Don't hit the API — just store the model info and prepare the UI
   _pendingChat = { url, modelId, endpointId, source: incomingSource };
+  // A new chat starts at Default, whatever the previous pending chat held.
+  dropPendingGeneration();
   _pendingMaterializePromise = null;
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
@@ -2565,6 +2569,12 @@ export async function materializePendingSession() {
       Storage.set('lastSessionId', payload.id);
       history.replaceState(null, '', '#' + payload.id);
     }
+    // Before the first turn streams: it reads Temperature / Max tokens from the session.
+    if (!(await applyPendingGeneration(payload.id))) {
+      uiModule.showError('Could not save the chat settings chosen before the first message');
+    }
+    // The controls read the pending pick until now; from here they read this chat.
+    refreshThinkingLevel();
 
     // Reload the sidebar in the background. Awaiting this used to block the first
     // prompt in a new/pending chat behind startup fetches and slow /api/sessions

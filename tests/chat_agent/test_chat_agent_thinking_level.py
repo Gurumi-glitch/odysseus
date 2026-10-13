@@ -258,10 +258,9 @@ async def test_level_is_stored_per_chat_and_new_chats_start_with_the_last_used(a
     [
         {"session_id": "chat-1", "thinking_level": "on"},
         {"session_id": "chat-1", "thinking_level": "minimal"},
-        {"thinking_level": "high"},
         {},
     ],
-    ids=["legacy-on", "minimal", "no-chat", "empty"],
+    ids=["legacy-on", "minimal", "empty"],
 )
 async def test_settings_write_validates_the_level(api, body):
     response = await api.put("/api/chat_agent/settings", json=body)
@@ -275,7 +274,8 @@ async def test_runtime_switch_write_still_works_alone(api):
     response = await api.put("/api/chat_agent/settings", json={"chat_runtime": "new"})
 
     assert response.status_code == 200
-    assert response.json() == {"chat_runtime": "new", "available": True}
+    assert response.json() == {"chat_runtime": "new", "available": True,
+                               "thinking_level": "auto", "context_overflow": "auto"}
 
 
 async def _capabilities(api, chat="chat-1", user="alice"):

@@ -242,11 +242,10 @@ async def test_overflow_is_stored_per_chat_and_new_chats_start_with_the_last_use
     "body",
     [
         {"session_id": "chat-1", "context_overflow": "truncate"},
-        {"context_overflow": "rolling_window"},
         # Nothing is written when one of two values is bad.
         {"session_id": "chat-1", "thinking_level": "high", "context_overflow": "drop"},
     ],
-    ids=["unknown", "no-chat", "one-bad-of-two"],
+    ids=["unknown", "one-bad-of-two"],
 )
 async def test_settings_write_validates_the_overflow_policy(api, body):
     response = await _set(api, body)

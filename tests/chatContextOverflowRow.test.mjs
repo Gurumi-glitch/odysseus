@@ -106,7 +106,7 @@ test('fetchChatAgentCapabilities returns the route payload, null on failure', as
 // chat.js wiring: row sits above Memory extraction; trimmed event gets a toast.
 const chat = await readFile(new URL('../static/js/chat.js', import.meta.url), 'utf8');
 test('chat.js mounts the overflow row before the Memory extraction row', () => {
-  const mount = chat.indexOf('overflow.el');
+  const mount = chat.indexOf('// Above Memory extraction.\n    _appendOverflowRow(popup);');
   const memory = chat.indexOf('popup.appendChild(memoryRow)');
   assert.ok(mount > 0 && memory > mount);
 });
@@ -114,6 +114,6 @@ test('chat.js shows a toast for the live trimmed event', () => {
   assert.match(chat, /json\.type === 'trimmed'[\s\S]{0,300}showToast\(json\.message/);
 });
 test('chat.js re-reads the open row when a turn changes what the model takes', () => {
-  assert.match(chat, /const rereadOverflow = [\s\S]{0,300}overflow\.refresh[\s\S]{0,100}addEventListener\(CAPABILITIES_CHANGED, rereadOverflow\)/);
+  assert.match(chat, /const reread = [^\n]*overflow\.refresh[\s\S]{0,300}const rereadOverflow = [\s\S]{0,200}reread\(\)[\s\S]{0,100}addEventListener\(CAPABILITIES_CHANGED, rereadOverflow\)/);
   assert.equal(CAPABILITIES_CHANGED, 'odysseus:chat-agent-capabilities-changed');
 });

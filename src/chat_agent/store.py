@@ -178,15 +178,17 @@ def chat_setting(owner: str, session_id: str, name: str) -> str:
 
 
 def set_chat_settings(owner: str, session_id: str, values: dict) -> None:
-    """Write {name: value} for the chat and as the owner's last-used; every
-    value is checked first, so a bad one (ValueError) writes nothing."""
+    """Write {name: value} for the chat (none: a new chat not created yet)
+    and as the owner's last-used; every value is checked first, so a bad one
+    (ValueError) writes nothing."""
     for name, value in values.items():
         if value not in CHAT_SETTINGS[name]:
             raise ValueError(f"{name} must be one of {', '.join(CHAT_SETTINGS[name])}.")
     data = load(owner)
-    by_chat = _dict(data, "chat_settings")
-    by_chat[session_id] = {**_dict(by_chat, session_id), **values}
-    data["chat_settings"] = by_chat
+    if session_id:
+        by_chat = _dict(data, "chat_settings")
+        by_chat[session_id] = {**_dict(by_chat, session_id), **values}
+        data["chat_settings"] = by_chat
     data["last_chat_settings"] = {**_dict(data, "last_chat_settings"), **values}
     atomic_write_json(store_path(owner), data, indent=2)
 
