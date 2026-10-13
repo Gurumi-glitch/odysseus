@@ -35,8 +35,8 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools, transcript,
-    turn_context,
+    asks, capabilities, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools,
+    transcript, turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
@@ -257,6 +257,12 @@ async def _round_with_fallback(
                 await asyncio.sleep(LLMConfig.RETRY_DELAY)
                 continue
             break
+        if tool_schemas and capabilities.is_tools_rejection(failure.status, failure.message):
+            # A capability problem, not an outage: no fallback, no re-run;
+            # the next turn routes this model to legacy (#79).
+            capabilities.learn_no_native_tools(candidate.endpoint.url, candidate.endpoint.model)
+            yield ProviderError(failure.status, capabilities.NATIVE_TOOLS_REJECTED)
+            return
         if failure.status not in turn.fallback_statuses or index == len(candidates) - 1:
             yield failure
             return

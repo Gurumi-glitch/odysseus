@@ -164,6 +164,8 @@ async def test_stop_keeps_the_thinking_streamed_so_far(harness, monkeypatch):
         await asyncio.Event().wait()
 
     def provider(request):
+        if request.method == "GET":  # the OpenRouter capability probe (#90)
+            return httpx.Response(404)
         return httpx.Response(200, content=thinking_then_silence(), headers={"content-type": "text/event-stream"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(provider))

@@ -457,18 +457,6 @@ async def test_auth_disabled_stays_legacy(harness, monkeypatch):
     assert harness.captured["provider_requests"] == []
 
 
-@pytest.mark.asyncio
-async def test_text_tool_model_stays_legacy(harness):
-    _switch_on()
-    harness.session.endpoint_url = "https://llm.example/v1"
-    harness.session.model = "gpt-oss-120b"
-
-    await harness.send(_Request("agent"))
-
-    assert harness.captured["legacy_agent"] == 1
-    assert harness.captured["provider_requests"] == []
-
-
 class _TextUploads:
     def __init__(self, path):
         self.path = str(path)

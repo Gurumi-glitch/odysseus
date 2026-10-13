@@ -1,0 +1,227 @@
+{
+ "models": [
+  {
+   "type": "llm",
+   "publisher": "sudoingx",
+   "key": "ternary-bonsai-2-27b-ptq1_0-mtp",
+   "display_name": "Ternary Bonsai 2 27B PTQ1 0 Mtp Lean",
+   "architecture": "qwen35",
+   "quantization": null,
+   "size_bytes": 6297658848,
+   "params_string": "27B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": false,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "OS-Software",
+   "key": "ternary-bonsai-2-27b-uncensored-heretic-v2",
+   "display_name": "Ternary Bonsai 2 27B Uncensored Heretic v2 PTQ1 0",
+   "architecture": "qwen35",
+   "quantization": null,
+   "size_bytes": 6877794784,
+   "params_string": "27B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": true,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "chaoliangUNSW",
+   "key": "jev-style-qwen3.5-2b-decision",
+   "display_name": "Jev Style Qwen3.5 2B Decision",
+   "architecture": "qwen35",
+   "quantization": {
+    "name": "BF16",
+    "bits_per_weight": 16
+   },
+   "size_bytes": 3897379936,
+   "params_string": "1.9B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": false,
+    "trained_for_tool_use": false
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "mradermacher",
+   "key": "qwythos-9b-openthoughts-i1",
+   "display_name": "Qwythos 9B Openthoughts I1",
+   "architecture": "qwen35",
+   "quantization": {
+    "name": "Q4_K_S",
+    "bits_per_weight": 4
+   },
+   "size_bytes": 5351630304,
+   "params_string": "9B",
+   "loaded_instances": [],
+   "max_context_length": 1048576,
+   "format": "gguf",
+   "capabilities": {
+    "vision": false,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "DavidAU",
+   "key": "qwen3.8-27b-turbo-fable-cold-fusion-735-882-heretic-uncensored-neo-coder-max-mtp",
+   "display_name": "Qwen3.8 27B TurboFCFusion 735 882 Here Uncen NEO CODER MAX",
+   "architecture": "qwen35",
+   "quantization": {
+    "name": "Q4_K_S",
+    "bits_per_weight": 4
+   },
+   "size_bytes": 18929107744,
+   "params_string": "27B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": true,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "LuffyTheFox",
+   "key": "qwen3.6-35b-a3b-uncensored-genesis-hermes-v13",
+   "display_name": "Hermes3.6 35B A3B Uncensored Genesis v13 APEX Compact",
+   "architecture": "qwen35moe",
+   "quantization": null,
+   "size_bytes": 18340746496,
+   "params_string": "35B-A3B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": true,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "0bserverx",
+   "key": "qwen3.8-27b-heretic-abliterated-uncensored",
+   "display_name": "RVN",
+   "architecture": "qwen35",
+   "quantization": {
+    "name": "Q4_K_S",
+    "bits_per_weight": 4
+   },
+   "size_bytes": 16215561536,
+   "params_string": "27B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": true,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "llm",
+   "publisher": "HauhauCS",
+   "key": "qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive",
+   "display_name": "Qwen3.6 35B A3B Uncensored HauhauCS Aggressive",
+   "architecture": "qwen35moe",
+   "quantization": {
+    "name": "Q4_K_M",
+    "bits_per_weight": 4
+   },
+   "size_bytes": 22066041088,
+   "params_string": "35B-A3B",
+   "loaded_instances": [],
+   "max_context_length": 262144,
+   "format": "gguf",
+   "capabilities": {
+    "vision": true,
+    "trained_for_tool_use": true,
+    "reasoning": {
+     "allowed_options": [
+      "off",
+      "on"
+     ],
+     "default": "on"
+    }
+   },
+   "description": null
+  },
+  {
+   "type": "embedding",
+   "publisher": "nomic-ai",
+   "key": "text-embedding-nomic-embed-text-v1.5",
+   "display_name": "Nomic Embed Text v1.5",
+   "quantization": {
+    "name": "Q4_K_M",
+    "bits_per_weight": 4
+   },
+   "size_bytes": 84106624,
+   "params_string": null,
+   "loaded_instances": [],
+   "max_context_length": 2048,
+   "format": "gguf"
+  }
+ ]
+}

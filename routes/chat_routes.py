@@ -3014,7 +3014,7 @@ def setup_chat_routes(
         # context prefetching, deny-set assembly and turn-contract binding.
         # The legacy promotion above still decides whether this is an agent
         # turn; its toggle rewrites are ignored (composer_toggles is raw).
-        runtime = choose_runtime(TurnFacts(
+        runtime = await choose_runtime(TurnFacts(
             owner=owner,
             agent_turn=(
                 chat_mode == "agent"

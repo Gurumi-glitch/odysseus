@@ -49,6 +49,8 @@ class _EndlessProvider:
                 await asyncio.sleep(0)
 
         def handle(request):
+            if request.method == "GET":  # the OpenRouter capability probe (#90)
+                return httpx.Response(404)
             if rounds:
                 return httpx.Response(200, content=rounds.pop(0), headers={"content-type": "text/event-stream"})
             self.requests += 1
