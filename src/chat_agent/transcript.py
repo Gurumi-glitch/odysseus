@@ -104,6 +104,8 @@ class TurnRecord:
     # The turn-end metrics, saved flat as save_assistant_response does: the
     # history renderer's footer reads them from the row's metadata.
     metrics: Dict[str, Any] = field(default_factory=dict)
+    # The visible error a STOP_ERROR turn ended with, shown again on reload.
+    error: Optional[str] = None
 
     @property
     def round_texts(self) -> List[str]:
@@ -148,6 +150,8 @@ class TurnRecord:
             metadata["steers"] = steers
         if self.stop_reason:
             metadata["stop_reason"] = self.stop_reason
+        if self.error:
+            metadata["error"] = self.error
         return metadata
 
     def content(self) -> str:

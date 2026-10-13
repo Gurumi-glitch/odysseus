@@ -35,7 +35,8 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, classifier, permissions, prompt, repeat_guard, result_events, store, tools, transcript, turn_context,
+    asks, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools, transcript,
+    turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
@@ -77,6 +78,7 @@ _NOT_RUN_REASONS = {
     transcript.STOP_REPEAT_GUARD: REPEAT_STOP_REASON,
     transcript.STOP_ASK_EXPIRED: ASK_EXPIRED_REASON,
 }
+CRASH_MESSAGE = "The chat agent runtime failed on this turn. See the server log."
 # With no fallback configured, one retry on these (the legacy foreground
 # availability retry, spec #44 Providers).
 SINGLE_CANDIDATE_RETRY_STATUSES = frozenset({502, 503, 504, 529})
@@ -410,37 +412,50 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # Tool images live for one round: the next request shows them, the one
         # after drops them, so frames never pile up in the request.
         visual = None
+        # Ends the turn after the loop; ``saved`` failures write a row even
+        # before the first checkpoint, so the error is there on reload.
+        failure: Optional[ProviderError] = None
+        saved = False
         while True:
             end = None
             streamed.clear()
             thought.clear()
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
-            async for event in _round_with_fallback(
+            degenerate_guard = degenerate.RoundGuard(endpoint.model)
+            # Leaving the block closes the provider stream, so a tripped
+            # guard stops the server generating at once.
+            async with aclosing(_round_with_fallback(
                 turn, endpoint, conversation, round_tools, history_start, current,
-            ):
-                if isinstance(event, Fallback):
-                    endpoint, conversation = event.candidate.endpoint, event.conversation
-                    usage.route = event.candidate
-                    record.provider, record.model = provider_key(endpoint.url), endpoint.model
-                    yield _event(event.event)
-                elif isinstance(event, ProviderError):
-                    _finish_failed_turn(writer)
-                    yield _event({"type": "metrics", "data": turn_metrics()})
-                    yield _error_event(event.message, event.status)
-                    yield "data: [DONE]\n\n"
-                    return
-                if isinstance(event, TextDelta):
-                    usage.mark_output()
-                    streamed.append(event.text)
-                    yield _event({"delta": event.text})
-                elif isinstance(event, ReasoningDelta):
-                    usage.mark_output()
-                    thought.append(event.text)
-                    # The legacy thinking delta: the frontend's live block needs no change.
-                    yield _event({"delta": event.text, "thinking": True})
-                elif isinstance(event, RoundEnd):
-                    usage.mark_output()
-                    end = event
+            )) as round_events:
+                async for event in round_events:
+                    if isinstance(event, Fallback):
+                        endpoint, conversation = event.candidate.endpoint, event.conversation
+                        usage.route = event.candidate
+                        record.provider, record.model = provider_key(endpoint.url), endpoint.model
+                        yield _event(event.event)
+                    elif isinstance(event, ProviderError):
+                        failure = event
+                        break
+                    if isinstance(event, (TextDelta, ReasoningDelta)) and degenerate_guard.tripped(event.text):
+                        failure, saved = ProviderError(502, degenerate.MESSAGE.format(model=endpoint.model)), True
+                        break
+                    if isinstance(event, TextDelta):
+                        usage.mark_output()
+                        streamed.append(event.text)
+                        yield _event({"delta": event.text})
+                    elif isinstance(event, ReasoningDelta):
+                        usage.mark_output()
+                        thought.append(event.text)
+                        # The legacy thinking delta: the frontend's live block needs no change.
+                        yield _event({"delta": event.text, "thinking": True})
+                    elif isinstance(event, RoundEnd):
+                        usage.mark_output()
+                        end = event
+            if failure is not None:
+                # The degenerate round's text and thinking are not kept.
+                streamed.clear()
+                thought.clear()
+                break
             streamed.clear()
             thought.clear()
             round_record = _round_record(end)
@@ -452,6 +467,10 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 # Finish's tool-less round is the turn's last. A steer sent
                 # during a plain answer gets one more round to be answered.
                 if calls or record.stop_reason or not steers.texts or len(record.rounds) >= caps.max_rounds:
+                    if not calls and record.stop_reason is None and not record.round_texts[-1].strip():
+                        failure, saved = ProviderError(502, f"{endpoint.model} returned no answer"), True
+                        # Whitespace is not an answer; the thinking stays.
+                        round_record["blocks"] = [b for b in end.blocks if b["type"] != "text"]
                     break
                 conversation.append({"role": "assistant", "blocks": end.blocks})
                 _join_steers(record, conversation, auto, steers.take())
@@ -627,6 +646,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
+        if failure is not None:
+            _finish_failed_turn(writer, failure.message, save=saved)
+            yield _event({"type": "metrics", "data": turn_metrics()})
+            yield _error_event(failure.message, failure.status)
+            yield "data: [DONE]\n\n"
+            return
         # Steers that came after the last boundary stay in the record, so the
         # next turn's request carries them.
         unused = steers.close()
@@ -662,8 +687,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # A crash ends the turn visibly; it never falls back to legacy, which
         # could run side effects twice (ADR 0005).
         logger.exception("chat_agent turn failed for session %s", turn.session_id)
-        _finish_failed_turn(writer)
-        yield _error_event("The chat agent runtime failed on this turn. See the server log.")
+        _finish_failed_turn(writer, CRASH_MESSAGE)
+        yield _error_event(CRASH_MESSAGE)
         yield "data: [DONE]\n\n"
         return
     finally:
@@ -674,10 +699,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield "data: [DONE]\n\n"
 
 
-def _finish_failed_turn(writer: transcript.TurnWriter) -> None:
-    """A row already checkpointed must not stay ``in_progress`` after an error."""
-    if writer.started:
+def _finish_failed_turn(writer: transcript.TurnWriter, error: Optional[str] = None, *, save: bool = False) -> None:
+    """A row already checkpointed must not stay ``in_progress`` after an error;
+    ``save`` writes the row even if it was not, so the error survives a reload."""
+    if writer.started or save:
         writer.record.stop_reason = transcript.STOP_ERROR
+        writer.record.error = error
         writer.finish()
 
 
