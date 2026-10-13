@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
+import routes.chat_agent_routes as chat_agent_routes
 import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN
@@ -234,7 +235,7 @@ async def test_a_steer_runs_the_daily_cap_pre_check(harness, monkeypatch):
         raise HTTPException(429, "Daily message limit reached")
 
     async def run(block, *args, **kwargs):
-        monkeypatch.setattr(chat_routes, "_enforce_chat_privileges", over_cap)
+        monkeypatch.setattr(chat_agent_routes, "_enforce_chat_privileges", over_cap)
         with pytest.raises(HTTPException) as refused:
             await post_steer(harness, answer_request(), "one more thing")
         statuses.append(refused.value.status_code)

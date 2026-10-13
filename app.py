@@ -714,7 +714,7 @@ app.include_router(setup_chat_routes(
 
 # chat_agent runtime control plane (runtime switch)
 from routes.chat_agent_routes import setup_chat_agent_routes
-app.include_router(setup_chat_agent_routes())
+app.include_router(setup_chat_agent_routes(session_manager))
 
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes

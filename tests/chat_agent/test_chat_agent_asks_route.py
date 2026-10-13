@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+import routes.chat_agent_routes as chat_agent_routes
 import routes.chat_routes as chat_routes
 import src.tool_execution as tool_execution
 import src.tool_security as tool_security
@@ -35,7 +36,7 @@ def harness(monkeypatch, tmp_path):
     harness = _Harness(monkeypatch, tmp_path)
     _switch_on()
     # The ask endpoint answers as whoever the request is signed in as.
-    monkeypatch.setattr(chat_routes, "effective_user", lambda request: request.state.current_user)
+    monkeypatch.setattr(chat_agent_routes, "effective_user", lambda request: request.state.current_user)
     return harness
 
 

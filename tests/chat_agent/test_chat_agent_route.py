@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import routes.chat_agent_routes as chat_agent_routes
 import routes.chat_routes as chat_routes
 import src.constants as constants
 import src.foreground_model_routing as foreground_model_routing
@@ -209,6 +210,8 @@ class _Harness:
             "accumulate_token_usage": lambda *a, **k: None,
         }.items():
             monkeypatch.setattr(chat_routes, name, value)
+            if hasattr(chat_agent_routes, name):
+                monkeypatch.setattr(chat_agent_routes, name, value)
         monkeypatch.setattr(
             foreground_model_routing, "_load_policy_preferences", lambda owner=None: {},
         )
@@ -221,7 +224,9 @@ class _Harness:
             chat_processor or SimpleNamespace(), SimpleNamespace(),
             SimpleNamespace(), SimpleNamespace(), skills_manager=skills_manager,
         )
-        self.routes = {route.path: route.endpoint for route in router.routes}
+        # The ask and steer endpoints live in the control-plane router.
+        agent_router = chat_agent_routes.setup_chat_agent_routes(session_manager)
+        self.routes = {route.path: route.endpoint for route in [*router.routes, *agent_router.routes]}
         self.endpoint = self.routes["/api/chat_stream"]
 
     async def send(self, request):

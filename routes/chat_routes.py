@@ -35,7 +35,6 @@ from src.agent_loop import (
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
-from src.chat_agent import asks as chat_asks
 from src.chat_agent.loop import Candidate, ChatAgentTurn, run_chat_agent_turn
 from src.chat_agent.providers import Endpoint
 from src.chat_agent.routing import CHAT_AGENT, ComposerToggles, TurnFacts, choose_runtime
@@ -1309,13 +1308,6 @@ def _reject_delegated_tool_approval(request: Request) -> None:
             "Tool approvals require an interactive session. "
             "API tokens cannot authorize a gated action.",
         )
-
-
-def _require_interactive_answerer(request: Request, action: str) -> None:
-    """Asks and steering speak for the person at the keyboard: tool loopback
-    and API tokens act for them without being them (spec #44, Asks)."""
-    if is_internal_tool_request(request) or is_delegated_credential(request):
-        raise HTTPException(403, f"Only you, in an interactive session, can {action}.")
 
 
 def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
@@ -5156,42 +5148,6 @@ def setup_chat_routes(
         expected_run_id = request.headers.get("X-Odysseus-Run-Id")
         accepted = agent_runs.request_finish(session_id, expected_run_id)
         return {"accepted": accepted}
-
-    @router.post("/api/chat/ask/{session_id}")
-    async def chat_ask(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
-        """Answer a chat_agent ask; the waiting turn continues (spec #44, Asks)."""
-        _require_interactive_answerer(request, "answer an ask")
-        _verify_session_owner(request, session_id)
-        decision = str(body.get("decision") or "")
-        if decision not in chat_asks.ALL_DECISIONS:
-            raise HTTPException(400, "decision must be once, chat, deny or answer.")
-        text = body.get("text") or ""
-        if not isinstance(text, str):
-            raise HTTPException(400, "text must be a string.")
-        answered = chat_asks.answer(
-            session_id, effective_user(request), str(body.get("ask_id") or ""), decision, text,
-        )
-        if not answered:
-            raise HTTPException(409, "No open ask matches this answer.")
-        return {"accepted": True}
-
-    @router.post("/api/chat/steer/{session_id}")
-    async def chat_steer(request: Request, session_id: str, body: dict) -> Dict[str, Any]:
-        """Queue a message for the running chat_agent turn; it joins at the
-        next round boundary (spec #44, Asks, steering, finish)."""
-        _require_interactive_answerer(request, "steer a turn")
-        _verify_session_owner(request, session_id)
-        text = body.get("text")
-        if not isinstance(text, str) or not text.strip():
-            raise HTTPException(400, "text must be a non-empty string.")
-        try:
-            sess = session_manager.get_session(session_id)
-        except (KeyError, SessionNotFoundError):
-            raise HTTPException(404, "Session not found")
-        _enforce_chat_privileges(request, sess)
-        if not chat_asks.steer(session_id, effective_user(request), text):
-            raise HTTPException(409, "No running turn in this chat takes steering messages.")
-        return {"accepted": True}
 
     # ------------------------------------------------------------------ #
     # GET /api/chat/stream_status — check if a stream is active for a session
