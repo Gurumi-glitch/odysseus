@@ -39,9 +39,15 @@ THINKING_AUTO = "auto"
 THINKING_OFF = "off"
 THINKING_GRADED = ("low", "medium", "high", "xhigh", "max")
 THINKING_LEVEL = "thinking_level"
+OVERFLOW_AUTO = "auto"
+OVERFLOW_ROLLING = "rolling_window"
+OVERFLOW_TRUNCATE_MIDDLE = "truncate_middle"
+OVERFLOW_STOP = "stop_at_limit"
+CONTEXT_OVERFLOW = "context_overflow"
 # Per-chat settings and their fixed value sets; the first value is the default.
 CHAT_SETTINGS = {
     THINKING_LEVEL: (THINKING_AUTO, THINKING_OFF) + THINKING_GRADED,
+    CONTEXT_OVERFLOW: (OVERFLOW_AUTO, OVERFLOW_ROLLING, OVERFLOW_TRUNCATE_MIDDLE, OVERFLOW_STOP),
 }
 
 

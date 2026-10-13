@@ -48,7 +48,8 @@ def _settings(user: str, session_id: str = "") -> dict:
     runtime = store.chat_runtime(user) if available else store.RUNTIME_LEGACY
     settings = {"chat_runtime": runtime, "available": available}
     if available and session_id:
-        settings[store.THINKING_LEVEL] = store.chat_setting(user, session_id, store.THINKING_LEVEL)
+        for name in store.CHAT_SETTINGS:
+            settings[name] = store.chat_setting(user, session_id, name)
     return settings
 
 
@@ -64,20 +65,23 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
     @router.put("/api/chat_agent/settings")
     async def put_settings(request: Request, body: dict) -> dict:
         user = require_interactive_user(request)
-        if "chat_runtime" not in body and store.THINKING_LEVEL not in body:
+        chat_settings = [name for name in store.CHAT_SETTINGS if name in body]
+        if "chat_runtime" not in body and not chat_settings:
             raise HTTPException(400, "Nothing to change.")
         if "chat_runtime" in body and body["chat_runtime"] not in store.CHAT_RUNTIME_VALUES:
             raise HTTPException(400, "chat_runtime must be 'legacy' or 'new'.")
         session_id = body.get("session_id") or ""
-        if store.THINKING_LEVEL in body:
+        # Every value is checked before any is written: a bad one changes nothing.
+        for name in chat_settings:
             # The store is the owner's own file: a foreign chat id only keys
             # an entry no other user reads, so no owner check is needed.
             if not isinstance(session_id, str) or not session_id:
-                raise HTTPException(400, "thinking_level needs the chat's session_id.")
-            levels = store.CHAT_SETTINGS[store.THINKING_LEVEL]
-            if body[store.THINKING_LEVEL] not in levels:
-                raise HTTPException(400, f"thinking_level must be one of {', '.join(levels)}.")
-            store.set_chat_setting(user, session_id, store.THINKING_LEVEL, body[store.THINKING_LEVEL])
+                raise HTTPException(400, f"{name} needs the chat's session_id.")
+            values = store.CHAT_SETTINGS[name]
+            if body[name] not in values:
+                raise HTTPException(400, f"{name} must be one of {', '.join(values)}.")
+        for name in chat_settings:
+            store.set_chat_setting(user, session_id, name, body[name])
         if "chat_runtime" in body:
             store.set_chat_runtime(user, body["chat_runtime"])
         return _settings(user, session_id if isinstance(session_id, str) else "")

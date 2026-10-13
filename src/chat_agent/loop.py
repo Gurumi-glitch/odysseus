@@ -411,6 +411,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             rules=rules,
         )
         window, measured = get_context_length_known(endpoint.url, endpoint.model)
+        overflow_policy = store.chat_setting(turn.owner, turn.session_id, store.CONTEXT_OVERFLOW)
         surface = budget.tool_surface(_configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
         ), tools.upfront_schemas(layers.denied_names, ""), window, measured)
@@ -481,22 +482,29 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             end = None
             streamed.clear()
             thought.clear()
-            # The prompt gate (spec #89): Auto refuses only the first request.
-            if not record.rounds:
-                refused = budget.overflow(conversation, round_tools, window, measured)
-                if refused is not None:
-                    failure, saved = ProviderError(None, refused), True
-                    break
+            # The prompt gate (spec #89), under the chat's Context overflow policy.
+            request, dropped, refused = budget.gate(
+                overflow_policy, not record.rounds, conversation, round_tools, window, measured,
+                history_start, current,
+            )
+            if refused is not None:
+                failure, saved = ProviderError(None, refused), True
+                break
+            if dropped:
+                yield _event({"type": "trimmed", "dropped": dropped,
+                              "message": budget.TRIMMED_MESSAGE.format(count=dropped)})
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
             degenerate_guard = degenerate.RoundGuard(endpoint.model)
             # Leaving the block closes the provider stream, so a tripped
             # guard stops the server generating at once.
             async with aclosing(_round_with_fallback(
-                turn, endpoint, conversation, round_tools, history_start, current,
+                turn, endpoint, request, round_tools, history_start, current,
             )) as round_events:
                 async for event in round_events:
                     if isinstance(event, Fallback):
                         endpoint, conversation = event.candidate.endpoint, event.conversation
+                        # Later rounds are gated against the model now answering.
+                        window, measured = get_context_length_known(endpoint.url, endpoint.model)
                         usage.route = event.candidate
                         record.provider, record.model = provider_key(endpoint.url), endpoint.model
                         yield _event(event.event)
