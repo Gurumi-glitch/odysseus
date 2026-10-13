@@ -45,7 +45,7 @@ async function setup() {
       return new Response(JSON.stringify(r.body), { status: r.status });
     };
     document.querySelector('.send-btn').addEventListener('click', () => { window.sends++; });
-    const exported = new Function(cards + '\nreturn { renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards };')();
+    const exported = new Function(cards + '\nreturn { renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards, answerPendingAskFromComposer, hasPendingAsk };')();
     Object.assign(window, exported);
   }, cards);
   return page;
@@ -174,6 +174,81 @@ test('history: resolved and expired chat_agent cards render read-only, legacy re
     assert.deepEqual(result.once, { answered: true, buttons: 0, inputs: 0, label: 'Answered', value: 'Allow once', askId: 'ask-1' });
     assert.deepEqual(result.expired, { answered: true, buttons: 0, inputs: 0, label: 'Expired', value: 'no answer in time', askId: 'ask-1' });
     assert.equal(result.posts, 0);
+  } finally { await page.close(); }
+});
+
+// The composer path (submit handler, queue) answers through these two
+// functions instead of reading the card (chat-agent-arch 06).
+test('composer: text answers a pending question ask and settles its card', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(async ([card, cardState]) => {
+      renderAskUserCard(card, { runtime: 'chat_agent' });
+      const before = hasPendingAsk('s1');
+      const answered = answerPendingAskFromComposer('s1', 'the eu cluster');
+      await new Promise(r => setTimeout(r, 20));
+      return { before, answered, after: hasPendingAsk('s1'), posts: window.posts, sends: window.sends, state: (0, eval)('(' + cardState + ')')() };
+    }, [questionCard, String(cardState)]);
+    assert.equal(result.before, true);
+    assert.equal(result.answered, true);
+    assert.equal(result.after, false);
+    assert.deepEqual(result.posts, [{ url: '/api/chat/ask/s1', body: { ask_id: 'ask-2', decision: 'answer', text: 'the eu cluster' } }]);
+    assert.equal(result.sends, 0);
+    assert.deepEqual(result.state, { answered: true, buttons: 0, inputs: 0, label: 'Answered', value: 'the eu cluster', askId: 'ask-2' });
+  } finally { await page.close(); }
+});
+
+test('composer: text on a permission ask denies it with that reason', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(async ([card, cardState]) => {
+      renderAskUserCard(card, { runtime: 'chat_agent' });
+      const answered = answerPendingAskFromComposer('s1', 'use a note instead');
+      await new Promise(r => setTimeout(r, 20));
+      return { answered, after: hasPendingAsk('s1'), posts: window.posts, sends: window.sends, state: (0, eval)('(' + cardState + ')')() };
+    }, [permissionCard, String(cardState)]);
+    assert.equal(result.answered, true);
+    assert.equal(result.after, false);
+    assert.deepEqual(result.posts, [{ url: '/api/chat/ask/s1', body: { ask_id: 'ask-1', decision: 'deny', text: 'use a note instead' } }]);
+    assert.equal(result.sends, 0);
+    assert.deepEqual(result.state, { answered: true, buttons: 0, inputs: 0, label: 'Answered', value: 'Deny — use a note instead', askId: 'ask-1' });
+  } finally { await page.close(); }
+});
+
+test('composer: nothing is answered without a pending ask, on an answered card, or with an empty composer', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(async ([card, cardState]) => {
+      const none = { pending: hasPendingAsk('s1'), answered: answerPendingAskFromComposer('s1', 'hello') };
+      renderAskUserCard(card, { runtime: 'chat_agent' });
+      const empty = answerPendingAskFromComposer('s1', '');
+      resolveAskUserCard('ask-1', { type: 'ask_resolved', decision: 'once', by: 'user' });
+      const settled = { pending: hasPendingAsk('s1'), answered: answerPendingAskFromComposer('s1', 'hello') };
+      await new Promise(r => setTimeout(r, 20));
+      return { none, empty, settled, posts: window.posts, state: (0, eval)('(' + cardState + ')')() };
+    }, [permissionCard, String(cardState)]);
+    assert.deepEqual(result.none, { pending: false, answered: false });
+    assert.equal(result.empty, false);
+    assert.deepEqual(result.settled, { pending: false, answered: false });
+    assert.deepEqual(result.posts, []);
+    assert.equal(result.state.value, 'Allow once');
+  } finally { await page.close(); }
+});
+
+test('composer: a pending ask in another chat is neither reported nor answered', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(async ([card, cardState]) => {
+      renderAskUserCard(card, { runtime: 'chat_agent' });
+      const answered = answerPendingAskFromComposer('other', 'hello');
+      await new Promise(r => setTimeout(r, 20));
+      return { other: hasPendingAsk('other'), own: hasPendingAsk('s1'), answered, posts: window.posts, state: (0, eval)('(' + cardState + ')')() };
+    }, [questionCard, String(cardState)]);
+    assert.equal(result.other, false);
+    assert.equal(result.own, true);
+    assert.equal(result.answered, false);
+    assert.deepEqual(result.posts, []);
+    assert.equal(result.state.answered, false);
   } finally { await page.close(); }
 });
 

@@ -14,6 +14,11 @@ const queueFn = chat
 const steerBubble = renderer
   .slice(renderer.indexOf('export function renderSteerBubble('), renderer.indexOf('\n}\n', renderer.indexOf('export function renderSteerBubble(')) + 3)
   .replace('export ', '');
+// The real ask card and the pending-ask check the queue path asks the renderer (chat-agent-arch 06).
+const askCards = renderer
+  .slice(renderer.indexOf('/** Remove any unanswered multiple-choice cards'), renderer.indexOf('/**\n * Add a message to the chat history.'))
+  .replaceAll('export async function', 'async function')
+  .replaceAll('export function', 'function');
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
@@ -21,11 +26,11 @@ after(async () => { await browser?.close(); });
 async function setup({ runtime = 'chat_agent', steerStatus = 200 } = {}) {
   const page = await browser.newPage();
   await page.setContent('<main id="chat-history"></main><textarea id="message">look at the tests dir too</textarea><button class="send-btn">Send</button>');
-  await page.evaluate(([queueFn, steerBubble, runtime, steerStatus]) => {
+  await page.evaluate(([queueFn, steerBubble, askCards, runtime, steerStatus]) => {
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
       posts: [], queued: [], errors: [], pendingFiles: 0,
-      isStreaming: true, API_BASE: '',
+      isStreaming: true, API_BASE: '', svgifyEmoji: x => x,
       uiModule: { esc, el: id => document.getElementById(id), showError: e => window.errors.push(e), scrollHistory: () => {} },
       fileHandlerModule: { getPendingCount: () => window.pendingFiles },
       sessionModule: { getCurrentSessionId: () => 's1' },
@@ -37,9 +42,11 @@ async function setup({ runtime = 'chat_agent', steerStatus = 200 } = {}) {
       return new Response(JSON.stringify(steerStatus === 200 ? { accepted: true } : { detail: 'No running turn in this chat takes steering messages.' }), { status: steerStatus });
     };
     window.renderSteerBubble = new Function(steerBubble + '\nreturn renderSteerBubble;')();
-    window.chatRenderer = { renderSteerBubble: window.renderSteerBubble };
+    const cards = new Function(askCards + '\nreturn { renderAskUserCard, hasPendingAsk };')();
+    window.renderAskUserCard = cards.renderAskUserCard;
+    window.chatRenderer = { renderSteerBubble: window.renderSteerBubble, hasPendingAsk: cards.hasPendingAsk };
     window.queueStreamingComposerRequest = new Function(queueFn + '\nreturn queueStreamingComposerRequest;')();
-  }, [queueFn, steerBubble, runtime, steerStatus]);
+  }, [queueFn, steerBubble, askCards, runtime, steerStatus]);
   return page;
 }
 
@@ -104,13 +111,11 @@ test('while a chat_agent ask waits in this chat, Enter is not consumed: the subm
   const page = await setup();
   try {
     const result = await page.evaluate(async state => {
-      const card = document.createElement('div');
-      card.className = 'ask-user-card';
-      card.dataset.askId = 'ask-1';
-      card._askUser = { ask_id: 'ask-1', session_id: 's1' };
-      document.getElementById('chat-history').appendChild(card);
+      const ask = { ask_id: 'ask-1', ask_kind: 'question', session_id: 's1', question: 'Which target?', options: [{ label: 'staging' }, { label: 'production' }] };
+      renderAskUserCard(ask, { runtime: 'chat_agent' });
       const consumed = queueStreamingComposerRequest();
-      card._askUser.session_id = 'other';
+      // A new unanswered card replaces the old one; this one belongs to another chat.
+      renderAskUserCard({ ...ask, ask_id: 'ask-2', session_id: 'other' }, { runtime: 'chat_agent' });
       const consumedOtherChat = queueStreamingComposerRequest();
       await new Promise(r => setTimeout(r, 20));
       return { consumed, consumedOtherChat, ...(0, eval)('(' + state + ')')() };

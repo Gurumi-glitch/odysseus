@@ -1806,8 +1806,7 @@ import { invalidateSettings } from './appConfig.js';
     const sid = sessionModule.getCurrentSessionId();
     // The Enter paths call this before submit; while a chat_agent ask waits,
     // the composer text is its answer, not a queued message (spec #44, Asks).
-    const pendingAsk = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)')?._askUser;
-    if (pendingAsk && pendingAsk.session_id === sid) return false;
+    if (chatRenderer.hasPendingAsk(sid)) return false;
     if (fileHandlerModule.getPendingCount && fileHandlerModule.getPendingCount()) {
       try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
       return true;
@@ -1881,21 +1880,11 @@ import { invalidateSettings } from './appConfig.js';
     // While a chat_agent ask waits, a composer send answers it: a chat_stream
     // send would cancel the waiting run (spec #44, Asks). Synthetic sends
     // (voice, Continue) click the same button, so they land here too.
-    const pendingAskCard = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)');
-    const pendingAsk = pendingAskCard ? pendingAskCard._askUser : null;
-    if (pendingAsk && pendingAsk.session_id === sessionId) {
-      const askInput = uiModule.el('message');
-      const askText = (askInput ? askInput.value : '').trim();
-      if (askText) {
-        // Only question asks take free text; on a permission or repeat-guard
-        // ask the text is the deny reason the model reads back.
-        const decision = pendingAsk.ask_kind === 'question' ? 'answer' : 'deny';
-        chatRenderer.answerChatAsk(sessionId, pendingAsk.ask_id, decision, askText);
-        chatRenderer.resolveAskUserCard(pendingAsk.ask_id, { decision, reason: askText });
-        askInput.value = '';
-        if (uiModule.autoResize) uiModule.autoResize(askInput);
-        return;
-      }
+    const askInput = uiModule.el('message');
+    if (chatRenderer.answerPendingAskFromComposer(sessionId, (askInput ? askInput.value : '').trim())) {
+      askInput.value = '';
+      if (uiModule.autoResize) uiModule.autoResize(askInput);
+      return;
     }
 
     // If currently streaming, keyboard Enter can queue a non-empty composer.

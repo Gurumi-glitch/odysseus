@@ -3103,6 +3103,33 @@ export async function answerChatAsk(sessionId, askId, decision, text) {
   if (uiModule?.showToast) uiModule.showToast(detail);
 }
 
+/** The unanswered chat_agent ask card of `sessionId`, if one is in the chat. */
+function _pendingAskCard(sessionId) {
+  const card = document.querySelector('#chat-history .ask-user-card[data-ask-id]:not(.ask-user-answered)');
+  return card && card._askUser?.session_id === sessionId ? card : null;
+}
+
+/** Whether a chat_agent ask of `sessionId` is still waiting for an answer. */
+export function hasPendingAsk(sessionId) {
+  return !!_pendingAskCard(sessionId);
+}
+
+/**
+ * Answer the pending ask of `sessionId` with the composer text; returns
+ * whether it did. Only question asks take free text; on a permission or
+ * repeat-guard ask the text is the deny reason the model reads back
+ * (spec #44, Asks). An empty composer answers nothing.
+ */
+export function answerPendingAskFromComposer(sessionId, text) {
+  const card = _pendingAskCard(sessionId);
+  if (!card || !text) return false;
+  const aq = card._askUser;
+  const decision = aq.ask_kind === 'question' ? 'answer' : 'deny';
+  answerChatAsk(sessionId, aq.ask_id, decision, text);
+  resolveAskUserCard(aq.ask_id, { decision, reason: text });
+  return true;
+}
+
 // While a choice card is visible, let plain 1–3 activate the corresponding
 // rendered option. Reuse the option's click path so the question keeps its
 // existing submission semantics. Tool approval cards are excluded: that card
@@ -4100,6 +4127,8 @@ const chatRenderer = {
   renderAskUserCard,
   resolveAskUserCard,
   answerChatAsk,
+  hasPendingAsk,
+  answerPendingAskFromComposer,
   renderSteerBubble,
   buildSourcesBox,
   buildFindingsBox,
