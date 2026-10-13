@@ -62,7 +62,7 @@ async function setup() {
     window.applyModelRouteEventState = (await import('/static/js/chatModelProvenance.js')).applyModelRouteEventState;
     window.createTerminalStreamError = (await import('/static/js/chatStreamErrors.js')).createTerminalStreamError;
     window.generatedImageResult = (await import('/static/js/generatedImageResult.js')).generatedImageResult;
-    const cards = new Function(askCards + '\nreturn { renderSteerBubble, renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards, renderTurnStopNote, takePendingTurnSource };')();
+    const cards = new Function(askCards + '\nreturn { renderSteerBubble, renderAskUserCard, resolveAskUserCard, answerChatAsk, removeAskUserCards, renderTurnStopNote, renderTurnNote, takePendingTurnSource };')();
     Object.assign(window, cards);
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
@@ -224,6 +224,46 @@ test('history: a stopped chat_agent row never offers the legacy Resume (the merg
     assert.deepEqual(result.stored, { markers: ['[Message interrupted]'], resume: 0 });
     assert.deepEqual(result.bare, { markers: ['[Message interrupted]'], resume: 0 });
     assert.deepEqual(result.legacy, { markers: ['[Message interrupted]'], resume: 1 });
+  } finally { await page.close(); }
+});
+
+test('history: a stored turn error replaces the generic marker, the output-limit notice sits under the kept text, rows without either render as before (#98)', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(([meta, content, timeline]) => {
+      Object.assign(window, { stripToolBlocks: x => x, _renderAssistantBody: x => markdownModule.processWithThinking(x) });
+      const render = (text, metadata) => {
+        document.querySelector('#chat-history').replaceChildren();
+        addMessage('assistant', text, 'test', metadata);
+        return {
+          markers: [...document.querySelectorAll('.stopped-indicator')].map(n => n.textContent),
+          timeline: (0, eval)('(' + timeline + ')')(),
+          resume: document.querySelectorAll('.resume-btn').length,
+        };
+      };
+      const failed = { _fromHistory: true, runtime: 'chat_agent', stop_reason: 'error', stopped: true, error: 'Stopped: m produced degenerate output (repeating tokens).' };
+      return {
+        // A failure after a few rounds: the rounds replay, the note carries the error text.
+        rounds: render(content, { ...meta, ...failed }),
+        // A round-1 failure saves a row with no rounds and no content (generic renderer path).
+        bare: render('', { ...failed, round_texts: [], agent_v2: { rounds: [] } }),
+        // An error row that carries no text keeps the generic wording.
+        noText: render(content, { ...meta, stop_reason: 'error', stopped: true }),
+        // Mid-answer cut: kept text plus the notice, no stop marker.
+        notice: render('Half an answ', { _fromHistory: true, runtime: 'chat_agent', round_texts: ['Half an answ'], notice: 'stopped at output limit' }),
+        plain: render('Fine', { _fromHistory: true, runtime: 'chat_agent', round_texts: ['Fine'] }),
+        legacy: render('Half', { _fromHistory: true, stopped: true, error: 'x', notice: 'y' }),
+      };
+    }, [threeRounds, content, String(timeline)]);
+    const err = '[Stopped: m produced degenerate output (repeating tokens).]';
+    assert.deepEqual(result.rounds.markers, ['Stopped: m produced degenerate output (repeating tokens).']);
+    assert.equal(result.rounds.timeline.at(-1), 'stop:Stopped: m produced degenerate output (repeating tokens).');
+    assert.deepEqual(result.bare, { markers: ['Stopped: m produced degenerate output (repeating tokens).'], timeline: ['ai:Stopped: m produced degenerate output (repeating tokens).'], resume: 0 }, err);
+    assert.deepEqual(result.noText.markers, ['[The turn failed]']);
+    assert.deepEqual(result.notice.markers, ['stopped at output limit']);
+    assert.deepEqual(result.notice.timeline, ['ai:Half an answ', 'stop:stopped at output limit']);
+    assert.deepEqual(result.plain.markers, []);
+    assert.deepEqual(result.legacy.markers, ['[Message interrupted]Resume']);
   } finally { await page.close(); }
 });
 

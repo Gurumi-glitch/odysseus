@@ -3420,6 +3420,16 @@ function _turnStopLabel(stopReason, detail) {
   return detail.rounds ? `Reached the ${detail.rounds}-step limit — not finished.` : 'Reached the step limit — not finished.';
 }
 
+// A one-line note under a stored chat_agent turn: its error or notice text.
+export function renderTurnNote(text) {
+  const note = document.createElement('div');
+  note.className = 'stopped-indicator';
+  const label = document.createElement('span');
+  label.textContent = text;
+  note.appendChild(label);
+  return note;
+}
+
 /**
  * The note a capped chat_agent turn ends with (stop_reason max_rounds or
  * budget): why it stopped, plus Continue, which is a new turn marked
@@ -3738,12 +3748,13 @@ export function addMessage(role, content, modelName, metadata) {
           ask_expired: '[Stopped: the question was not answered]',
           error: '[The turn failed]',
         };
-        const note = document.createElement('div');
-        note.className = 'stopped-indicator';
-        const label = document.createElement('span');
-        label.textContent = stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`;
-        note.appendChild(label);
-        box.appendChild(note);
+        // The stored error text (spec #89) is more useful than the generic label.
+        const storedError = metadata.stop_reason === 'error' && typeof metadata.error === 'string' && metadata.error;
+        box.appendChild(renderTurnNote(storedError || stopLabels[metadata.stop_reason] || `[Stopped: ${metadata.stop_reason}]`));
+      }
+      // A mid-answer output-limit cut keeps its text; the notice sits under it.
+      if (agentRuntimeRow && typeof metadata.notice === 'string' && metadata.notice) {
+        box.appendChild(renderTurnNote(metadata.notice));
       }
 
       const firstWrap = lastMsgAi || lastWrap;
@@ -3980,9 +3991,13 @@ export function addMessage(role, content, modelName, metadata) {
       const stoppedLabel = document.createElement('span');
       // Differentiate between "stopped mid-stream" (had content, can continue)
       // and "cancelled before any content" — the latter has no Continue affordance.
+      // A chat_agent round-1 failure saves a row with no rounds to replay; it
+      // lands here and shows the stored error (spec #89).
+      const storedError = metadata.runtime === CHAT_AGENT_RUNTIME && metadata.stop_reason === 'error'
+        && typeof metadata.error === 'string' && metadata.error;
       stoppedLabel.textContent = metadata.cancelled
         ? '[Cancelled by user]'
-        : '[Message interrupted]';
+        : (storedError || '[Message interrupted]');
       stoppedIndicator.appendChild(stoppedLabel);
       // Continue button only makes sense when there's partial content to
       // resume from \u2014 skip it for fully-cancelled (empty) turns. A

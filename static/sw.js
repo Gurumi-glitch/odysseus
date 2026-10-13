@@ -82,7 +82,7 @@ const PRECACHE = [
   '/static/js/tts-ai.js',
   '/static/js/document.js?v=20260916docctx2',
   '/static/js/gallery.js?v=20260910promptcopy1',
-  '/static/js/chatRenderer.js?v=20260914metricssummary1',
+  '/static/js/chatRenderer.js?v=20261013turnerr1',
   '/static/js/codeRunner.js?v=20260831richtexttools91',
   '/static/js/chatStream.js?v=20260914pdfstrip1',
   '/static/js/chat.js?v=20260917toolttft1',

@@ -22,7 +22,7 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260914metricssummary1';
+import chatRenderer from './js/chatRenderer.js?v=20261013turnerr1';
 // Keep this specifier identical to every consumer (especially chat.js).
 // Different query strings create separate ES-module instances with separate
 // current-session state, so the picker can display one model while chat sends
