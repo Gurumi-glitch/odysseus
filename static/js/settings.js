@@ -1739,6 +1739,7 @@ async function initShortcuts() {
       if (uiModule && uiModule.showToast) uiModule.showToast('Shortcut saved');
     } catch (e) {
       console.error('Failed to save keybinds:', e);
+      if (uiModule && uiModule.showToast) uiModule.showToast('Failed to save shortcut');
     }
   }
 
