@@ -415,26 +415,53 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     async def truncate_session(request: Request, session_id: str):
         _verify_session_owner(request, session_id)
         try:
-            body = await request.json()
-            keep_count = int(body.get("keep_count", 0))
-            before_msg_id = str(body.get("before_msg_id") or body.get("message_id") or "").strip()
+            try:
+                body = await request.json()
+            except json.JSONDecodeError:
+                raise HTTPException(400, "Request body must be valid JSON")
+            if not isinstance(body, dict):
+                raise HTTPException(400, "Request body must be a JSON object")
+            # Resolve before_msg_id / message_id alias with explicit presence checks.
+            # None (JSON null) and empty string are both treated as "not provided here"
+            # and fall through to the alias, preserving the original OR-chain semantics.
+            # Any other non-string value (False, 0, True, 123, list, …) is rejected
+            # immediately so falsy non-strings cannot bypass type validation.
+            raw_msg_id = body.get("before_msg_id") if "before_msg_id" in body else None
+            if raw_msg_id is None or raw_msg_id == "":
+                raw_msg_id = body.get("message_id")
+            if raw_msg_id is not None and not isinstance(raw_msg_id, str):
+                raise HTTPException(400, "Message ID must be a string")
+            before_msg_id = (raw_msg_id or "").strip()
+            if "keep_count" not in body and not before_msg_id:
+                raise HTTPException(400, "keep_count or before_msg_id required")
+            raw_count = body.get("keep_count", 0)
+            # Keep integer-string clients working, but do not silently convert
+            # booleans or fractional numbers into destructive message counts.
+            if type(raw_count) not in (int, str):
+                raise HTTPException(400, "keep_count must be a non-negative integer")
+            try:
+                keep_count = int(raw_count)
+            except ValueError:
+                raise HTTPException(400, "keep_count must be a non-negative integer")
+            if keep_count < 0:
+                raise HTTPException(400, "keep_count must be a non-negative integer")
             deleted_sft_pairs: list[dict[str, str]] = []
-            if keep_count >= 0:
-                db = SessionLocal()
-                try:
-                    all_db_messages = db.query(DbChatMessage).filter(
-                        DbChatMessage.session_id == session_id
-                    ).order_by(DbChatMessage.timestamp).all()
-                    if before_msg_id:
-                        resolved_keep_count = _keep_count_before_message(all_db_messages, before_msg_id)
-                        if resolved_keep_count is None:
-                            raise HTTPException(404, "Message not found")
-                        keep_count = resolved_keep_count
-                    for pos, row in enumerate(all_db_messages):
-                        row._will_delete_for_sft = pos >= keep_count
-                    deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
-                finally:
-                    db.close()
+            # keep_count is always >= 0 here; the block is unconditional.
+            db = SessionLocal()
+            try:
+                all_db_messages = db.query(DbChatMessage).filter(
+                    DbChatMessage.session_id == session_id
+                ).order_by(DbChatMessage.timestamp).all()
+                if before_msg_id:
+                    resolved_keep_count = _keep_count_before_message(all_db_messages, before_msg_id)
+                    if resolved_keep_count is None:
+                        raise HTTPException(404, "Message not found")
+                    keep_count = resolved_keep_count
+                for pos, row in enumerate(all_db_messages):
+                    row._will_delete_for_sft = pos >= keep_count
+                deleted_sft_pairs = _deleted_sft_pairs_from_db_rows(all_db_messages)
+            finally:
+                db.close()
             result = session_manager.truncate_messages(session_id, keep_count)
             _remove_deleted_sft_trace_rows(
                 owner=effective_user(request),
