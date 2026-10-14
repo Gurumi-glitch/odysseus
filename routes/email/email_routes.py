@@ -81,6 +81,7 @@ _SERVER_OWNED_OAUTH_FIELDS = {
     "oauth_refresh_token",
     "oauth_token_expiry",
 }
+_CACHE_HOOKS: dict = {"invalidate_list": None}
 
 
 def _normalized_mail_host(value) -> str:
@@ -570,6 +571,23 @@ def _uid_exists(conn, uid: str, *, strict: bool = False) -> bool:
         if strict:
             raise
         return False
+
+
+def _uid_has_deleted_flag(conn, uid: str) -> bool:
+    r"""Return True if message already carries \Deleted flag."""
+    try:
+        status, data = conn.uid("FETCH", _uid_bytes(uid), "(FLAGS)")
+        if status == "OK" and data:
+            for part in data:
+                if not part:
+                    continue
+                meta = part[0] if isinstance(part, tuple) else part
+                meta_b = meta if isinstance(meta, bytes) else str(meta).encode()
+                if rb"\Deleted" in meta_b:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 def _resolve_current_email_uid(conn, uid: str, message_id: str | None = None) -> str:
@@ -1831,6 +1849,12 @@ def setup_email_routes():
         delete, move) so the UI doesn't show stale read/unread counts for up to
         the 8s TTL after a manual flag change. With no args, clears everything.
         """
+        hook = _CACHE_HOOKS.get("invalidate_list")
+        if hook:
+            try:
+                hook(account_id, folder)
+            except Exception:
+                pass
         if account_id is None and folder is None:
             _LIST_CACHE.clear()
             return
@@ -4764,6 +4788,7 @@ def setup_email_routes():
             return {"success": False, "error": "No email UIDs provided", "deleted_uids": [], "failed_uids": []}
         deleted_uids = []
         failed_uids = []
+        trash_folder = None
         try:
             with _imap(account_id, owner=owner) as conn:
                 select_status, _ = conn.select(_q(folder), readonly=False)
@@ -4779,7 +4804,8 @@ def setup_email_routes():
                             trash_folder = "Trash"
                     except Exception:
                         pass
-                pending_expunge = False
+                pending_expunge = []
+                preexisting_deleted = set()
                 for uid in uids:
                     try:
                         if not _uid_exists(conn, uid):
@@ -4789,32 +4815,75 @@ def setup_email_routes():
                         if status != "OK":
                             copy_status, _ = conn.uid("COPY", _uid_bytes(uid), _q(trash_folder))
                             if copy_status != "OK":
-                                # Keep deletion reliable even when this IMAP
-                                # server has no writable Trash folder.
-                                store_status, _ = conn.uid("STORE", _uid_bytes(uid), "+FLAGS", "\\Deleted")
-                                if store_status != "OK":
-                                    failed_uids.append(uid)
-                                    continue
-                                pending_expunge = True
-                            else:
-                                store_status, _ = conn.uid("STORE", _uid_bytes(uid), "+FLAGS", "\\Deleted")
-                                if store_status != "OK":
-                                    failed_uids.append(uid)
-                                    continue
-                                pending_expunge = True
+                                # Bulk Delete means move to Trash. Never remove
+                                # the original without a recoverable Trash copy.
+                                failed_uids.append(uid)
+                                continue
+                            if _uid_has_deleted_flag(conn, uid):
+                                preexisting_deleted.add(uid)
+                            store_status, _ = conn.uid("STORE", _uid_bytes(uid), "+FLAGS", "\\Deleted")
+                            if store_status != "OK":
+                                failed_uids.append(uid)
+                                continue
+                            # Keep the local index until the server confirms
+                            # that the copied originals have been removed.
+                            pending_expunge.append(uid)
+                            continue
                         deleted_uids.append(uid)
                         _email_index_delete(owner, account_id, folder, uid)
                     except Exception:
                         failed_uids.append(uid)
                         logger.debug("Bulk email delete failed for uid=%s", uid, exc_info=True)
                 if pending_expunge:
-                    conn.expunge()
-            if deleted_uids:
-                _invalidate_list_cache(account_id, folder)
-            return {"success": True, "deleted_uids": deleted_uids, "failed_uids": failed_uids}
+                    expunge_ok = False
+                    # Attempt selective RFC 4315 UID EXPUNGE so unrelated messages
+                    # carrying \Deleted in the selected mailbox are never expunged.
+                    # Mailbox-wide EXPUNGE is strictly avoided to eliminate TOCTOU races
+                    # where concurrent clients mark unrelated messages \Deleted.
+                    try:
+                        uid_set_bytes = _uid_bytes(",".join(pending_expunge))
+                        uid_exp_status, _ = conn.uid("EXPUNGE", uid_set_bytes)
+                        if uid_exp_status == "OK":
+                            expunge_ok = True
+                    except Exception:
+                        logger.debug("Selective UID EXPUNGE failed", exc_info=True)
+                        expunge_ok = False
+
+                    if expunge_ok:
+                        for uid in pending_expunge:
+                            deleted_uids.append(uid)
+                            _email_index_delete(owner, account_id, folder, uid)
+                    else:
+                        # Prioritize preservation over cleanup: unflag \Deleted from our
+                        # copied messages so future EXPUNGE operations do not destroy them.
+                        # Do not remove a pre-existing \Deleted flag present before this operation.
+                        for uid in pending_expunge:
+                            if uid not in preexisting_deleted:
+                                try:
+                                    conn.uid("STORE", _uid_bytes(uid), "-FLAGS", "\\Deleted")
+                                except Exception:
+                                    pass
+                        failed_uids.extend(pending_expunge)
+            if not deleted_uids:
+                return {"success": False, "error": "Failed to delete requested emails", "deleted_uids": [], "failed_uids": failed_uids}
+            res = {"success": True, "deleted_uids": deleted_uids, "failed_uids": failed_uids}
+            if failed_uids:
+                res["error"] = "Mail operation partially failed"
+            return res
         except Exception as e:
             logger.error(f"Failed to bulk delete emails: {e}")
-            return {"success": False, "error": "Mail operation failed", "deleted_uids": deleted_uids, "failed_uids": [u for u in uids if u not in deleted_uids]}
+            failed_all = [u for u in uids if u not in deleted_uids]
+            return {
+                "success": bool(deleted_uids),
+                "error": "Mail operation failed" if not deleted_uids else "Mail operation partially failed",
+                "deleted_uids": deleted_uids,
+                "failed_uids": failed_all,
+            }
+        finally:
+            if deleted_uids:
+                _invalidate_list_cache(account_id, folder)
+                if trash_folder:
+                    _invalidate_list_cache(account_id, trash_folder)
 
     @router.delete("/odysseus/reminders")
     async def delete_odysseus_reminder_emails(
