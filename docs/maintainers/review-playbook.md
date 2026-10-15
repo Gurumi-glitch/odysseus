@@ -4,8 +4,11 @@ Use this as a **repeatable review method**, not as an extra organizational appro
 
 No single checklist replaces engineering judgment. Increase depth with risk.
 
-## 1. Establish provenance and scope
+## 1. Understand the PR and establish its review gates
 
+- Establish the problem, what the PR fundamentally proposes, and why the approach makes sense.
+- Check product direction, architecture fit, and scope before detailed review.
+- Write down the questions the review must answer, the evidence needed, and what would block further review or approval.
 - Confirm repository, source fork, target branch (`dev`), exact **HEAD SHA**, and current base.
 - Review the full effective diff, commit history, issue, prior feedback, and related upstream changes.
 - Confirm the branch is mergeable against the **current** `dev`, not an older local snapshot.
@@ -39,6 +42,8 @@ For small, unambiguous issues, maintainers may add focused corrections directly 
 For substantive or ambiguous work, ask the contributor or prepare a clearly separated patch. Any code change means validating **the new SHA**, not approving based solely on the previous audit.
 
 ## 4. Build an evidence record
+
+Run contributor code under the [runtime isolation rules](testing-and-releases.md#runtime-isolation).
 
 Useful evidence includes:
 

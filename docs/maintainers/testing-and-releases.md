@@ -4,6 +4,12 @@ Validation must match the actual change, and evidence must state what was **run*
 
 `dev` is the integration and stabilization branch. `main` is the curated release destination. Changes land in `dev`; a release promotes a verified `dev` revision to `main`.
 
+## Runtime isolation
+
+Run contributor-controlled tests, builds, installs, and repros in an isolated, secretless environment. Use disposable containers or microVMs where appropriate, with no credentials, sensitive host files, production data, or host/container-management sockets exposed. If safe isolation is unavailable, record the check as not run.
+
+Agents may use a skill for the maintainer's preferred environment and handling; the same isolation requirements apply.
+
 ## Change validation
 
 - Run focused tests that cover the modified behavior and failure cases.

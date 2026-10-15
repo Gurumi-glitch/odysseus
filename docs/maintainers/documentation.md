@@ -16,7 +16,6 @@ Keep root documents easy to find:
 - `README.md`
 - `CONTRIBUTING.md`
 - `SECURITY.md`
-- `CODE_OF_CONDUCT.md`
 
 Not every named directory exists today; do not invent a parallel documentation store just to match this map.
 

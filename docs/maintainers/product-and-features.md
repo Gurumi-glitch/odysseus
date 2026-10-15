@@ -4,11 +4,15 @@ Pewds is the Product Owner for Odysseus and has final authority over product dir
 
 ## Which changes require product approval?
 
-**Product Owner approval before implementation:** new features and material changes to product direction or behavior.
+**Product Owner approval before implementation:** substantial new features, changes to product direction, and product changes that are hard to reverse.
 
-**No separate product approval by default:** bug fixes, security fixes, maintenance, tests, CI, documentation, and internal refactors, unless they materially change product behavior or direction.
+**No separate product approval by default:** bug fixes, security fixes, maintenance, tests, CI, documentation, internal refactors, and small, reversible product changes within existing direction.
 
-A security or reliability fix that changes behavior should state the user-visible impact and seek product input when its direction is genuinely ambiguous. Urgent containment need not wait if it preserves existing product intent.
+Maintainers may make those smaller product decisions. Pewds can ask for changes or a rollback; the maintainer owns safe rollback or recovery.
+
+### Urgent security and reliability fixes
+
+Urgent fixes or containment may proceed without prior product approval, even if behavior temporarily changes. Keep the change to what stops the immediate problem, notify Pewds promptly, and record the reason and rollback or recovery plan. Agree on any lasting product-direction change with Pewds afterwards. Normal high-risk review and repository checks still apply.
 
 ## Product Owner initiated
 
@@ -25,7 +29,7 @@ A Product Owner proposal is already product-approved; it is not automatically te
 
 ```text
 Feature proposal
-    -> Product Owner accepts / rejects
+    -> Product Owner accepts / rejects, where approval is required
     -> technical feasibility
     -> plan and implementation
     -> risk-based review and validation
@@ -39,4 +43,4 @@ The Product Owner decides **what belongs in Odysseus**. Maintainers decide **how
 
 A rejected or out-of-scope feature can be maintained independently in a contributor's fork.
 
-If the Product Owner is unavailable, new product-direction decisions wait unless that authority was explicitly delegated. Urgent security and reliability corrections that do not redefine product direction may continue under normal review rules.
+If the Product Owner is unavailable, work requiring prior product approval waits unless authority was explicitly delegated. Smaller decisions and urgent fixes follow the rules above.

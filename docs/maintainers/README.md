@@ -36,5 +36,3 @@ Maintainers own the changes they take on, including validation, regression preve
 Important product-direction decisions go through the Product Owner. Maintainers retain responsibility for feasibility, implementation, maintainability, and security.
 
 AI coding or review agents can help collect evidence, test hypotheses, and prepare changes, but they are not the qualified human reviewer required for high-risk changes. A maintainer must inspect and accept the evidence.
-
-Project spaces follow the [Code of Conduct](../../CODE_OF_CONDUCT.md).
