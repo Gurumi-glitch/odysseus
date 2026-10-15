@@ -7,8 +7,9 @@ Repository Markdown is the canonical source for project documentation. A public 
 | Location | Purpose |
 |---|---|
 | `/design` | Product intent, proposals, and accepted decisions (when those paths are used) |
-| `/specs` | Technical contracts and invariants (when those paths are used) |
-| `/docs` | User, developer, architecture, security, deployment, and maintainer guidance |
+| `/specs` | Technical contracts and invariants |
+| `/website` | User, setup, configuration, and deployment guidance (published as the docs site) |
+| `/docs` | Developer, architecture, security, and maintainer guidance |
 | Root Markdown | Discoverable entry points and policies |
 
 Keep root documents easy to find:
@@ -16,6 +17,7 @@ Keep root documents easy to find:
 - `README.md`
 - `CONTRIBUTING.md`
 - `SECURITY.md`
+- `THREAT_MODEL.md`
 
 Not every named directory exists today; do not invent a parallel documentation store just to match this map.
 

@@ -1,6 +1,6 @@
 # Product and feature proposals
 
-Pewds is the Product Owner for Odysseus and has final authority over product direction. Maintainers own technical feasibility, implementation, and safety.
+Pewds ([@pewdiepie-archdaemon](https://github.com/pewdiepie-archdaemon)) is the Product Owner for Odysseus and has final authority over product direction. Maintainers own technical feasibility, implementation, and safety.
 
 ## Which changes require product approval?
 
@@ -26,6 +26,8 @@ Product Owner proposal or implementation
 A Product Owner proposal is already product-approved; it is not automatically technically approved or exempt from high-risk review.
 
 ## Community or maintainer initiated
+
+Community proposals start as a Feature Request issue. Check [ROADMAP.md](../../ROADMAP.md) and existing issues first; take early ideas to [Discussions](https://github.com/odysseus-dev/odysseus/discussions/categories/ideas).
 
 ```text
 Feature proposal
