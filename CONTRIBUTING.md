@@ -62,6 +62,10 @@ docker compose logs --tail=120 odysseus
 
 Mention what you ran in the pull request description. If you could not run a check, say so.
 
+## Maintainer governance and review guidance
+
+For repository roles, product decisions, risk-based approvals, issue triage, independent security reviews, CodeQL findings, and release handoffs, see the [Odysseus maintainer handbook](docs/maintainers/README.md). This complements the contributor requirements below and does not change the branch model or current PR template.
+
 ## Pull Requests
 
 Good pull requests usually include:
