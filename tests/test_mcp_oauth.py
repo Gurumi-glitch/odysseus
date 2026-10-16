@@ -450,3 +450,45 @@ def test_oauth_exchange_expired_generic_state_returns_expired_page(monkeypatch):
         in resp.text
     )
     assert "No OAuth config." not in resp.text
+
+
+def test_oauth_callback_missing_state_returns_malformed_error_not_expired():
+    """Missing state parameter in callback must return a bad-request error and must
+    not be treated as an expired authorization round."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes.mcp import mcp_routes
+
+    app = FastAPI()
+    manager = MagicMock()
+    router = mcp_routes.setup_mcp_routes(manager)
+    app.include_router(router)
+    client = TestClient(app)
+
+    resp = client.get("/api/mcp/oauth/callback?code=some-code")
+    assert resp.status_code == 400
+    assert "No OAuth state parameter found in the callback URL." in resp.text
+    assert "Authorization Expired" not in resp.text
+    assert "This authorization round has expired" not in resp.text
+
+
+def test_oauth_callback_missing_code_returns_malformed_error_not_expired():
+    """Missing code parameter in callback must return a bad-request error and must
+    not be treated as an expired authorization round."""
+    from unittest.mock import MagicMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes.mcp import mcp_routes
+
+    app = FastAPI()
+    manager = MagicMock()
+    router = mcp_routes.setup_mcp_routes(manager)
+    app.include_router(router)
+    client = TestClient(app)
+
+    resp = client.get("/api/mcp/oauth/callback?state=some-state")
+    assert resp.status_code == 400
+    assert "No authorization code found in the URL." in resp.text
+    assert "Authorization Expired" not in resp.text
+    assert "This authorization round has expired" not in resp.text
