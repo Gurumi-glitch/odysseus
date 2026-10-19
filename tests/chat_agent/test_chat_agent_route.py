@@ -305,6 +305,34 @@ async def test_new_runtime_prompt_order_and_context_flags(harness):
 
 
 @pytest.mark.asyncio
+async def test_new_runtime_gets_the_notes_selected_as_context(harness, monkeypatch):
+    # The selected Notes/Todos reached only the legacy loop; the new runtime
+    # answered without them.
+    from core.database import Note
+
+    note = SimpleNamespace(title="Groceries", note_type="checklist", content="",
+                           items=json.dumps([{"text": "oat milk", "done": False}]))
+
+    class _NotesQuery(_EmptyQuery):
+        def all(self):
+            return [note]
+
+    class _NotesDb(_EmptyDb):
+        def query(self, model, *args, **kwargs):
+            return _NotesQuery() if model is Note else _EmptyQuery()
+
+    monkeypatch.setattr(chat_routes, "SessionLocal", _NotesDb)
+    _switch_on()
+
+    response, _ = await harness.send(_Request("agent", selected_note_ids=json.dumps(["n1"])))
+
+    assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
+    context = harness.captured["build_context"]["selected_notes_context"]
+    assert "Title: Groceries" in context
+    assert "- [pending] oat milk" in context
+
+
+@pytest.mark.asyncio
 async def test_provider_error_ends_turn_visibly_without_saving(harness, monkeypatch):
     _switch_on()
 
