@@ -17,7 +17,7 @@ def _source(path: str) -> str:
 def test_unwatched_senders_say_so():
     # Notes agent-solve and group panes have no ask card (#61); compare
     # synthesis stays on the legacy runtime and sends nothing.
-    assert "fd.append('interactive', 'false');" in _source("static/js/notes.js")
+    assert "fd.append('interactive', 'false');" in _source("frontend/src/features/notes/application/agentActions.js")
     assert "fd.append('interactive', 'false');" in _source("static/js/group.js")
     assert "interactive" not in _source("static/js/compare/stream.js")
     assert 'str(form_data.get("interactive", "")).lower() != "false"' in _source("routes/chat_routes.py")
