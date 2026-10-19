@@ -7,11 +7,12 @@ from fastapi import APIRouter, HTTPException, Request
 from core.atomic_io import atomic_write_text
 from core.exceptions import SessionNotFoundError
 from routes.chat_helpers import _enforce_chat_privileges
+from routes.chat_routes import _resolve_selected_endpoint
 from routes.session_routes import _verify_session_owner
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import effective_user, is_delegated_credential, require_user
-from src.chat_agent import asks, classifier, permissions, store
+from src.chat_agent import asks, classifier, permissions, routing, store
 from src.owner_identity import auth_disabled
 
 
@@ -43,10 +44,16 @@ def _require_interactive_answerer(request: Request, action: str) -> None:
         raise HTTPException(403, f"Only you, in an interactive session, can {action}.")
 
 
-def _settings(user: str) -> dict:
+def _settings(user: str, session_id: str = "") -> dict:
     available = not auth_disabled()
     runtime = store.chat_runtime(user) if available else store.RUNTIME_LEGACY
-    return {"chat_runtime": runtime, "available": available}
+    settings = {"chat_runtime": runtime, "available": available}
+    if available:
+        # No session_id (a new chat before its first message): the owner's
+        # last-used values, which that chat inherits.
+        for name in store.CHAT_SETTINGS:
+            settings[name] = store.chat_setting(user, session_id, name)
+    return settings
 
 
 def setup_chat_agent_routes(session_manager) -> APIRouter:
@@ -54,17 +61,65 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
     router = APIRouter(tags=["chat_agent"])
 
     @router.get("/api/chat_agent/settings")
-    async def get_settings(request: Request) -> dict:
-        return _settings(require_user(request))
+    async def get_settings(request: Request, session_id: str = "") -> dict:
+        """The user's runtime switch and that chat's settings (``session_id``),
+        else the owner's last-used ones."""
+        return _settings(require_user(request), session_id)
 
     @router.put("/api/chat_agent/settings")
     async def put_settings(request: Request, body: dict) -> dict:
         user = require_interactive_user(request)
-        value = body.get("chat_runtime")
-        if value not in store.CHAT_RUNTIME_VALUES:
+        chat_settings = {name: body[name] for name in store.CHAT_SETTINGS if name in body}
+        if "chat_runtime" not in body and not chat_settings:
+            raise HTTPException(400, "Nothing to change.")
+        # Checked before the chat settings are written: a bad value changes nothing.
+        if "chat_runtime" in body and body["chat_runtime"] not in store.CHAT_RUNTIME_VALUES:
             raise HTTPException(400, "chat_runtime must be 'legacy' or 'new'.")
-        store.set_chat_runtime(user, value)
-        return _settings(user)
+        session_id = body.get("session_id") or ""
+        if chat_settings:
+            # The store is the owner's own file: a foreign chat id only keys
+            # an entry no other user reads, so no owner check is needed.
+            # Without one, only the owner's last-used values change.
+            if not isinstance(session_id, str):
+                raise HTTPException(400, "session_id must be a string.")
+            try:
+                store.set_chat_settings(user, session_id, chat_settings)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        if "chat_runtime" in body:
+            store.set_chat_runtime(user, body["chat_runtime"])
+        return _settings(user, session_id)
+
+    @router.get("/api/chat_agent/capabilities/{session_id}")
+    async def get_capabilities(request: Request, session_id: str) -> dict:
+        """What the chat's next agent turn would run on, and the thinking
+        levels its (endpoint, model) takes. The composer asks after a model
+        change and after a turn that learned a rejection."""
+        user = require_user(request)
+        _verify_session_owner(request, session_id, session_manager)
+        try:
+            sess = session_manager.get_session(session_id)
+        except (KeyError, SessionNotFoundError):
+            raise HTTPException(404, "Session not found")
+        return await routing.chat_capabilities(user, sess.endpoint_url or "", sess.model or "", sess.headers)
+
+    @router.get("/api/chat_agent/capabilities")
+    async def get_pending_capabilities(
+        request: Request, model: str = "", endpoint_id: str = "", endpoint_url: str = "",
+    ) -> dict:
+        """The same answer for a new chat that has no session yet, keyed by
+        the picker's (endpoint, model)."""
+        user = require_user(request)
+        # Relies on: the chat route's own resolver, so a pick is resolved (and
+        # refused) exactly as the first message's selected_endpoint_* would be.
+        resolved = (
+            _resolve_selected_endpoint(user, endpoint_id, endpoint_url)
+            if model and (endpoint_id or endpoint_url) else None
+        )
+        if not resolved:
+            raise HTTPException(404, "Endpoint not found")
+        url, headers, _ = resolved
+        return await routing.chat_capabilities(user, url, model, headers)
 
     @router.get("/api/chat_agent/instructions")
     async def get_instructions(request: Request) -> dict:

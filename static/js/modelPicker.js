@@ -6,6 +6,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
+import { CAPABILITIES_CHANGED, createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261019pending2';
 
 const API_BASE = window.location.origin;
 
@@ -206,6 +207,7 @@ function _initModelPickerDropdown() {
   if (!wrap || !btn || !menu || !search || !listEl) return;
   if (wrap.dataset.modelPickerBound === '1') return;
   wrap.dataset.modelPickerBound = '1';
+  _mountThinkingLevel(wrap);
 
   function _close() {
     if (menu.classList.contains('hidden')) return;
@@ -991,6 +993,31 @@ export function updateModelPicker() {
     label.textContent = displayName;
   }
   _updateReasoningEffortUI(modelId, s, latestPending, selectedEndpoint);
+  refreshThinkingLevel();
+  // A pending chat set up here (the startup default) has its chat-settings pill too.
+  if (!currentSessionId && latestPending) window.refreshChatContextHeader?.('pending-chat');
+}
+
+// ── Thinking level (chat_agent runtime) ──
+// Lives beside the picker button; the legacy Thinking toggle and effort menu are separate.
+let _thinkingLevel = null;
+function _mountThinkingLevel(wrap) {
+  if (_thinkingLevel) return;
+  _thinkingLevel = createThinkingLevelSelect({
+    // No session yet: the owner's last-used level, which the new chat inherits.
+    onChange: async value => (await saveChatAgentSetting(_deps.getCurrentSessionId() || '', 'thinking_level', value)) !== null,
+  });
+  wrap.appendChild(_thinkingLevel.el);
+  // A refused level or tools rejection is now learned server-side: re-read so it shows greyed.
+  window.addEventListener(CAPABILITIES_CHANGED, refreshThinkingLevel);
+}
+
+// Re-read for the current chat, or for the pending chat's pick when there is none.
+// Called whenever the chat or its route changes: picker update and the first message creating the session.
+export function refreshThinkingLevel() {
+  if (!_thinkingLevel || !_deps) return;
+  const sid = _deps.getCurrentSessionId() || '';
+  _thinkingLevel.refresh(sid, sid ? null : _deps.getPendingChat());
 }
 
 // ── Reasoning effort control for models supporting reasoning levels ──

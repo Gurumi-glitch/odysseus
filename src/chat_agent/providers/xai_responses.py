@@ -21,6 +21,7 @@ from src.chat_agent.providers import (
     Usage,
     replays_reasoning,
     tool_output_text,
+    wire_effort,
 )
 # Relied on: normalize_base strips a trailing /chat/completions, /responses,
 # /models (and "/"), leaving the configured API base such as .../v1.
@@ -50,10 +51,12 @@ def build_payload(
     conversation: List[Dict[str, Any]],
     *,
     cache_key: str,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
+    thinking: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """``thinking``: a level to send (off, low ... max); None sends none."""
     payload: Dict[str, Any] = {
         "model": endpoint.model,
         "input": _input_items(conversation, endpoint.model),
@@ -62,13 +65,15 @@ def build_payload(
         "include": _INCLUDE,
         "prompt_cache_key": cache_key,
     }
-    if not _omit_temperature(_detect_provider(endpoint.url), endpoint.model):
+    if temperature is not None and not _omit_temperature(_detect_provider(endpoint.url), endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
         payload["max_output_tokens"] = max_tokens
     if tools:
         payload["tools"] = [_function_tool(tool) for tool in tools]
         payload["tool_choice"] = "auto"
+    if thinking is not None:
+        payload["reasoning"] = {"effort": wire_effort(thinking)}
     return payload
 
 
@@ -142,13 +147,15 @@ async def stream_round(
     conversation: List[Dict[str, Any]],
     *,
     cache_key: str,
-    temperature: float,
+    temperature: Optional[float],
     max_tokens: int,
     tools: Sequence[Dict[str, Any]] = (),
+    thinking: Optional[str] = None,
 ) -> AsyncIterator[RoundEvent]:
     payload = build_payload(
         endpoint, conversation,
         cache_key=cache_key, temperature=temperature, max_tokens=max_tokens, tools=tools,
+        thinking=thinking,
     )
     events = _attempt(endpoint, payload)
     first = await anext(events, None)

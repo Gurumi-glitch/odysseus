@@ -35,12 +35,14 @@ from src.agent_tools import MAX_AGENT_ROUNDS
 # that replaces it starts with the flag clear.
 from src import agent_runs
 from src.chat_agent import (
-    asks, classifier, permissions, prompt, repeat_guard, result_events, store, tools, transcript, turn_context,
+    asks, budget, capabilities, classifier, degenerate, permissions, prompt, repeat_guard, result_events, store, tools,
+    transcript, turn_context,
 )
 from src.chat_agent.providers import (
     XAI,
     Endpoint,
     ProviderError,
+    ReasoningDelta,
     RoundEnd,
     RoundEvent,
     TextDelta,
@@ -51,7 +53,13 @@ from src.chat_agent.providers import (
 from src.chat_agent.routing import ComposerToggles
 from src import settings
 from src.llm_core import LLMConfig
-from src.model_context import estimate_text_tokens, estimate_tokens
+# Relies on: fit_output_token_budget returns a positive allowance unchanged
+# when it fits the window less the estimated request (messages + tool schemas)
+# and a safety margin, else that room (at least 1).
+from src.generation_budget import fit_output_token_budget
+# Relies on: get_context_length_known returns (window, measured); measured is
+# False only for the bare DEFAULT_CONTEXT fallback.
+from src.model_context import estimate_text_tokens, estimate_tokens, get_context_length_known
 # Relies on: function_call_to_tool_block converts a native call into the
 # executor's block (bare email names become mcp__email__*), or returns None
 # when the arguments are unusable.
@@ -76,6 +84,16 @@ _NOT_RUN_REASONS = {
     transcript.STOP_REPEAT_GUARD: REPEAT_STOP_REASON,
     transcript.STOP_ASK_EXPIRED: ASK_EXPIRED_REASON,
 }
+CRASH_MESSAGE = "The chat agent runtime failed on this turn. See the server log."
+# A round cut at the output limit (finish_reason=length, spec #89). No retry.
+OUTPUT_LIMIT_THINKING = (
+    "Stopped: {model} reached the output limit while thinking, before any answer. "
+    "Raise Max tokens or lower the thinking level."
+)
+OUTPUT_LIMIT_TOOL_CALL = (
+    "Stopped: {model} reached the output limit in the middle of a tool call; the call was not run."
+)
+OUTPUT_LIMIT_NOTICE = "stopped at output limit"
 # With no fallback configured, one retry on these (the legacy foreground
 # availability retry, spec #44 Providers).
 SINGLE_CANDIDATE_RETRY_STATUSES = frozenset({502, 503, 504, 529})
@@ -100,6 +118,13 @@ class Fallback:
 
 
 @dataclass(frozen=True)
+class LevelRefused:
+    """The thinking level was refused; the round is re-sent without one."""
+
+    event: Dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ChatAgentTurn:
     session_id: str
     sess: Any
@@ -107,7 +132,8 @@ class ChatAgentTurn:
     owner: str
     toggles: ComposerToggles
     auto_escalated: bool
-    temperature: float
+    # The session's overrides; None / 0 = unset, and nothing is sent.
+    temperature: Optional[float]
     max_tokens: int
     # The route's build_chat_context bound to this request; prompt picks the flags.
     build_context: Callable[..., Awaitable[Any]]
@@ -142,8 +168,6 @@ class ChatAgentTurn:
     auto_mode: bool = False
     # The user's message as sent, for auto mode's classifier.
     message: str = ""
-    # The route's resolved thinking switch ("on"/"off", None = model default).
-    thinking_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -190,44 +214,67 @@ def _replayed_history(turn: ChatAgentTurn) -> List[Any]:
 
 def _stream_round(
     turn: ChatAgentTurn, provider: str, endpoint: Endpoint, conversation: List[Dict[str, Any]],
-    tool_schemas: Sequence[Dict[str, Any]],
+    tool_schemas: Sequence[Dict[str, Any]], thinking: Optional[str],
 ) -> AsyncIterator[RoundEvent]:
+    max_tokens = _max_tokens(turn.max_tokens, endpoint, conversation, tool_schemas)
     if provider == XAI:
         return xai_responses.stream_round(
             endpoint, conversation, cache_key=turn.session_id,
-            temperature=turn.temperature, max_tokens=turn.max_tokens, tools=tool_schemas,
+            temperature=turn.temperature, max_tokens=max_tokens, tools=tool_schemas,
+            thinking=thinking,
         )
     return chat_completions.stream_round(
-        endpoint, conversation, temperature=turn.temperature, max_tokens=turn.max_tokens,
-        tools=tool_schemas, thinking_mode=turn.thinking_mode,
+        endpoint, conversation, temperature=turn.temperature, max_tokens=max_tokens,
+        tools=tool_schemas, thinking=thinking,
     )
 
 
+def _max_tokens(
+    requested: int, endpoint: Endpoint, conversation: List[Dict[str, Any]], tool_schemas: Sequence[Dict[str, Any]],
+) -> int:
+    """A set max_tokens clamped to the room left in a measured window, so the
+    server never rejects the request for asking too much. An unmeasured
+    window's fallback size proves nothing, so it does not clamp."""
+    if requested <= 0:
+        return requested
+    window, measured = get_context_length_known(endpoint.url, endpoint.model)
+    if not measured:
+        return requested
+    return fit_output_token_budget(requested, window, transcript.text_view(conversation), list(tool_schemas))
+
+
 async def _round_with_fallback(
-    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]],
+    turn: ChatAgentTurn, endpoint: Endpoint, conversation: List[Dict[str, Any]], request: List[Dict[str, Any]],
     tool_schemas: Sequence[Dict[str, Any]], history_start: int, current: Dict[str, Any],
-) -> AsyncIterator[Union[RoundEvent, Fallback]]:
+) -> AsyncIterator[Union[RoundEvent, Fallback, LevelRefused]]:
     """One round on the turn's current candidate; a failure before any output
     with an eligible status moves to the next candidate (spec #44 Providers).
     A failure after output passes through: switching would repeat streamed text.
-    A fallback whose window the history exceeds gets it compacted once
-    (``history_start`` and ``current``: see transcript.fit_request)."""
+    ``request`` is ``conversation`` as the overflow gate let it through; a
+    fallback starts again from ``conversation``, compacted once when its window
+    is exceeded (``history_start`` and ``current``: see transcript.fit_request)."""
     candidates = turn.candidates
     start = next(i for i, candidate in enumerate(candidates) if candidate.endpoint == endpoint)
     failures: List[Dict[str, Any]] = []
     reason = ""
+    level = store.chat_setting(turn.owner, turn.session_id, store.THINKING_LEVEL)
     for index in range(start, len(candidates)):
         candidate = candidates[index]
-        request = conversation if index == start else await transcript.fit_request(
-            conversation, history_start, current, candidate.endpoint, turn.owner,
-        )
+        if index != start:
+            # The gate's trim was for the failed model's window, and later
+            # rounds continue from this request: never a trimmed copy.
+            request = await transcript.fit_request(conversation, history_start, current, candidate.endpoint, turn.owner)
+        # Per candidate: a fallback model takes its own set of levels.
+        thinking = (await capabilities.thinking_levels(
+            candidate.endpoint.url, candidate.endpoint.model, candidate.endpoint.headers,
+        )).to_send(level)
         retry_left = len(candidates) == 1
         while True:
             failure = None
             committed = False
             held: List[RoundEvent] = []
             provider = provider_key(candidate.endpoint.url)
-            async with aclosing(_stream_round(turn, provider, candidate.endpoint, request, tool_schemas)) as events:
+            async with aclosing(_stream_round(turn, provider, candidate.endpoint, request, tool_schemas, thinking)) as events:
                 async for event in events:
                     if not committed:
                         if isinstance(event, ProviderError):
@@ -247,6 +294,16 @@ async def _round_with_fallback(
                     yield event
             if failure is None:
                 return
+            if thinking is not None and capabilities.is_effort_rejection(failure.status, failure.message):
+                # The level failed, not the model: re-send once on this
+                # candidate at the server's default, before any fallback (#80).
+                capabilities.learn_unsupported_level(candidate.endpoint.url, candidate.endpoint.model, level)
+                thinking = None
+                yield LevelRefused({
+                    "type": "thinking_level_refused", "level": level,
+                    "message": capabilities.LEVEL_REFUSED.format(model=candidate.endpoint.model, level=level),
+                })
+                continue
             if retry_left and failure.status in SINGLE_CANDIDATE_RETRY_STATUSES:
                 retry_left = False
                 logger.warning("chat_agent: retrying %s after pre-output HTTP %s",
@@ -254,6 +311,12 @@ async def _round_with_fallback(
                 await asyncio.sleep(LLMConfig.RETRY_DELAY)
                 continue
             break
+        if tool_schemas and capabilities.is_tools_rejection(failure.status, failure.message):
+            # A capability problem, not an outage: no fallback, no re-run;
+            # the next turn routes this model to legacy (#79).
+            capabilities.learn_no_native_tools(candidate.endpoint.url, candidate.endpoint.model)
+            yield ProviderError(failure.status, capabilities.NATIVE_TOOLS_REJECTED)
+            return
         if failure.status not in turn.fallback_statuses or index == len(candidates) - 1:
             yield failure
             return
@@ -304,6 +367,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         return contexts[-1]
 
     streamed: List[str] = []
+    thought: List[str] = []
     usage = _TurnUsage(time.monotonic(), turn.candidates[0])
 
     def hold_ask(call: Dict[str, Any], tool: str, command: str, card: dict) -> None:
@@ -348,9 +412,13 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             global_disabled_tools=settings.get_setting("disabled_tools", []),
             rules=rules,
         )
-        surface = _configured_model_tool_surface(
+        window, measured = get_context_length_known(endpoint.url, endpoint.model)
+        overflow_policy = store.chat_setting(turn.owner, turn.session_id, store.CONTEXT_OVERFLOW)
+        surface = budget.tool_surface(_configured_model_tool_surface(
             endpoint.url, endpoint.model, turn.owner, headers=endpoint.headers,
-        )
+        ), tools.upfront_schemas(layers.denied_names, ""), window, measured)
+        logger.info("chat_agent: %s tool surface %s (window %s, measured %s)",
+                    endpoint.model, surface or "full", window, measured)
         upfront = tools.upfront_schemas(layers.denied_names, surface)
         # Non-admins never see MCP tools (spec #44, managed deny layer).
         catalog = tools.deferred_catalog(
@@ -408,41 +476,87 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # Tool images live for one round: the next request shows them, the one
         # after drops them, so frames never pile up in the request.
         visual = None
+        # Ends the turn after the loop; ``saved`` failures write a row even
+        # before the first checkpoint, so the error is there on reload.
+        failure: Optional[ProviderError] = None
+        saved = False
         while True:
             end = None
             streamed.clear()
+            thought.clear()
+            # The prompt gate (spec #89), under the chat's Context overflow policy.
+            request, dropped, refused = budget.gate(
+                overflow_policy, not record.rounds, conversation, round_tools, window, measured,
+                history_start, current,
+            )
+            if refused is not None:
+                failure, saved = ProviderError(None, refused), True
+                break
+            if dropped:
+                yield _event({"type": "trimmed", "dropped": dropped,
+                              "message": budget.TRIMMED_MESSAGE.format(count=dropped)})
             yield _event({"type": "agent_step", "round": len(record.rounds) + 1})
-            async for event in _round_with_fallback(
-                turn, endpoint, conversation, round_tools, history_start, current,
-            ):
-                if isinstance(event, Fallback):
-                    endpoint, conversation = event.candidate.endpoint, event.conversation
-                    usage.route = event.candidate
-                    record.provider, record.model = provider_key(endpoint.url), endpoint.model
-                    yield _event(event.event)
-                elif isinstance(event, ProviderError):
-                    _finish_failed_turn(writer)
-                    yield _event({"type": "metrics", "data": turn_metrics()})
-                    yield _error_event(event.message, event.status)
-                    yield "data: [DONE]\n\n"
-                    return
-                if isinstance(event, TextDelta):
-                    usage.mark_output()
-                    streamed.append(event.text)
-                    yield _event({"delta": event.text})
-                elif isinstance(event, RoundEnd):
-                    usage.mark_output()
-                    end = event
+            degenerate_guard = degenerate.RoundGuard(endpoint.model)
+            # Leaving the block closes the provider stream, so a tripped
+            # guard stops the server generating at once.
+            async with aclosing(_round_with_fallback(
+                turn, endpoint, conversation, request, round_tools, history_start, current,
+            )) as round_events:
+                async for event in round_events:
+                    if isinstance(event, Fallback):
+                        endpoint, conversation = event.candidate.endpoint, event.conversation
+                        # Later rounds are gated against the model now answering.
+                        window, measured = get_context_length_known(endpoint.url, endpoint.model)
+                        usage.route = event.candidate
+                        record.provider, record.model = provider_key(endpoint.url), endpoint.model
+                        yield _event(event.event)
+                    elif isinstance(event, LevelRefused):
+                        yield _event(event.event)
+                    elif isinstance(event, ProviderError):
+                        failure = event
+                        break
+                    if isinstance(event, (TextDelta, ReasoningDelta)) and degenerate_guard.tripped(event.text):
+                        failure, saved = ProviderError(502, degenerate.MESSAGE.format(model=endpoint.model)), True
+                        break
+                    if isinstance(event, TextDelta):
+                        usage.mark_output()
+                        streamed.append(event.text)
+                        yield _event({"delta": event.text})
+                    elif isinstance(event, ReasoningDelta):
+                        usage.mark_output()
+                        thought.append(event.text)
+                        # The legacy thinking delta: the frontend's live block needs no change.
+                        yield _event({"delta": event.text, "thinking": True})
+                    elif isinstance(event, RoundEnd):
+                        usage.mark_output()
+                        end = event
+            if failure is not None:
+                # The degenerate round's text and thinking are not kept.
+                streamed.clear()
+                thought.clear()
+                break
             streamed.clear()
+            thought.clear()
             round_record = _round_record(end)
+            calls = [b for b in end.blocks if b["type"] == "tool_call"]
+            if end.output_limit:
+                failure = _output_limit(record, round_record, calls, endpoint.model)
+                saved = failure is not None
             record.rounds.append(round_record)
             usage.add_round(len(record.rounds), end, conversation)
             writer.checkpoint()
-            calls = [b for b in end.blocks if b["type"] == "tool_call"]
+            if failure is not None:
+                break
             if not calls or record.stop_reason == transcript.STOP_INTERRUPTED:
                 # Finish's tool-less round is the turn's last. A steer sent
-                # during a plain answer gets one more round to be answered.
-                if calls or record.stop_reason or not steers.texts or len(record.rounds) >= caps.max_rounds:
+                # during a plain answer gets one more round to be answered;
+                # an answer cut at the output limit ends the turn as it is.
+                if (calls or record.stop_reason or not steers.texts or end.output_limit
+                        or len(record.rounds) >= caps.max_rounds):
+                    if not calls and record.stop_reason is None and not record.round_texts[-1].strip():
+                        failure, saved = ProviderError(502, f"{endpoint.model} returned no answer"), True
+                        # Whitespace is not an answer; the thinking stays.
+                        round_record["blocks"] = _without_text(end.blocks)
                     break
                 conversation.append({"role": "assistant", "blocks": end.blocks})
                 _join_steers(record, conversation, auto, steers.take())
@@ -618,6 +732,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 record.stop_reason = transcript.STOP_MAX_ROUNDS
                 yield _event({"type": "rounds_exhausted", "rounds": caps.max_rounds})
                 break
+        if failure is not None:
+            _finish_failed_turn(writer, failure.message, save=saved)
+            yield _event({"type": "metrics", "data": turn_metrics()})
+            yield _error_event(failure.message, failure.status)
+            yield "data: [DONE]\n\n"
+            return
         # Steers that came after the last boundary stay in the record, so the
         # next turn's request carries them.
         unused = steers.close()
@@ -629,10 +749,17 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         message_id = writer.finish()
         _after_turn(turn, record, contexts[-1], message_id, tool_calls_used, metrics)
     except (asyncio.CancelledError, GeneratorExit):
-        # Stop: keep the completed blocks and the text streamed so far; partial
-        # reasoning is dropped and unfinished calls get cancelled results.
+        # Stop: keep the completed blocks and the text and thinking streamed so
+        # far (display only: no replay fields); unfinished calls get cancelled results.
+        partial = []
+        if thought:
+            partial.append({
+                "type": "reasoning", "provider": record.provider, "model": record.model, "text": "".join(thought),
+            })
         if streamed:
-            record.rounds.append({"blocks": [{"type": "text", "text": "".join(streamed)}]})
+            partial.append({"type": "text", "text": "".join(streamed)})
+        if partial:
+            record.rounds.append({"blocks": partial})
         unused = steers.close()
         if record.rounds:
             if unused:
@@ -646,8 +773,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         # A crash ends the turn visibly; it never falls back to legacy, which
         # could run side effects twice (ADR 0005).
         logger.exception("chat_agent turn failed for session %s", turn.session_id)
-        _finish_failed_turn(writer)
-        yield _error_event("The chat agent runtime failed on this turn. See the server log.")
+        _finish_failed_turn(writer, CRASH_MESSAGE)
+        yield _error_event(CRASH_MESSAGE)
         yield "data: [DONE]\n\n"
         return
     finally:
@@ -658,10 +785,35 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
     yield "data: [DONE]\n\n"
 
 
-def _finish_failed_turn(writer: transcript.TurnWriter) -> None:
-    """A row already checkpointed must not stay ``in_progress`` after an error."""
-    if writer.started:
+def _output_limit(
+    record: transcript.TurnRecord, round_record: Dict[str, Any], calls: List[Dict[str, Any]], model: str,
+) -> Optional[ProviderError]:
+    """A round cut at the output limit: the error that ends the turn, or None
+    when the answer is kept with a saved notice. The round's blocks lose what
+    must not be kept."""
+    blocks = round_record["blocks"]
+    if calls:
+        # Cut arguments are not run, and a call with no result would not replay.
+        round_record["blocks"] = [b for b in blocks if b["type"] != "tool_call"]
+        return ProviderError(502, OUTPUT_LIMIT_TOOL_CALL.format(model=model))
+    if not "".join(b["text"] for b in blocks if b["type"] == "text").strip():
+        # Takes the place of the empty-answer error; whitespace is not an answer.
+        round_record["blocks"] = _without_text(blocks)
+        return ProviderError(502, OUTPUT_LIMIT_THINKING.format(model=model))
+    record.notice = OUTPUT_LIMIT_NOTICE
+    return None
+
+
+def _without_text(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [b for b in blocks if b["type"] != "text"]
+
+
+def _finish_failed_turn(writer: transcript.TurnWriter, error: Optional[str] = None, *, save: bool = False) -> None:
+    """A row already checkpointed must not stay ``in_progress`` after an error;
+    ``save`` writes the row even if it was not, so the error survives a reload."""
+    if writer.started or save:
         writer.record.stop_reason = transcript.STOP_ERROR
+        writer.record.error = error
         writer.finish()
 
 

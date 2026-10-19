@@ -7870,3 +7870,41 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       font-size: 12px; white-space: nowrap; transition: all 0.15s;
       font-family: inherit; width: 100%;
     }
+.chat-context-select {
+  flex: 0 0 auto;
+  max-width: 130px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 6px;
+  padding: 2px 4px;
+}
+.chat-context-overflow-row.disabled { opacity: 0.5; }
+.chat-context-overflow-row.disabled .chat-context-select { cursor: not-allowed; }
+
+/* Thinking level select beside the model picker button (chat_agent runtime). */
+.thinking-level-select {
+  height: 21px;
+  max-width: 78px;
+  margin-left: 2px;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.thinking-level-select:hover:not(:disabled) { border-color: var(--border); color: var(--fg); }
+.thinking-level-select:disabled { opacity: 0.5; cursor: not-allowed; }
+.thinking-level-select option { background: var(--bg); color: var(--fg); }
+.thinking-level-select option:disabled { color: color-mix(in srgb, var(--fg) 40%, transparent); }
+.thinking-level-note {
+  margin: 4px 0;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+}

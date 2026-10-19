@@ -20,7 +20,6 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import (
-    LLMConfig,
     _normalize_http_status,
     llm_call_async,
     llm_call_async_with_route_fallback,
@@ -2064,6 +2063,45 @@ def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: lis
                    event.get("answered_by"), session_id)
 
 
+def _resolve_selected_endpoint(owner, selected_endpoint_id: str, selected_endpoint_url: str, bound_id=None):
+    """The enabled endpoint the browser's pick names, among those the owner
+    may chat with: ``(chat_url, headers, endpoint_id)``, or None.
+
+    Only registered endpoints are trusted: an id, or a URL matching exactly
+    one row (the session's bound endpoint when it has one)."""
+    from src.auth_helpers import owner_filter
+    from src.endpoint_resolver import build_headers, normalize_base
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if selected_endpoint_id:
+            q = q.filter(ModelEndpoint.id == selected_endpoint_id)
+        if owner:
+            q = owner_filter(q, ModelEndpoint, owner)
+        if selected_endpoint_url and not selected_endpoint_id:
+            candidates = [row for row in q.all() if _session_url_matches_endpoint(selected_endpoint_url, row.base_url or "")]
+            if bound_id:
+                candidates = [row for row in candidates if row.id == bound_id]
+            if len(candidates) != 1:
+                return None
+        else:
+            candidates = [q.first()]
+        ep = None
+        for cand in candidates:
+            if not cand:
+                continue
+            if selected_endpoint_id or _session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
+                ep = cand
+                break
+        if not ep:
+            return None
+        endpoint_url = build_chat_url(normalize_base(ep.base_url or ""))
+        headers = build_headers(ep.api_key or "", ep.base_url or "") if ep.api_key else {}
+        return endpoint_url, headers, ep.id
+    finally:
+        db.close()
+
+
 def _reconcile_selected_route_from_request(
     request: Request,
     sess,
@@ -2089,41 +2127,15 @@ def _reconcile_selected_route_from_request(
     resolved_endpoint_id = None
     if selected_endpoint_id or selected_endpoint_url:
         try:
-            from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_headers, normalize_base
-            db = SessionLocal()
-            try:
-                q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                if selected_endpoint_id:
-                    q = q.filter(ModelEndpoint.id == selected_endpoint_id)
-                if owner:
-                    q = owner_filter(q, ModelEndpoint, owner)
-                if selected_endpoint_url and not selected_endpoint_id:
-                    candidates = [row for row in q.all() if _session_url_matches_endpoint(selected_endpoint_url, row.base_url or "")]
-                    bound_id = getattr(sess, "endpoint_id", None)
-                    if bound_id:
-                        candidates = [row for row in candidates if row.id == bound_id]
-                    if len(candidates) != 1:
-                        return False
-                else:
-                    candidates = [q.first()]
-                ep = None
-                for cand in candidates:
-                    if not cand:
-                        continue
-                    if selected_endpoint_id or _session_url_matches_endpoint(selected_endpoint_url, cand.base_url or ""):
-                        ep = cand
-                        break
-                if not ep:
-                    return False
-                endpoint_url = build_chat_url(normalize_base(ep.base_url or ""))
-                headers = build_headers(ep.api_key or "", ep.base_url or "") if ep.api_key else {}
-                resolved_endpoint_id = ep.id
-            finally:
-                db.close()
+            resolved = _resolve_selected_endpoint(
+                owner, selected_endpoint_id, selected_endpoint_url, getattr(sess, "endpoint_id", None),
+            )
         except Exception as e:
             logger.warning("Failed to resolve selected endpoint %s/%s for %s: %s", selected_endpoint_id, selected_endpoint_url, session_id, e)
             return False
+        if not resolved:
+            return False
+        endpoint_url, headers, resolved_endpoint_id = resolved
 
     if not endpoint_url:
         return False
@@ -3014,7 +3026,7 @@ def setup_chat_routes(
         # context prefetching, deny-set assembly and turn-contract binding.
         # The legacy promotion above still decides whether this is an agent
         # turn; its toggle rewrites are ignored (composer_toggles is raw).
-        runtime = choose_runtime(TurnFacts(
+        runtime = await choose_runtime(TurnFacts(
             owner=owner,
             agent_turn=(
                 chat_mode == "agent"
@@ -3054,13 +3066,9 @@ def setup_chat_routes(
                 owner=owner,
                 toggles=composer_toggles,
                 auto_escalated=auto_escalated,
-                temperature=(
-                    temperature_override
-                    if temperature_override is not None
-                    else LLMConfig.DEFAULT_TEMPERATURE
-                ),
+                # Unset sends nothing: the server's default applies (spec #89).
+                temperature=temperature_override,
                 max_tokens=getattr(sess, "max_tokens_override", None) or 0,
-                thinking_mode=thinking_mode,
                 build_context=functools.partial(
                     build_chat_context,
                     sess, request, chat_handler, chat_processor,

@@ -52,7 +52,16 @@ export default ui;
     "providers.mjs": "export const providerLogo = () => '';\n",
     "modelPicker.mjs": (
         "export const initModelPicker = () => {};\n"
+        "export const refreshThinkingLevel = () => {};\n"
         "export const updateModelPicker = () => {};\n"
+    ),
+    "pendingChatSettings.mjs": (
+        "export const applyPendingGeneration = async () => true;\n"
+        "export const dropPendingGeneration = () => {};\n"
+    ),
+    "chatAgentSettings.mjs": (
+        "export const applyPendingAgentSettings = async () => true;\n"
+        "export const dropPendingAgentSettings = () => {};\n"
     ),
     "theme.mjs": "export default {};\n",
     "spinner.mjs": "export default {};\n",
@@ -318,8 +327,16 @@ def results(tmp_path_factory):
             "import { providerLogo } from './providers.mjs';",
         ),
         (
-            r"import \{ initModelPicker, updateModelPicker \} from './modelPicker\.js(?:[?#][^']*)?';",
-            "import { initModelPicker, updateModelPicker } from './modelPicker.mjs';",
+            r"import \{ initModelPicker, refreshThinkingLevel, updateModelPicker \} from './modelPicker\.js(?:[?#][^']*)?';",
+            "import { initModelPicker, refreshThinkingLevel, updateModelPicker } from './modelPicker.mjs';",
+        ),
+        (
+            r"import \{ applyPendingGeneration, dropPendingGeneration \} from './pendingChatSettings\.js(?:[?#][^']*)?';",
+            "import { applyPendingGeneration, dropPendingGeneration } from './pendingChatSettings.mjs';",
+        ),
+        (
+            r"import \{ applyPendingAgentSettings, dropPendingAgentSettings \} from './chatAgentSettings\.js(?:[?#][^']*)?';",
+            "import { applyPendingAgentSettings, dropPendingAgentSettings } from './chatAgentSettings.mjs';",
         ),
         (
             r"import themeModule from './theme\.js(?:[?#][^']*)?';",

@@ -1,0 +1,52 @@
+{
+  "auto": {
+    "status": 200,
+    "body": {
+      "prompt": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  },
+  "none": {
+    "status": 200,
+    "body": {
+      "prompt": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
+  },
+  "low": {
+    "status": 200,
+    "body": {
+      "prompt": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  },
+  "medium": {
+    "status": 200,
+    "body": {
+      "prompt": "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  },
+  "high": {
+    "status": 500,
+    "body": {
+      "error": {
+        "code": 500,
+        "message": "\n------------\nWhile executing CallExpression at line 49, column 28 in source:\n...', 'low') %}↵        {{- raise_exception('Unexpected reasoning effort ' ~ reason...\n                                           ^\nError: Jinja Exception: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+        "type": "server_error"
+      }
+    }
+  },
+  "xhigh": {
+    "status": 200,
+    "body": {
+      "prompt": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    }
+  },
+  "max": {
+    "status": 500,
+    "body": {
+      "error": {
+        "code": 500,
+        "message": "\n------------\nWhile executing CallExpression at line 49, column 28 in source:\n...', 'low') %}↵        {{- raise_exception('Unexpected reasoning effort ' ~ reason...\n                                           ^\nError: Jinja Exception: Unexpected reasoning effort max. Supported types are xhigh (default), medium, and low.",
+        "type": "server_error"
+      }
+    }
+  }
+}

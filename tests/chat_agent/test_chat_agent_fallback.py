@@ -296,3 +296,24 @@ async def test_legacy_fallback_on_an_unknown_route_keeps_the_session(harness, mo
 
     assert harness.session.model == PRIMARY_MODEL
     assert harness.row.model == PRIMARY_MODEL
+
+
+@pytest.mark.asyncio
+async def test_later_rounds_are_gated_against_the_fallbacks_window(harness, monkeypatch):
+    # Context overflow gate (#95): after a fallback, the window that decides is
+    # the answering model's, not the selected one's.
+    from src.chat_agent import store
+    from tests.chat_agent.test_chat_agent_route import _sse_tool_calls
+
+    _switch_on()
+    store.set_chat_settings("alice", "session-1", {store.CONTEXT_OVERFLOW: store.OVERFLOW_STOP})
+    windows = {PRIMARY_MODEL: 128_000, BACKUP_MODEL: 16_384}
+    monkeypatch.setattr(loop, "get_context_length_known", lambda url, model: (windows[model], True))
+    # A ~12k-token call: the next request is over 85% of 16k, far under 128k.
+    padded = _sse_tool_calls(("no_such_tool", {"pad": "a " * 20_000}))
+    _script(monkeypatch, harness, {PRIMARY_MODEL: [503], BACKUP_MODEL: [padded, ["Done."]]})
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert harness.captured["provider_calls"] == [PRIMARY_MODEL, BACKUP_MODEL]
+    assert "tokens exceeds the 16384-token window" in body

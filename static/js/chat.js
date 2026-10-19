@@ -6,9 +6,12 @@
 // ES6 module — IIFE removed
 
 import Storage from './storage.js';
+import {
+  TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, temperatureToSlider, sliderToTemperature, formatTemperature,
+} from './generationSettings.js?v=20261013templeft1';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
-import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20260914metricssummary1';
+import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20261013turnerr1';
 import chatStream from './chatStream.js?v=20260914pdfstrip1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -36,6 +39,8 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { CAPABILITIES_CHANGED, createOverflowRow, saveChatAgentSetting } from './chatAgentSettings.js?v=20261019pending2';
+import { holdPendingGeneration, pendingGeneration } from './pendingChatSettings.js?v=20261014pending1';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';
 
@@ -361,6 +366,77 @@ import { invalidateSettings } from './appConfig.js';
     if (pRect.bottom > window.innerHeight - 8) popup.style.top = `${Math.max(8, rect.top - pRect.height - 8)}px`;
   }
 
+  // The routes answer after the popup is drawn, so the row starts greyed and
+  // fills in; a detached popup is harmless to update. A pending chat (no
+  // session yet) reads its pick and the owner's last-used policy.
+  function _appendOverflowRow(popup) {
+    const overflow = createOverflowRow({ onChange: _setChatContextOverflow });
+    popup.appendChild(overflow.el);
+    const reread = () => _resolveCurrentSessionId().then(sid => overflow.refresh(sid, sid ? null : _liveSessionModule().getPendingChat?.()));
+    reread();
+    // The popup has no close hook: a closed one drops its listener on the next event.
+    const rereadOverflow = () => {
+      if (!overflow.el.isConnected) { window.removeEventListener(CAPABILITIES_CHANGED, rereadOverflow); return; }
+      reread();
+    };
+    window.addEventListener(CAPABILITIES_CHANGED, rereadOverflow);
+  }
+
+  // save(change) gets {temperature_override} or {max_tokens_override}; null = Default / No limit.
+  function _appendGenerationSliders(popup, d, save) {
+    const addGenerationSlider = (label, value, min, max, step, formatter, key, toStored = Number) => {
+      const row = document.createElement('div');
+      row.className = 'chat-context-threshold-row';
+      row.innerHTML = `<div class="chat-context-threshold-top"><span>${label}</span><span>${formatter(value)}</span></div>`;
+      const input = document.createElement('input');
+      Object.assign(input, { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value), className: 'chat-context-threshold-slider preset-range' });
+      input.addEventListener('input', () => { row.querySelector('.chat-context-threshold-top span:last-child').textContent = formatter(Number(input.value)); });
+      input.addEventListener('change', () => save({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : toStored(input.value) }));
+      row.appendChild(input); popup.appendChild(row);
+    };
+    addGenerationSlider('Temperature', temperatureToSlider(d.temperature_override), TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, formatTemperature, 'temperature_override', sliderToTemperature);
+    addGenerationSlider('Max tokens', d.max_tokens_override ?? 8448, 256, 8448, 256, v => Number(v) > 8192 ? 'No limit' : Number(v).toLocaleString(), 'max_tokens_override');
+  }
+
+  // A new chat before its first message: only what needs no session. The
+  // sliders are held and written to the session that first message creates.
+  function _pendingContextPopup() {
+    const popup = document.createElement('div');
+    popup.className = 'chat-context-popup';
+    const title = document.createElement('div');
+    title.className = 'chat-context-popup-title';
+    title.textContent = 'New Chat';
+    popup.appendChild(title);
+    _appendOverflowRow(popup);
+    _appendGenerationSliders(popup, pendingGeneration(), change => { holdPendingGeneration(change); return true; });
+    return popup;
+  }
+
+  function _openContextHeaderPopup(popup, pill) {
+    pill.classList.add('open');
+    _contextHeaderAnchorEl?.classList?.add('open');
+    _positionContextHeaderPopup(popup, _contextHeaderAnchorEl);
+    setTimeout(() => {
+      if (!popup.isConnected) return;
+      const closeOnEscape = (ev) => {
+        if (ev.key !== 'Escape') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        _closeContextHeaderPopup();
+      };
+      document.addEventListener('keydown', closeOnEscape, true);
+      const close = (ev) => {
+        if (popup.contains(ev.target) || pill.contains(ev.target) || _contextHeaderAnchorEl?.contains?.(ev.target)) return;
+        _closeContextHeaderPopup();
+      };
+      document.addEventListener('pointerdown', close, true);
+      _contextHeaderPopupCleanup = () => {
+        document.removeEventListener('pointerdown', close, true);
+        document.removeEventListener('keydown', closeOnEscape, true);
+      };
+    }, 0);
+  }
+
   function _showContextHeaderPopup(anchorEl = null) {
     const pill = document.getElementById('chat-context-pill');
     if (!pill || pill.hidden || !_contextHeaderData) return;
@@ -371,6 +447,10 @@ import { invalidateSettings } from './appConfig.js';
     _contextHeaderAnchorEl = anchorEl || pill;
 
     const d = _contextHeaderData;
+    if (d.pending) {
+      _openContextHeaderPopup(_pendingContextPopup(), pill);
+      return;
+    }
     const pct = Number(d.context_percent || 0);
     const colorClass = _contextColorClass(pct);
     const modelShort = String(d.model || 'Unknown').split('/').pop();
@@ -407,6 +487,9 @@ import { invalidateSettings } from './appConfig.js';
       row.appendChild(b);
 	      popup.appendChild(row);
 	    });
+
+    // Above Memory extraction.
+    _appendOverflowRow(popup);
 
 	    const memoryOn = d.memory_extraction_enabled !== false;
 	    const memoryRow = document.createElement('div');
@@ -519,18 +602,7 @@ import { invalidateSettings } from './appConfig.js';
     const effort = document.getElementById('reasoning-effort-wrap');
     if (effort) popup.appendChild(effort);
 
-    const addGenerationSlider = (label, value, min, max, step, formatter, key) => {
-      const row = document.createElement('div');
-      row.className = 'chat-context-threshold-row';
-      row.innerHTML = `<div class="chat-context-threshold-top"><span>${label}</span><span>${formatter(value)}</span></div>`;
-      const input = document.createElement('input');
-      Object.assign(input, { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value), className: 'chat-context-threshold-slider preset-range' });
-      input.addEventListener('input', () => { row.querySelector('.chat-context-threshold-top span:last-child').textContent = formatter(Number(input.value)); });
-      input.addEventListener('change', () => _saveChatGenerationSettings({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : Number(input.value) }));
-      row.appendChild(input); popup.appendChild(row);
-    };
-    addGenerationSlider('Temperature', d.temperature_override ?? 1, 0, 2, 0.1, v => Number(v).toFixed(1), 'temperature_override');
-    addGenerationSlider('Max tokens', d.max_tokens_override ?? 8448, 256, 8448, 256, v => Number(v) > 8192 ? 'No limit' : Number(v).toLocaleString(), 'max_tokens_override');
+    _appendGenerationSliders(popup, d, _saveChatGenerationSettings);
 
 	    const threshold = _clampAutoCompactThreshold(d.auto_compact_threshold || 85);
     const thresholdRow = document.createElement('div');
@@ -609,28 +681,7 @@ import { invalidateSettings } from './appConfig.js';
       popup.appendChild(compactBtn);
     }
 
-    pill.classList.add('open');
-    _contextHeaderAnchorEl?.classList?.add('open');
-    _positionContextHeaderPopup(popup, _contextHeaderAnchorEl);
-    setTimeout(() => {
-      if (!popup.isConnected) return;
-      const closeOnEscape = (ev) => {
-        if (ev.key !== 'Escape') return;
-        ev.preventDefault();
-        ev.stopPropagation();
-        _closeContextHeaderPopup();
-      };
-      document.addEventListener('keydown', closeOnEscape, true);
-      const close = (ev) => {
-        if (popup.contains(ev.target) || pill.contains(ev.target) || _contextHeaderAnchorEl?.contains?.(ev.target)) return;
-        _closeContextHeaderPopup();
-      };
-      document.addEventListener('pointerdown', close, true);
-      _contextHeaderPopupCleanup = () => {
-        document.removeEventListener('pointerdown', close, true);
-        document.removeEventListener('keydown', closeOnEscape, true);
-      };
-    }, 0);
+    _openContextHeaderPopup(popup, pill);
   }
 
 	  function _bindContextHeaderPill() {
@@ -644,6 +695,23 @@ import { invalidateSettings } from './appConfig.js';
       _showContextHeaderPopup(pill);
     });
 	  }
+
+  async function _setChatContextOverflow(value) {
+    const sm = _liveSessionModule();
+    // A pending chat stays pending: the owner's last-used policy is what its first message inherits.
+    const pending = !sm.getCurrentSessionId?.() && sm.hasPendingChat?.();
+    const sid = pending ? '' : await _resolveCurrentSessionId({ adopt: true });
+    if (!sid && !pending) {
+      uiModule.showToast('Open a chat first');
+      return false;
+    }
+    const saved = await saveChatAgentSetting(sid, 'context_overflow', value);
+    if (saved === null) {
+      uiModule.showToast('Could not save context overflow; kept the previous setting');
+      return false;
+    }
+    return true;
+  }
 
 	  async function _setChatMemoryExtraction(enabled, toggleBtn, stateText) {
 	    const sid = await _resolveCurrentSessionId({ adopt: true });
@@ -801,6 +869,15 @@ import { invalidateSettings } from './appConfig.js';
     const sm = _liveSessionModule();
     const sid = await _resolveCurrentSessionId({ adopt: false });
     const seq = ++_contextHeaderSeq;
+    if (!sid && sm?.hasPendingChat?.()) {
+      // No session, so no context to measure: the pill only opens the settings a new chat can take.
+      _contextHeaderData = { pending: true };
+      _renderContextHeaderRing(pill, 0);
+      pill.title = 'Chat settings';
+      pill.classList.remove('loading', 'warn', 'danger');
+      pill.hidden = false;
+      return;
+    }
     if (!sid) {
       _contextHeaderData = null;
       pill.hidden = true;
@@ -4068,6 +4145,9 @@ import { invalidateSettings } from './appConfig.js';
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
                 _streamTerminalError = createTerminalStreamError(json);
+                // The error may be the model refusing native tools, which the server
+                // has now learned: the next turn is legacy, so the controls re-grey.
+                window.dispatchEvent(new CustomEvent(CAPABILITIES_CHANGED));
                 console.error('Stream error:', _streamTerminalError.message);
                 if (spinner && spinner.element) spinner.destroy();
                 break;
@@ -4712,6 +4792,21 @@ import { invalidateSettings } from './appConfig.js';
               } else if (json.type === 'compacted') {
                 if (!_isBg) {
                   uiModule.showToast('Context compacted — older messages summarized');
+                }
+              } else if (json.type === 'trimmed') {
+                // chat_agent dropped old messages to fit the window; live only, not saved.
+                if (!_isBg) uiModule.showToast(json.message || 'Older messages dropped to fit the window');
+              } else if (json.type === 'thinking_level_refused') {
+                // The model rejected the chat's level and answered at its default;
+                // the line sits above the reply (the message body is re-rendered at
+                // finalize, which would wipe a note placed inside it). Live only.
+                if (!_isBg) {
+                  const note = document.createElement('div');
+                  note.className = 'thinking-level-note';
+                  note.textContent = json.message || 'This model does not support that thinking level.';
+                  if (holder && holder.parentNode) holder.parentNode.insertBefore(note, holder);
+                  else document.getElementById('chat-history')?.appendChild(note);
+                  window.dispatchEvent(new CustomEvent(CAPABILITIES_CHANGED));
                 }
               } else if (json.type === 'context_trimmed') {
                 if (!_isBg) {

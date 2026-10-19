@@ -44,13 +44,14 @@ def _endpoint(method):
 async def test_switch_is_off_by_default_and_persists_per_user(_store_dir):
     get_settings, put_settings = _endpoint("GET"), _endpoint("PUT")
 
-    assert await get_settings(_request()) == {"chat_runtime": "legacy", "available": True}
+    def switch(settings):
+        return settings["chat_runtime"], settings["available"]
 
-    assert await put_settings(_request(), {"chat_runtime": "new"}) == {
-        "chat_runtime": "new", "available": True,
-    }
-    assert await get_settings(_request()) == {"chat_runtime": "new", "available": True}
-    assert await get_settings(_request("bob")) == {"chat_runtime": "legacy", "available": True}
+    assert switch(await get_settings(_request())) == ("legacy", True)
+
+    assert switch(await put_settings(_request(), {"chat_runtime": "new"})) == ("new", True)
+    assert switch(await get_settings(_request())) == ("new", True)
+    assert switch(await get_settings(_request("bob"))) == ("legacy", True)
     assert os.listdir(_store_dir) == ["alice.json"]
 
 

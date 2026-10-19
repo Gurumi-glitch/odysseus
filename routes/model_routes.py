@@ -1012,7 +1012,10 @@ def _probe_google_models(base_url: str, api_key: str = None, timeout: int = 5, p
 def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
+    from src.chat_agent.capabilities import forget_endpoint
     from src.endpoint_resolver import resolve_url
+    # Every model-list probe is a fresh read: a reloaded or swapped model is re-detected (#89).
+    forget_endpoint(base_url)
     from src.llm_core import httpx_get_kimi_aware
     base = resolve_url(_normalize_base(base_url))
     provider = _safe_detect_provider(base)
