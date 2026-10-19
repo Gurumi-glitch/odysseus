@@ -3154,6 +3154,7 @@ def setup_chat_routes(
                     sess, request, chat_handler, chat_processor,
                     message=message,
                     session_id=session,
+                    selected_notes_context=selected_notes_context,
                     preset_id=preset_id,
                     att_ids=att_ids,
                     use_rag=use_rag,
