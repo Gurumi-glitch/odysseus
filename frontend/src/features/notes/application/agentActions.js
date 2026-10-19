@@ -47,6 +47,8 @@ export function createAgentActions({
       fd.append('session', sid);
       fd.append('mode', 'agent');
       fd.append('disabled_tools', JSON.stringify(['manage_notes']));
+      // Nobody watches this run: asks are denied at once instead of waiting (#61).
+      fd.append('interactive', 'false');
       api.startChat(fd)
         .then(async (res) => {
           if (!res.ok || !res.body) return;
