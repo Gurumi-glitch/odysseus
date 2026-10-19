@@ -1,7 +1,8 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createOverflowRow, createThinkingLevelSelect, fetchChatAgentCapabilities, fetchChatAgentSettings, saveChatAgentSetting,
+  applyPendingAgentSettings, createOverflowRow, createThinkingLevelSelect, dropPendingAgentSettings,
+  fetchChatAgentCapabilities, fetchChatAgentSettings, saveChatAgentSetting,
 } from '../static/js/chatAgentSettings.js';
 import {
   applyPendingGeneration, dropPendingGeneration, holdPendingGeneration, pendingGeneration,
@@ -38,7 +39,7 @@ function serve(answers) {
   };
 }
 
-beforeEach(() => dropPendingGeneration());
+beforeEach(() => { dropPendingGeneration(); dropPendingAgentSettings(); });
 
 test('no chat yet: settings come from the owner (no session_id), capabilities from the picked endpoint and model', async () => {
   serve({ '/api/chat_agent/settings': { available: true, thinking_level: 'off' }, '/api/chat_agent/capabilities': CAPS });
@@ -129,8 +130,51 @@ test('nothing held: the new session is left at Default, no request', async () =>
   assert.deepEqual(calls, []);
 });
 
-test('a new chat starts at Default: dropping clears what an earlier pending chat held', () => {
+test('a new chat starts at Default: dropping clears what an earlier pending chat held', async () => {
+  serve({ '/api/chat_agent/settings': { available: true } });
   holdPendingGeneration({ temperature_override: 1.2 });
+  await saveChatAgentSetting('', 'thinking_level', 'high');
   dropPendingGeneration();
+  dropPendingAgentSettings();
   assert.deepEqual(pendingGeneration(), {});
+
+  serve({});
+  assert.equal(await applyPendingAgentSettings('s1'), true);
+  assert.deepEqual(calls, []);
+});
+
+// Issue #104: without this the chat keeps reading the owner's last-used value,
+// so a pick made later in any other chat changes this one too.
+test('Thinking level / Context overflow picked on a pending chat are stored on the session its first message creates', async () => {
+  serve({ '/api/chat_agent/settings': { available: true } });
+  await saveChatAgentSetting('', 'thinking_level', 'high');
+  await saveChatAgentSetting('', 'context_overflow', 'stop_at_limit');
+  await saveChatAgentSetting('', 'thinking_level', 'off');
+
+  serve({ '/api/chat_agent/settings': { available: true } });
+  assert.equal(await applyPendingAgentSettings('s 1'), true);
+  assert.deepEqual(calls, [{
+    url: '/api/chat_agent/settings', method: 'PUT',
+    body: { session_id: 's 1', thinking_level: 'off', context_overflow: 'stop_at_limit' },
+  }]);
+
+  // Applied once: the next new chat does not get them again.
+  serve({});
+  assert.equal(await applyPendingAgentSettings('s2'), true);
+  assert.deepEqual(calls, []);
+});
+
+test('nothing picked on a pending chat: no request, the chat keeps inheriting the last-used values', async () => {
+  serve({});
+  assert.equal(await applyPendingAgentSettings('s1'), true);
+  assert.deepEqual(calls, []);
+});
+
+test('a save on an existing chat is not held for the next new chat', async () => {
+  serve({ '/api/chat_agent/settings': { available: true } });
+  await saveChatAgentSetting('s0', 'thinking_level', 'high');
+
+  serve({});
+  assert.equal(await applyPendingAgentSettings('s1'), true);
+  assert.deepEqual(calls, []);
 });

@@ -5,8 +5,9 @@ import Storage from './storage.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js?v=20260916largetoolscroll1';
 import chatRenderer from './chatRenderer.js?v=20261013turnerr1';
 import { providerLogo } from './providers.js';
-import { initModelPicker, refreshThinkingLevel, updateModelPicker } from './modelPicker.js?v=20261014pending1';
+import { initModelPicker, refreshThinkingLevel, updateModelPicker } from './modelPicker.js?v=20261019pending2';
 import { applyPendingGeneration, dropPendingGeneration } from './pendingChatSettings.js?v=20261014pending1';
+import { applyPendingAgentSettings, dropPendingAgentSettings } from './chatAgentSettings.js?v=20261019pending2';
 import themeModule from './theme.js?v=20260911organsrain1';
 import spinnerModule from './spinner.js';
 import { actionMenuRank, orderActionMenuItems, SELECT_MENU_ICON } from './actionMenuOrder.js';
@@ -2063,6 +2064,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       _pendingChat = null;
       _pendingMaterializePromise = null;
       dropPendingGeneration();
+      dropPendingAgentSettings();
     }
     _clearHistoryPager();
     // Re-archive peeked session when navigating away
@@ -2451,6 +2453,7 @@ export function createDirectChat(url, modelId, endpointId, opts = {}) {
   _pendingChat = { url, modelId, endpointId, source: incomingSource };
   // A new chat starts at Default, whatever the previous pending chat held.
   dropPendingGeneration();
+  dropPendingAgentSettings();
   _pendingMaterializePromise = null;
   _skipAutoSelect = true;
   _suppressNextSessionLoading = true;
@@ -2569,8 +2572,11 @@ export async function materializePendingSession() {
       Storage.set('lastSessionId', payload.id);
       history.replaceState(null, '', '#' + payload.id);
     }
-    // Before the first turn streams: it reads Temperature / Max tokens from the session.
-    if (!(await applyPendingGeneration(payload.id))) {
+    // Before the first turn streams: it reads Temperature / Max tokens from the
+    // session, and Thinking level / Context overflow from the chat_agent store.
+    const generationSaved = await applyPendingGeneration(payload.id);
+    const agentSaved = await applyPendingAgentSettings(payload.id);
+    if (!generationSaved || !agentSaved) {
       uiModule.showError('Could not save the chat settings chosen before the first message');
     }
     // The controls read the pending pick until now; from here they read this chat.

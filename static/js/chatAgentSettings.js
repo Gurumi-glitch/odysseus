@@ -36,8 +36,37 @@ export async function fetchChatAgentCapabilities(sid, pending = null) {
   return getJson(`/api/chat_agent/capabilities?${query}`);
 }
 
+// Picks saved on a pending chat. Last-used alone is not enough: a chat with
+// no value of its own follows whatever is picked later in any other chat.
+let heldPending = {};
+
+// A new chat inherits the last-used values until something is picked on it.
+export function dropPendingAgentSettings() {
+  heldPending = {};
+}
+
+// Stores the pending chat's picks on the session its first message creates.
+// -> ok; nothing picked: no request.
+export async function applyPendingAgentSettings(sid) {
+  const change = heldPending;
+  heldPending = {};
+  if (!Object.keys(change).length) return true;
+  try {
+    const res = await fetch('/api/chat_agent/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ session_id: sid, ...change }),
+    });
+    return res.ok;
+  } catch (_) {
+    return false;
+  }
+}
+
 // Returns the new value on success, null when the save was refused.
-// No sid: only the owner's last-used value, which the new chat inherits.
+// No sid: the owner's last-used value now, and held for the session the
+// pending chat's first message creates (issue #104).
 export async function saveChatAgentSetting(sid, name, value) {
   try {
     const res = await fetch('/api/chat_agent/settings', {
@@ -46,7 +75,9 @@ export async function saveChatAgentSetting(sid, name, value) {
       credentials: 'same-origin',
       body: JSON.stringify(sid ? { session_id: sid, [name]: value } : { [name]: value }),
     });
-    return res.ok ? value : null;
+    if (!res.ok) return null;
+    if (!sid) heldPending = { ...heldPending, [name]: value };
+    return value;
   } catch (_) {
     return null;
   }

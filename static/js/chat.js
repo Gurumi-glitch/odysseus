@@ -39,7 +39,7 @@ import {
   inheritModelRouteState,
 } from './chatModelProvenance.js';
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
-import { CAPABILITIES_CHANGED, createOverflowRow, saveChatAgentSetting } from './chatAgentSettings.js?v=20261014pending1';
+import { CAPABILITIES_CHANGED, createOverflowRow, saveChatAgentSetting } from './chatAgentSettings.js?v=20261019pending2';
 import { holdPendingGeneration, pendingGeneration } from './pendingChatSettings.js?v=20261014pending1';
 import { loadPanel } from './panels.js?v=20260909movepicklayer1';
 import { invalidateSettings } from './appConfig.js';

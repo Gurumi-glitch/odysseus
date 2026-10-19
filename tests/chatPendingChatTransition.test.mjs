@@ -134,6 +134,25 @@ test('first message: the new session gets the held Temperature before anything r
   } finally { await page.close(); }
 });
 
+test('first message: a Thinking level picked on the pending chat is stored on the new session before anything reads it (#104)', async () => {
+  const page = await setup();
+  try {
+    await page.selectOption('.thinking-level-select', 'xhigh');
+    await page.waitForTimeout(50);
+    await page.evaluate(() => { window.calls.length = 0; });
+
+    assert.equal(await page.evaluate(() => window.sessions.materializePendingSession()), true);
+    await page.waitForTimeout(100);
+
+    const calls = await page.evaluate(() => window.calls);
+    const keys = calls.map(c => c.key);
+    const save = keys.indexOf('PUT /api/chat_agent/settings');
+    assert.ok(save > keys.indexOf('POST /api/session'));
+    assert.deepEqual(calls[save].body, { session_id: 's1', thinking_level: 'xhigh' });
+    assert.ok(keys.indexOf('GET /api/chat_agent/capabilities/s1') > save);
+  } finally { await page.close(); }
+});
+
 test('a later new chat starts at Default again', async () => {
   const page = await setup();
   try {

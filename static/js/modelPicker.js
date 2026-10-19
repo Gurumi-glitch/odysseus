@@ -6,7 +6,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import settingsModule from './settings.js?v=20260912writingstyle3';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
-import { CAPABILITIES_CHANGED, createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261014pending1';
+import { CAPABILITIES_CHANGED, createThinkingLevelSelect, saveChatAgentSetting } from './chatAgentSettings.js?v=20261019pending2';
 
 const API_BASE = window.location.origin;
 
