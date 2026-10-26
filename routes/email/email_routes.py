@@ -84,6 +84,17 @@ _SERVER_OWNED_OAUTH_FIELDS = {
 _CACHE_HOOKS: dict = {"invalidate_list": None}
 
 
+def _check_mail_host(host, owner: str, label: str) -> str | None:
+    """Reject unsafe or unresolved mail hosts before saving or testing them."""
+    from src.url_safety import check_outbound_host
+    ok, reason = check_outbound_host(host, block_private=_mail_private_blocked(owner))
+    if ok:
+        return None
+    logger.warning("Rejected %s mail host for owner=%r: %s", label, owner, reason)
+    # Resolver and exception details belong in server logs, never the response.
+    return f"Rejected {label} host: server address is not allowed or does not resolve"
+
+
 def _normalized_mail_host(value) -> str:
     """Normalize a mail hostname for exact provider-bound comparisons."""
     return str(value or "").strip().lower().rstrip(".")
@@ -6723,6 +6734,12 @@ def setup_email_routes():
         if account_id:
             _assert_owns_account(account_id, owner)
 
+        for field, label in (("imap_host", "IMAP"), ("smtp_host", "SMTP")):
+            if data.get(field):
+                host_error = await run_in_threadpool(_check_mail_host, data[field], owner, label)
+                if host_error:
+                    return {"ok": False, "error": host_error}
+
         # Non-reply automation flags stay global. Away/auto-reply settings are
         # account-scoped when an account_id is supplied by the Email Settings UI.
         settings = _load_settings()
@@ -6863,6 +6880,11 @@ def setup_email_routes():
         smtp_port, port_err = _coerce_port(data.get("smtp_port"), 465)
         if port_err:
             return {"ok": False, "error": port_err}
+        for field, label in (("imap_host", "IMAP"), ("smtp_host", "SMTP")):
+            if data.get(field):
+                host_error = await run_in_threadpool(_check_mail_host, data[field], owner, label)
+                if host_error:
+                    return {"ok": False, "error": host_error}
         db = SessionLocal()
         try:
             _lock_email_account_owner_mutation(db, owner)
@@ -6908,6 +6930,11 @@ def setup_email_routes():
         """Update an email account. Passwords only overwrite if non-empty."""
         # Path param account_id — dep validated via Query, re-check the path-param value.
         _assert_owns_account(account_id, owner)
+        for field, label in (("imap_host", "IMAP"), ("smtp_host", "SMTP")):
+            if data.get(field):
+                host_error = await run_in_threadpool(_check_mail_host, data[field], owner, label)
+                if host_error:
+                    return {"ok": False, "error": host_error}
         from core.database import SessionLocal, EmailAccount
         db = SessionLocal()
         try:
