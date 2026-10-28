@@ -8,6 +8,8 @@ the sessions table — otherwise the live token sits at rest as
 ProviderAuthSession is allowed to persist.
 """
 
+import asyncio
+import logging
 import types
 
 from sqlalchemy import create_engine
@@ -333,3 +335,87 @@ def test_route_descriptors_distinguish_same_model_on_two_accounts(monkeypatch):
     assert endpoint_resolver.resolve_route_descriptor_by_id("ep-a", route_b[0], "gpt-5.5", route_b[2], owner="alice") is None
     for desc in (desc_a, desc_b):
         assert "Authorization" not in str(desc) and "bearer-for" not in str(desc)
+
+
+def _seed_chatgpt_session(TestSessionLocal):
+    db = TestSessionLocal()
+    try:
+        db.add(ModelEndpoint(
+            id="ep1", name="ChatGPT Subscription", base_url=_CODEX_BASE,
+            provider_auth_id="auth1", owner="alice", is_enabled=True, api_key=None,
+        ))
+        db.add(DbSession(
+            id="sess1", name="chat", endpoint_url=_CODEX_BASE,
+            model="gpt-5.1-codex", owner="alice", headers={},
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _auto_name(monkeypatch, sess):
+    """Run auto_name_session with no task/utility endpoint configured."""
+    import src.llm_core as llm_core
+    import src.settings as settings
+
+    monkeypatch.setattr(settings, "load_settings", lambda: {})
+    monkeypatch.setattr(settings, "get_user_setting", lambda key, owner="", default=None: default)
+    llm_calls = []
+
+    async def fake_llm_call(url, model, messages, **kwargs):
+        llm_calls.append(kwargs["headers"])
+        if kwargs["headers"].get("Authorization") != "Bearer live-access-token":
+            raise RuntimeError("ChatGPT Subscription credentials expired or were rejected")
+        return "Codex Title"
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+    renames = []
+    manager = types.SimpleNamespace(update_session_name=lambda sid, title: renames.append((sid, title)))
+    asyncio.run(chat_helpers.auto_name_session(manager, sess))
+    return llm_calls, renames
+
+
+def _chatgpt_sess():
+    # Shape after get_session(): sync_session_metadata copied the DB's empty headers.
+    return types.SimpleNamespace(
+        id="sess1", endpoint_url=_CODEX_BASE, model="gpt-5.1-codex", owner="alice",
+        headers={}, history=[types.SimpleNamespace(role="user", content="Explain the Codex backend")],
+    )
+
+
+def test_auto_name_chatgpt_session_resolves_request_local_bearer(monkeypatch):
+    TestSessionLocal = _mem_db(monkeypatch)
+    _seed_chatgpt_session(TestSessionLocal)
+    monkeypatch.setattr(
+        endpoint_resolver, "resolve_endpoint_runtime",
+        lambda ep, owner=None: (_CODEX_BASE, "live-access-token"),
+    )
+
+    llm_calls, renames = _auto_name(monkeypatch, _chatgpt_sess())
+
+    assert llm_calls[0]["Authorization"] == "Bearer live-access-token"
+    assert renames == [("sess1", "Codex Title")]
+    db = TestSessionLocal()
+    try:
+        assert db.query(DbSession).filter(DbSession.id == "sess1").first().headers == {}
+    finally:
+        db.close()
+
+
+def test_auto_name_chatgpt_session_without_credentials_drops_stale_bearer(monkeypatch, caplog):
+    TestSessionLocal = _mem_db(monkeypatch)
+    _seed_chatgpt_session(TestSessionLocal)
+    # Provider disconnected or refresh failed: no usable key.
+    monkeypatch.setattr(
+        endpoint_resolver, "resolve_endpoint_runtime",
+        lambda ep, owner=None: (_CODEX_BASE, None),
+    )
+    sess = _chatgpt_sess()
+    sess.headers = {"Authorization": "Bearer stale-token"}
+
+    with caplog.at_level(logging.ERROR, logger="routes.chat_helpers"):
+        llm_calls, renames = _auto_name(monkeypatch, sess)  # must not raise
+
+    assert all("stale-token" not in str(headers) for headers in llm_calls)
+    assert renames == []
+    assert "Auto-name failed for sess1" in caplog.text

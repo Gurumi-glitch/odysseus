@@ -581,6 +581,11 @@ async def auto_name_session(session_manager, sess):
             return
 
         owner = getattr(sess, "owner", None)
+        from src.chatgpt_subscription import is_chatgpt_subscription_base
+        if is_chatgpt_subscription_base(endpoint_url):
+            # The bearer is request-local and never persisted, so a session
+            # reloaded via get_session() arrives here with empty headers.
+            resolve_session_auth(sess, sess.id, owner)
         t_url, t_model, t_headers = resolve_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers, owner=owner
         )
