@@ -108,6 +108,7 @@ async def test_servers_reporting_no_levels_leave_every_level_selectable(monkeypa
 THINKING_KEYS = ("reasoning", "reasoning_effort", "thinking", "chat_template_kwargs")
 DEEPSEEK = "https://api.deepseek.com/v1"
 XAI_URL = "https://api.x.ai/v1"
+CHATGPT_URL = "https://chatgpt.com/backend-api/codex"
 XAI_ROUND = (FIXTURES / "xai_responses_round2_text.sse").read_bytes()
 
 
@@ -124,7 +125,7 @@ def harness(monkeypatch, tmp_path):
 
 async def _turn_payload(harness, monkeypatch, url, model, level, routes=None):
     from src.chat_agent import store
-    from src.chat_agent.providers import xai_responses
+    from src.chat_agent.providers import responses
     from tests.chat_agent.test_chat_agent_route import _Request, _sse_events
 
     import httpx
@@ -140,12 +141,12 @@ async def _turn_payload(harness, monkeypatch, url, model, level, routes=None):
 
     serve_probes(monkeypatch, routes or {}, chat=chat)
 
-    def responses(request):
+    def responses_round(request):
         harness.captured["provider_requests"].append(json.loads(request.content))
         return httpx.Response(200, content=XAI_ROUND, headers={"content-type": "text/event-stream"})
 
-    xai_client = httpx.AsyncClient(transport=httpx.MockTransport(responses))
-    monkeypatch.setattr(xai_responses, "_get_http_client", lambda: xai_client)
+    xai_client = httpx.AsyncClient(transport=httpx.MockTransport(responses_round))
+    monkeypatch.setattr(responses, "_get_http_client", lambda: xai_client)
 
     response, _ = await harness.send(_Request("agent"))
     assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
@@ -185,6 +186,8 @@ LLAMA_ROUTES = {"GET /props": BONSAI_PROPS}
         # xAI Responses: reasoning.effort.
         (XAI_URL, "grok-4.7", {}, "xhigh", {"reasoning": {"effort": "xhigh"}}),
         (XAI_URL, "grok-4.7", {}, "off", {"reasoning": {"effort": "none"}}),
+        # ChatGPT Subscription speaks the same Responses dialect.
+        (CHATGPT_URL, "gpt-6.1-sol", {}, "high", {"reasoning": {"effort": "high"}}),
     ],
 )
 async def test_thinking_level_payload_per_dialect(harness, monkeypatch, url, model, routes, level, sent):
@@ -343,6 +346,17 @@ async def test_capabilities_report_legacy_with_the_reason(api, monkeypatch, swit
     assert (body["route"], body["reason"], body["thinking"]["available"]) == ("legacy", reason, available)
     if not available:
         assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_capabilities_report_new_runtime_for_a_chatgpt_subscription_chat(api, monkeypatch):
+    _switch_on()
+    serve_probes(monkeypatch, {})
+    api.session.endpoint_url, api.session.model = CHATGPT_URL, "gpt-6.1-sol"
+
+    body = (await _capabilities(api)).json()
+
+    assert (body["route"], body["reason"], body["thinking"]["available"]) == ("chat_agent", "", True)
 
 
 @pytest.mark.asyncio

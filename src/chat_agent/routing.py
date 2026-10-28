@@ -14,7 +14,7 @@ CHAT_AGENT = "chat_agent"
 
 # Dialects the runtime has no adapter for (spec: Routing); everything else
 # _detect_provider returns speaks OpenAI Chat Completions.
-_PROVIDERS_WITHOUT_ADAPTER = frozenset({"anthropic", "ollama", "chatgpt-subscription"})
+_PROVIDERS_WITHOUT_ADAPTER = frozenset({"anthropic", "ollama"})
 
 
 @dataclass(frozen=True)

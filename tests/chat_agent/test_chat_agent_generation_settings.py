@@ -11,7 +11,7 @@ import pytest
 
 import routes.history.history_routes as history_routes
 from src.chat_agent import loop
-from src.chat_agent.providers import Endpoint, xai_responses
+from src.chat_agent.providers import Endpoint, responses
 from src.generation_budget import context_safety_margin
 from tests.chat_agent.test_chat_agent_route import _data_events, _Request, _sse_tool_calls, _switch_on
 from tests.chat_agent.test_chat_agent_route import harness  # noqa: F401
@@ -92,7 +92,7 @@ async def test_session_temperature_is_sent_on_every_round(harness):
 
 
 def test_xai_payload_omits_unset_temperature_and_max_output_tokens():
-    payload = xai_responses.build_payload(
+    payload = responses.build_payload(
         Endpoint("https://api.x.ai/v1", "grok-4.1-fast", None), [], cache_key="s", temperature=None, max_tokens=0,
     )
     assert "temperature" not in payload

@@ -1,7 +1,8 @@
-"""xAI Responses adapter against scripted provider streams (ticket #51, ADR 0004).
+"""Responses adapter against scripted provider streams (ticket #51, ADR 0004).
 
-The fixtures under tests/fixtures/chat_agent/ are OpenAI-Responses-shaped
-streams written from xAI's docs; a live capture replaces them in #69.
+The xai_* fixtures under tests/fixtures/chat_agent/ are OpenAI-Responses-shaped
+streams written from xAI's docs; a live capture replaces them in #69. The
+chatgpt_* fixtures are trimmed from a live Codex backend recording.
 """
 
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from src.chat_agent.providers import Endpoint, ProviderError, RoundEnd, TextDelta, Usage, xai_responses
+from src.chat_agent.providers import Endpoint, ProviderError, RoundEnd, TextDelta, Usage, responses
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "chat_agent"
 XAI = Endpoint("https://api.x.ai/v1", "grok-4.7", {"Authorization": "Bearer key"})
@@ -32,11 +33,11 @@ def _output_items(raw):
 
 
 class _Provider:
-    def __init__(self, monkeypatch, *responses):
+    def __init__(self, monkeypatch, *replies):
         self.requests = []
-        self._responses = list(responses)
+        self._responses = list(replies)
         client = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
-        monkeypatch.setattr(xai_responses, "_get_http_client", lambda: client)
+        monkeypatch.setattr(responses, "_get_http_client", lambda: client)
 
     def _handle(self, request):
         self.requests.append(request)
@@ -50,7 +51,7 @@ class _Provider:
 async def _run(conversation, endpoint=XAI):
     return [
         event
-        async for event in xai_responses.stream_round(
+        async for event in responses.stream_round(
             endpoint, conversation, cache_key="session-1", temperature=0.2, max_tokens=0,
         )
     ]
@@ -279,7 +280,7 @@ def test_chat_completions_tool_schemas_are_sent_flat_with_auto_choice():
     schema = {"type": "function", "function": {
         "name": "manage_notes", "description": "Notes", "parameters": {"type": "object"}}}
 
-    payload = xai_responses.build_payload(
+    payload = responses.build_payload(
         XAI, CONVERSATION, cache_key="s", temperature=0.2, max_tokens=0, tools=[schema],
     )
 
@@ -287,3 +288,101 @@ def test_chat_completions_tool_schemas_are_sent_flat_with_auto_choice():
         "type": "function", "name": "manage_notes", "description": "Notes", "parameters": {"type": "object"}}]
     assert payload["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in payload
+
+
+# --- ChatGPT Subscription (Codex backend) ------------------------------------
+
+CHATGPT = Endpoint("https://chatgpt.com/backend-api/codex", "gpt-6.1-sol", {"Authorization": "Bearer token"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    ["https://chatgpt.com/backend-api/codex", "https://chatgpt.com/backend-api/codex/",
+     "https://chatgpt.com/backend-api/codex/responses"],
+)
+async def test_chatgpt_request_goes_to_codex_responses_without_temperature(monkeypatch, url):
+    provider = _Provider(monkeypatch, (200, _fixture("chatgpt_responses_round2_text.sse")))
+
+    # _run passes temperature=0.2; the Codex backend answers any temperature with 400.
+    await _run(CONVERSATION, Endpoint(url, CHATGPT.model, CHATGPT.headers))
+
+    [request] = provider.requests
+    assert str(request.url) == "https://chatgpt.com/backend-api/codex/responses"
+    assert request.headers["Authorization"] == "Bearer token"
+    payload = provider.payload(0)
+    assert "temperature" not in payload
+    assert payload["store"] is False and payload["stream"] is True
+    assert payload["prompt_cache_key"] == "session-1"
+    assert payload["include"] == ["reasoning.encrypted_content"]
+    assert payload["input"][0] == {"role": "system", "content": "You are Odysseus."}
+
+
+def test_chatgpt_payload_sends_max_output_tokens_when_set_and_never_temperature():
+    payload = responses.build_payload(CHATGPT, CONVERSATION, cache_key="s", temperature=1.0, max_tokens=256)
+
+    assert payload["max_output_tokens"] == 256
+    assert "temperature" not in payload
+    assert "max_output_tokens" not in responses.build_payload(
+        CHATGPT, CONVERSATION, cache_key="s", temperature=None, max_tokens=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_blocks_are_tagged_with_its_provider(monkeypatch):
+    raw = _fixture("chatgpt_responses_round2_text.sse")
+    _Provider(monkeypatch, (200, _fixture("chatgpt_responses_round1_tool_call.sse")), (200, raw))
+
+    [call_round] = [e for e in await _run(CONVERSATION, CHATGPT) if isinstance(e, RoundEnd)]
+    events = await _run(CONVERSATION, CHATGPT)
+
+    [call] = call_round.blocks
+    assert (call["type"], call["provider"], call["call_id"], call["name"]) == (
+        "tool_call", "chatgpt-subscription", "call_r1_0", "get_weather")
+    assert json.loads(call["arguments"]) == {"city": "Taipei"}
+    assert call_round.usage == Usage(input_tokens=73, cached_input_tokens=0, output_tokens=19, reasoning_tokens=0)
+    [end] = [e for e in events if isinstance(e, RoundEnd)]
+    [text] = end.blocks
+    answer = "The current weather in Taipei is cloudy with a temperature of 24°C."
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == answer
+    assert (text["type"], text["provider"], text["text"]) == ("text", "chatgpt-subscription", answer)
+    assert text["item"] == _output_items(raw)[0]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_parallel_calls_become_one_tool_call_block_each(monkeypatch):
+    _Provider(monkeypatch, (200, _fixture("chatgpt_responses_parallel_calls.sse")))
+
+    [end] = [e for e in await _run(CONVERSATION, CHATGPT) if isinstance(e, RoundEnd)]
+
+    assert [(b["type"], b["call_id"]) for b in end.blocks] == [
+        ("tool_call", "call_r4_0"), ("tool_call", "call_r4_1"), ("tool_call", "call_r4_2"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_http_error_names_chatgpt_subscription(monkeypatch):
+    rejection = json.dumps({"error": {"message": "Unsupported parameter: temperature"}}).encode()
+    _Provider(monkeypatch, (400, rejection))
+
+    [error] = await _run(CONVERSATION, CHATGPT)
+
+    assert isinstance(error, ProviderError) and error.status == 400
+    assert error.message == "ChatGPT Subscription returned HTTP 400: Unsupported parameter: temperature"
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_stream_failures_name_chatgpt_subscription(monkeypatch):
+    raw = _fixture("chatgpt_responses_round2_text.sse")
+    failed = (
+        "data: " + json.dumps({"type": "response.failed", "response": {
+            "status": "failed", "error": {"code": "server_error", "message": "upstream exploded"}}})
+        + "\n\n"
+    ).encode()
+    _Provider(monkeypatch, (200, raw[: raw.index(b'data: {"type": "response.completed"')]), (200, failed))
+
+    [ended] = [e for e in await _run(CONVERSATION, CHATGPT) if isinstance(e, ProviderError)]
+    [stopped] = await _run(CONVERSATION, CHATGPT)
+
+    assert ended.message == "ChatGPT Subscription ended the stream before the response completed."
+    assert stopped.message == "ChatGPT Subscription stopped the response: upstream exploded"

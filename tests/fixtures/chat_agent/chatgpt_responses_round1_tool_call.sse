@@ -1,0 +1,41 @@
+: trimmed from a live recording (chatgpt.com/backend-api/codex, gpt-6.1-sol) on 2026-10-28
+
+event: response.created
+data: {"type": "response.created", "sequence_number": 0, "safety_buffering": false, "response": {"id": "resp_r1", "object": "response", "status": "in_progress", "model": "gpt-6.1-sol", "output": [], "store": false}}
+
+event: response.in_progress
+data: {"type": "response.in_progress", "sequence_number": 1, "safety_buffering": false, "response": {"id": "resp_r1", "object": "response", "status": "in_progress", "model": "gpt-6.1-sol", "output": [], "store": false}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "sequence_number": 2, "output_index": 0, "item": {"type": "function_call", "id": "fc_r1_0", "call_id": "call_r1_0", "name": "get_weather", "arguments": "", "status": "in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 3, "item_id": "fc_r1_0", "output_index": 0, "delta": "{\"", "obfuscation": "Ps77LZkPMJBSJf"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 4, "item_id": "fc_r1_0", "output_index": 0, "delta": "city", "obfuscation": "1m1C7knLqhyW"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 5, "item_id": "fc_r1_0", "output_index": 0, "delta": "\":\"", "obfuscation": "AzlfYSFdjllcZ"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 6, "item_id": "fc_r1_0", "output_index": 0, "delta": "Tai", "obfuscation": "if9Vgr7uhTEi8"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 7, "item_id": "fc_r1_0", "output_index": 0, "delta": "pei", "obfuscation": "Zuk9jFTKycscc"}
+
+event: response.function_call_arguments.delta
+data: {"type": "response.function_call_arguments.delta", "sequence_number": 8, "item_id": "fc_r1_0", "output_index": 0, "delta": "\"}", "obfuscation": "JhHUeFFb6n6C70"}
+
+event: response.function_call_arguments.done
+data: {"type": "response.function_call_arguments.done", "sequence_number": 9, "item_id": "fc_r1_0", "output_index": 0, "arguments": "{\"city\":\"Taipei\"}"}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "sequence_number": 10, "output_index": 0, "item": {"type": "function_call", "id": "fc_r1_0", "call_id": "call_r1_0", "name": "get_weather", "arguments": "{\"city\":\"Taipei\"}", "status": "completed"}}
+
+event: response.metadata
+data: {"type": "response.metadata", "sequence_number": 11, "response_id": "resp_r1", "metadata": {}}
+
+event: response.completed
+data: {"type": "response.completed", "sequence_number": 12, "safety_buffering": false, "response": {"id": "resp_r1", "object": "response", "status": "completed", "model": "gpt-6.1-sol", "output": [{"type": "function_call", "id": "fc_r1_0", "call_id": "call_r1_0", "name": "get_weather", "arguments": "{\"city\":\"Taipei\"}", "status": "completed"}], "store": false, "usage": {"input_tokens": 73, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 19, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 92}}}
+

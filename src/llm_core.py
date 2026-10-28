@@ -1678,8 +1678,11 @@ def _moonshot_rejects_custom_temperature(provider: str, model: str) -> bool:
 
 def _omit_temperature(provider: str, model: str) -> bool:
     """Check if a request should use the provider's default temperature."""
-    return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
-        provider, model
+    return (
+        _restricts_temperature(model)
+        or _moonshot_rejects_custom_temperature(provider, model)
+        # The Codex backend has no temperature field: any value is a 400.
+        or provider == "chatgpt-subscription"
     )
 
 
