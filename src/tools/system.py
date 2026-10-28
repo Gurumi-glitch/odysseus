@@ -822,8 +822,8 @@ _APP_API_WRITE_PATTERNS = tuple((method, _route_pattern(path)) for method, path 
 # Refusals that have a named tool or flow get pointed at it instead of the
 # generic message.
 _APP_API_REFUSAL_HINTS = (
-    ("/api/tools", "Tool policy cannot be replaced from chat. Re-enable tools in Settings > Agent Tools; use manage_settings to list or disable them."),
-    ("/api/mcp/servers", "MCP server settings and tool policy are off-limits to app_api. Ask the user to change them in Settings > Integrations."),
+    ("/api/tools", "Blocked: tool policy cannot be replaced from chat. Re-enable tools in Settings > Agent Tools; use manage_settings to list or disable them."),
+    ("/api/mcp/servers", "Blocked: MCP server settings and tool policy are off-limits to app_api. Ask the user to change them in Settings > Integrations."),
     ("/api/email/accounts", "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email."),
     ("/api/cookbook/packages/install", "Don't POST /api/cookbook/packages/install via app_api — package installation is host code execution. Use the dedicated Cookbook dependency UI/flow instead."),
     ("/api/cookbook/rebuild-engine", "Don't POST /api/cookbook/rebuild-engine via app_api — engine rebuild mutates local or remote host state. Use the dedicated Cookbook UI/flow instead."),
