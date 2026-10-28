@@ -386,3 +386,22 @@ async def test_chatgpt_stream_failures_name_chatgpt_subscription(monkeypatch):
 
     assert ended.message == "ChatGPT Subscription ended the stream before the response completed."
     assert stopped.message == "ChatGPT Subscription stopped the response: upstream exploded"
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_rejected_reasoning_is_dropped_and_retried_once(monkeypatch):
+    reasoning_round = _fixture("chatgpt_responses_reasoning.sse")
+    rejection = json.dumps({"error": {"message": "invalid encrypted_content"}}).encode()
+    provider = _Provider(
+        monkeypatch, (200, reasoning_round), (400, rejection), (200, _fixture("chatgpt_responses_round2_text.sse")),
+    )
+    [end] = [e for e in await _run(CONVERSATION, CHATGPT) if isinstance(e, RoundEnd)]
+    history = [*CONVERSATION, {"role": "assistant", "blocks": json.loads(json.dumps(end.blocks))},
+               {"role": "user", "content": "thanks"}]
+
+    events = await _run(history, CHATGPT)
+
+    assert not [e for e in events if isinstance(e, ProviderError)]
+    first, retry = provider.payload(1)["input"], provider.payload(2)["input"]
+    assert _output_items(reasoning_round)[0] in first
+    assert retry == [item for item in first if item.get("type") != "reasoning"]

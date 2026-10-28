@@ -800,3 +800,61 @@ async def test_chatgpt_http_error_names_chatgpt_subscription(harness, monkeypatc
     assert "ChatGPT Subscription returned HTTP 400: Unsupported parameter: temperature" in body
     assert "xAI" not in body
     assert harness.saved == []
+
+
+CHATGPT_REASONING_ROUND = (FIXTURES / "chatgpt_responses_reasoning.sse").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_next_turn_replays_the_saved_turn_byte_identical(harness, monkeypatch):
+    _switch_on()
+    requests = _chatgpt_session(
+        harness, monkeypatch, (200, CHATGPT_REASONING_ROUND), (200, CHATGPT_REASONING_ROUND),
+    )
+    await harness.send(_Request("agent"))
+    [turn_round] = harness.saved[0].metadata["agent_v2"]["rounds"]
+    reasoning = turn_round["blocks"][0]
+    assert (reasoning["type"], reasoning["provider"], reasoning["model"]) == (
+        "reasoning", "chatgpt-subscription", "gpt-6.1-sol")
+    first_input = json.loads(requests[0].content)["input"]
+    harness.context.history = [*harness.context.history, harness.context.current, _as_history_row(harness.saved[0])]
+
+    await harness.send(_Request("agent"))
+
+    replayed = ",".join(
+        json.dumps(item, separators=(",", ":"), ensure_ascii=False) for item in _output_items(CHATGPT_REASONING_ROUND)
+    ).encode()
+    assert replayed in requests[1].content
+    second_input = json.loads(requests[1].content)["input"]
+    assert second_input[: len(first_input) - 1] == first_input[:-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_url", "first_model", "first_round", "second_model"),
+    [
+        ("https://api.x.ai/v1", "grok-4.7", XAI_FIXTURE, "gpt-6.1-sol"),
+        (CHATGPT_URL, "gpt-6.1-sol", CHATGPT_REASONING_ROUND, "gpt-6-astra"),
+    ],
+    ids=["xai-to-chatgpt", "gpt-6.1-sol-to-gpt-6-astra"],
+)
+async def test_chatgpt_model_switch_drops_other_models_reasoning(
+    harness, monkeypatch, first_url, first_model, first_round, second_model,
+):
+    _switch_on()
+    requests = _chatgpt_session(harness, monkeypatch, (200, first_round), (200, CHATGPT_TEXT_ROUND))
+    harness.session.endpoint_url, harness.session.model = first_url, first_model
+    await harness.send(_Request("agent"))
+    first_answer = harness.saved[0].content
+    # The first turn did produce reasoning, so its absence below is the switch's doing.
+    assert "reasoning" in [item["type"] for item in _output_items(first_round)]
+    harness.context.history = [harness.context.current, _as_history_row(harness.saved[0])]
+    harness.session.endpoint_url, harness.session.model = CHATGPT_URL, second_model
+
+    await harness.send(_Request("agent"))
+
+    assert str(requests[1].url) == "https://chatgpt.com/backend-api/codex/responses"
+    second_input = json.loads(requests[1].content)["input"]
+    assert "reasoning" not in [item.get("type") for item in second_input]
+    # The answer itself stays in the history; only the reasoning is dropped.
+    assert json.dumps(first_answer, ensure_ascii=False)[1:-1] in json.dumps(second_input, ensure_ascii=False)

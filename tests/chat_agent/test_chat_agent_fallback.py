@@ -14,8 +14,11 @@ import pytest
 import routes.chat_routes as chat_routes
 import src.foreground_model_routing as foreground_model_routing
 from src.chat_agent import loop, transcript
-from src.chat_agent.providers import chat_completions
+from src.chat_agent.providers import chat_completions, responses
 from tests.chat_agent.test_chat_agent_route import (
+    CHATGPT_ANSWER,
+    CHATGPT_TEXT_ROUND,
+    CHATGPT_URL,
     _Harness,
     _Request,
     _data_events,
@@ -317,3 +320,42 @@ async def test_later_rounds_are_gated_against_the_fallbacks_window(harness, monk
 
     assert harness.captured["provider_calls"] == [PRIMARY_MODEL, BACKUP_MODEL]
     assert "tokens exceeds the 16384-token window" in body
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_falls_back_to_chatgpt_in_the_responses_dialect(harness, monkeypatch):
+    _switch_on()
+    chatgpt_headers = {"Authorization": "Bearer chatgpt"}
+    monkeypatch.setattr(foreground_model_routing, "_load_policy_preferences", lambda owner=None: {
+        "foreground_fallback_enabled": True,
+        "foreground_model_fallbacks": [{"endpoint_id": "chatgpt-ep", "model": "gpt-6.1-sol"}],
+    })
+    monkeypatch.setattr(
+        foreground_model_routing, "resolve_fallback_entries",
+        lambda *args, **kwargs: [(CHATGPT_URL, "gpt-6.1-sol", dict(chatgpt_headers))],
+    )
+    _script(monkeypatch, harness, {PRIMARY_MODEL: [503]})
+    codex_requests = []
+
+    def codex(request: httpx.Request) -> httpx.Response:
+        codex_requests.append(request)
+        return httpx.Response(200, content=CHATGPT_TEXT_ROUND, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(codex))
+    monkeypatch.setattr(responses, "_get_http_client", lambda: client)
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert harness.captured["provider_calls"] == [PRIMARY_MODEL]
+    [request] = codex_requests
+    assert str(request.url) == "https://chatgpt.com/backend-api/codex/responses"
+    assert request.headers["Authorization"] == "Bearer chatgpt"
+    payload = json.loads(request.content)
+    assert payload["store"] is False and "messages" not in payload
+    assert "temperature" not in payload
+    assert "event: error" not in body
+    [fallback] = [e for e in _data_events(body) if e.get("type") == "fallback"]
+    assert fallback["answered_by"] == "gpt-6.1-sol"
+    [row] = harness.saved
+    assert row.content == CHATGPT_ANSWER
+    assert row.metadata["agent_v2"]["provider"] == "chatgpt-subscription"
