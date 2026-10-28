@@ -1,0 +1,74 @@
+: trimmed from a live recording (chatgpt.com/backend-api/codex, gpt-6.1-sol) on 2026-10-28
+
+event: response.created
+data: {"type": "response.created", "sequence_number": 0, "safety_buffering": false, "response": {"id": "resp_r2", "object": "response", "status": "in_progress", "model": "gpt-6.1-sol", "output": [], "store": false}}
+
+event: response.in_progress
+data: {"type": "response.in_progress", "sequence_number": 1, "safety_buffering": false, "response": {"id": "resp_r2", "object": "response", "status": "in_progress", "model": "gpt-6.1-sol", "output": [], "store": false}}
+
+event: response.output_item.added
+data: {"type": "response.output_item.added", "sequence_number": 2, "output_index": 0, "item": {"type": "message", "id": "msg_r2_0", "role": "assistant", "status": "in_progress", "content": [], "phase": "final_answer"}}
+
+event: response.content_part.added
+data: {"type": "response.content_part.added", "sequence_number": 3, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": [], "logprobs": []}}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 4, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": "The", "logprobs": [], "safety_buffering": false, "obfuscation": "x0No4QTLIwQKF"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 5, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " current", "logprobs": [], "safety_buffering": false, "obfuscation": "s7rxMePp"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 6, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " weather", "logprobs": [], "safety_buffering": false, "obfuscation": "cER2XZlV"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 7, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " in", "logprobs": [], "safety_buffering": false, "obfuscation": "iaJdDeXnBncXw"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 8, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " Taipei", "logprobs": [], "safety_buffering": false, "obfuscation": "LHoZfppAT"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 9, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " is", "logprobs": [], "safety_buffering": false, "obfuscation": "66AadOBJpspOl"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 10, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " cloudy", "logprobs": [], "safety_buffering": false, "obfuscation": "89WYgZhsO"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 11, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " with", "logprobs": [], "safety_buffering": false, "obfuscation": "NoqyBU8l22q"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 12, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " a", "logprobs": [], "safety_buffering": false, "obfuscation": "riygOOLZjxdchr"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 13, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " temperature", "logprobs": [], "safety_buffering": false, "obfuscation": "qIaM"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 14, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " of", "logprobs": [], "safety_buffering": false, "obfuscation": "BmK8oF6Cpylga"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 15, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": " ", "logprobs": [], "safety_buffering": false, "obfuscation": "CHpGrG2mdklwabA"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 16, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": "24", "logprobs": [], "safety_buffering": false, "obfuscation": "InStQa06KdCYaR"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 17, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": "°C", "logprobs": [], "safety_buffering": false, "obfuscation": "21LWXaXDTBidUN"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "sequence_number": 18, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "delta": ".", "logprobs": [], "safety_buffering": false, "obfuscation": "6kx9u6d6pXlCdy8"}
+
+event: response.metadata
+data: {"type": "response.metadata", "sequence_number": 19, "response_id": "resp_r2", "metadata": {}}
+
+event: response.output_text.done
+data: {"type": "response.output_text.done", "sequence_number": 20, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "text": "The current weather in Taipei is cloudy with a temperature of 24°C.", "logprobs": []}
+
+event: response.content_part.done
+data: {"type": "response.content_part.done", "sequence_number": 21, "item_id": "msg_r2_0", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": "The current weather in Taipei is cloudy with a temperature of 24°C.", "annotations": [], "logprobs": []}}
+
+event: response.output_item.done
+data: {"type": "response.output_item.done", "sequence_number": 22, "output_index": 0, "item": {"type": "message", "id": "msg_r2_0", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The current weather in Taipei is cloudy with a temperature of 24°C.", "annotations": [], "logprobs": []}], "phase": "final_answer"}}
+
+event: response.completed
+data: {"type": "response.completed", "sequence_number": 23, "safety_buffering": false, "response": {"id": "resp_r2", "object": "response", "status": "completed", "model": "gpt-6.1-sol", "output": [{"type": "message", "id": "msg_r2_0", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "The current weather in Taipei is cloudy with a temperature of 24°C.", "annotations": [], "logprobs": []}], "phase": "final_answer"}], "store": false, "usage": {"input_tokens": 124, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}, "output_tokens": 19, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 143}}}
+

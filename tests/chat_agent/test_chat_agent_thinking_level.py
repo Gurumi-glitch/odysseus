@@ -108,6 +108,7 @@ async def test_servers_reporting_no_levels_leave_every_level_selectable(monkeypa
 THINKING_KEYS = ("reasoning", "reasoning_effort", "thinking", "chat_template_kwargs")
 DEEPSEEK = "https://api.deepseek.com/v1"
 XAI_URL = "https://api.x.ai/v1"
+CHATGPT_URL = "https://chatgpt.com/backend-api/codex"
 XAI_ROUND = (FIXTURES / "xai_responses_round2_text.sse").read_bytes()
 
 
@@ -124,7 +125,7 @@ def harness(monkeypatch, tmp_path):
 
 async def _turn_payload(harness, monkeypatch, url, model, level, routes=None):
     from src.chat_agent import store
-    from src.chat_agent.providers import xai_responses
+    from src.chat_agent.providers import responses
     from tests.chat_agent.test_chat_agent_route import _Request, _sse_events
 
     import httpx
@@ -140,12 +141,12 @@ async def _turn_payload(harness, monkeypatch, url, model, level, routes=None):
 
     serve_probes(monkeypatch, routes or {}, chat=chat)
 
-    def responses(request):
+    def responses_round(request):
         harness.captured["provider_requests"].append(json.loads(request.content))
         return httpx.Response(200, content=XAI_ROUND, headers={"content-type": "text/event-stream"})
 
-    xai_client = httpx.AsyncClient(transport=httpx.MockTransport(responses))
-    monkeypatch.setattr(xai_responses, "_get_http_client", lambda: xai_client)
+    xai_client = httpx.AsyncClient(transport=httpx.MockTransport(responses_round))
+    monkeypatch.setattr(responses, "_get_http_client", lambda: xai_client)
 
     response, _ = await harness.send(_Request("agent"))
     assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
@@ -185,10 +186,48 @@ LLAMA_ROUTES = {"GET /props": BONSAI_PROPS}
         # xAI Responses: reasoning.effort.
         (XAI_URL, "grok-4.7", {}, "xhigh", {"reasoning": {"effort": "xhigh"}}),
         (XAI_URL, "grok-4.7", {}, "off", {"reasoning": {"effort": "none"}}),
+        # ChatGPT Subscription speaks the same Responses dialect.
+        (CHATGPT_URL, "gpt-6.1-sol", {}, "high", {"reasoning": {"effort": "high"}}),
     ],
 )
 async def test_thinking_level_payload_per_dialect(harness, monkeypatch, url, model, routes, level, sent):
     assert await _turn_payload(harness, monkeypatch, url, model, level, routes) == sent
+
+
+# The Codex backend's answer to effort "none" on gpt-6.1-sol (live probe,
+# 2026-10-28, TDD 05): "effort" appears only in `param`, not in the message.
+CHATGPT_OFF_REFUSAL = json.dumps({"error": {
+    "message": "Unsupported value: 'none' is not supported with the 'gpt-6.1-sol' model.",
+    "type": "invalid_request_error",
+    "param": "reasoning.effort",
+    "code": "unsupported_value",
+}}).encode()
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_refused_off_is_learned_and_the_round_resent_without_reasoning(harness, monkeypatch):
+    from src.chat_agent import store
+    from tests.chat_agent.test_chat_agent_route import (
+        CHATGPT_ANSWER, CHATGPT_TEXT_ROUND, _chatgpt_session, _data_events, _Request, _switch_on,
+    )
+
+    _switch_on()
+    store.set_chat_settings("alice", "session-1", {store.THINKING_LEVEL: "off"})
+    requests = _chatgpt_session(harness, monkeypatch, (400, CHATGPT_OFF_REFUSAL), (200, CHATGPT_TEXT_ROUND))
+
+    response, body = await harness.send(_Request("agent"))
+
+    assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
+    refused, resent = (json.loads(r.content) for r in requests)
+    assert refused["reasoning"] == {"effort": "none"}
+    assert "reasoning" not in resent
+    assert resent["input"] == refused["input"]
+    [notice] = [e for e in _data_events(body) if e.get("type") == "thinking_level_refused"]
+    assert notice["level"] == "off"
+    assert "event: error" not in body
+    [row] = harness.saved
+    assert row.content == CHATGPT_ANSWER
+    assert (await capabilities.thinking_levels(CHATGPT_URL, "gpt-6.1-sol")).support["off"] == U
 
 
 # --- Settings and capabilities routes, over HTTP ----------------------------
@@ -204,15 +243,23 @@ def api(monkeypatch, tmp_path):
 
     import httpx
     from fastapi import FastAPI
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
+    import routes.chat_helpers as chat_helpers
     import routes.session_routes as session_routes
     import src.constants as constants
+    from core import database
     from routes.chat_agent_routes import setup_chat_agent_routes
     from tests.chat_agent.test_chat_agent_ask_steer_authority import _Db
 
     monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setattr(session_routes, "SessionLocal", _Db)
+    # The tables resolve_session_auth reads the chat's endpoint credentials from.
+    engine = create_engine(f"sqlite:///{tmp_path / 'odysseus.db'}")
+    database.Base.metadata.create_all(engine)
+    monkeypatch.setattr(chat_helpers, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     session = SimpleNamespace(endpoint_url=LLAMA, model=BONSAI, headers={})
     app = FastAPI()
 
@@ -224,6 +271,7 @@ def api(monkeypatch, tmp_path):
     app.include_router(setup_chat_agent_routes(SimpleNamespace(get_session=lambda session_id: session)))
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://odysseus")
     client.session = session
+    client.db = chat_helpers.SessionLocal
     return client
 
 
@@ -343,6 +391,53 @@ async def test_capabilities_report_legacy_with_the_reason(api, monkeypatch, swit
     assert (body["route"], body["reason"], body["thinking"]["available"]) == ("legacy", reason, available)
     if not available:
         assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_capabilities_report_new_runtime_for_a_chatgpt_subscription_chat(api, monkeypatch):
+    _switch_on()
+    serve_probes(monkeypatch, {})
+    api.session.endpoint_url, api.session.model = CHATGPT_URL, "gpt-6.1-sol"
+
+    body = (await _capabilities(api)).json()
+
+    assert (body["route"], body["reason"], body["thinking"]["available"]) == ("chat_agent", "", True)
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_chat_levels_come_from_the_codex_catalog_with_a_fresh_bearer(api, monkeypatch):
+    import httpx
+
+    import src.endpoint_resolver as endpoint_resolver
+    from core.database import ModelEndpoint, Session as DbSession
+    from tests.chat_agent.test_chat_agent_capabilities import CODEX_CATALOG, CODEX_LEVELS, CODEX_MODELS
+
+    _switch_on()
+    with api.db() as db:
+        db.add(ModelEndpoint(id="alice-chatgpt", name="ChatGPT", owner="alice", base_url=CHATGPT_URL,
+                             provider_auth_id="auth-1", is_enabled=True))
+        db.add(DbSession(id="chat-1", name="chat", owner="alice", endpoint_url=CHATGPT_URL,
+                         model="gpt-6.1-sol", headers={}))
+        db.commit()
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint_runtime",
+                        lambda ep, owner=None: (CHATGPT_URL, "live-access-token"))
+    requests = []
+
+    def catalog(request):
+        requests.append(request)
+        return httpx.Response(200, json=CODEX_MODELS)
+
+    serve_probes(monkeypatch, {CODEX_CATALOG: catalog})
+    # Empty, as after sync_session_metadata rewrites the cached session (#117).
+    api.session.endpoint_url, api.session.model, api.session.headers = CHATGPT_URL, "gpt-6.1-sol", {}
+
+    body = (await _capabilities(api)).json()
+
+    assert body["thinking"]["levels"] == CODEX_LEVELS
+    [request] = requests
+    assert request.headers["Authorization"] == "Bearer live-access-token"
+    with api.db() as db:
+        assert db.get(DbSession, "chat-1").headers == {}
 
 
 @pytest.mark.asyncio

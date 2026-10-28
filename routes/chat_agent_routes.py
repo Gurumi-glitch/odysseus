@@ -6,13 +6,18 @@ from fastapi import APIRouter, HTTPException, Request
 
 from core.atomic_io import atomic_write_text
 from core.exceptions import SessionNotFoundError
-from routes.chat_helpers import _enforce_chat_privileges
+# Relies on: resolve_session_auth never raises, and gives a ChatGPT session a
+# freshly resolved bearer that lives on the in-memory session only (never persisted).
+from routes.chat_helpers import _enforce_chat_privileges, resolve_session_auth
 from routes.chat_routes import _resolve_selected_endpoint
 from routes.session_routes import _verify_session_owner
 from src import constants
 from src.agent_runtime.authority import is_internal_tool_request
 from src.auth_helpers import effective_user, is_delegated_credential, require_user
 from src.chat_agent import asks, classifier, permissions, routing, store
+# Relies on: resolve_endpoint_by_id runs resolve_endpoint_runtime (refreshing a
+# ChatGPT token near expiry) and returns None, never raises, when it cannot.
+from src.endpoint_resolver import resolve_endpoint_by_id
 from src.owner_identity import auth_disabled
 
 
@@ -101,6 +106,9 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
             sess = session_manager.get_session(session_id)
         except (KeyError, SessionNotFoundError):
             raise HTTPException(404, "Session not found")
+        # The same step chat_stream runs: ChatGPT headers are request-local, so
+        # the session's own may be empty or stale (#117).
+        resolve_session_auth(sess, session_id, user)
         return await routing.chat_capabilities(user, sess.endpoint_url or "", sess.model or "", sess.headers)
 
     @router.get("/api/chat_agent/capabilities")
@@ -118,7 +126,12 @@ def setup_chat_agent_routes(session_manager) -> APIRouter:
         )
         if not resolved:
             raise HTTPException(404, "Endpoint not found")
-        url, headers, _ = resolved
+        url, headers, resolved_id = resolved
+        # Only the credentials: _resolve_selected_endpoint must not resolve them,
+        # its chat-route caller would persist the ChatGPT bearer.
+        runtime = resolve_endpoint_by_id(resolved_id, model, owner=user)
+        if runtime:
+            headers = runtime[2]
         return await routing.chat_capabilities(user, url, model, headers)
 
     @router.get("/api/chat_agent/instructions")

@@ -295,3 +295,142 @@ async def test_probe_that_never_finishes_is_unknown_within_the_timeout(monkeypat
     monkeypatch.setattr(capabilities, "PROBE_TIMEOUT_SECONDS", 0.2)
 
     assert await asyncio.wait_for(_ask(), 2) == capabilities.UNKNOWN
+
+
+# --- ChatGPT Subscription: the Codex backend's model catalog ------------------
+
+# GET https://chatgpt.com/backend-api/codex/models on 2026-10-28, three of ten
+# models kept, fields other than slug/levels/default/minimal_client_version dropped.
+CODEX_MODELS = json.loads((FIXTURES / "chatgpt_codex_models.json").read_text())
+CODEX = "https://chatgpt.com/backend-api/codex"
+CODEX_CATALOG = "GET /backend-api/codex/models"
+CODEX_LEVELS = {"off": "unsupported", **dict.fromkeys(("low", "medium", "high", "xhigh", "max"), "supported")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "support"),
+    [
+        # Lists ultra too; it has no Odysseus level.
+        ("gpt-6.1-sol", CODEX_LEVELS),
+        ("gpt-6-luna", CODEX_LEVELS),
+        # Hidden from the picker (visibility "hide") but still listed with levels.
+        ("codex-auto-review", CODEX_LEVELS),
+    ],
+)
+async def test_codex_catalog_reports_listed_levels_and_greys_the_rest(monkeypatch, model, support):
+    seen = serve_probes(monkeypatch, {CODEX_CATALOG: CODEX_MODELS})
+
+    levels = await capabilities.thinking_levels(CODEX, model)
+
+    assert levels.support == support
+    assert levels.binary is False
+    # The catalog has no tool flag: native tools are tried.
+    assert await capabilities.native_tools(CODEX, model) == capabilities.UNKNOWN
+    # Tools and levels come from the same catalog fetch.
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_model_missing_from_the_catalog_reports_nothing(monkeypatch):
+    # A refusal is learned at runtime instead.
+    serve_probes(monkeypatch, {CODEX_CATALOG: CODEX_MODELS})
+
+    levels = await capabilities.thinking_levels(CODEX, "gpt-7-unreleased")
+
+    assert levels.support == dict.fromkeys(capabilities.LEVELS, "unknown")
+
+
+@pytest.mark.asyncio
+async def test_codex_model_listing_no_levels_reports_nothing(monkeypatch):
+    serve_probes(monkeypatch, {CODEX_CATALOG: {"models": [{"slug": "gpt-6.1-sol"}]}})
+
+    levels = await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")
+
+    assert levels.support == dict.fromkeys(capabilities.LEVELS, "unknown")
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_request_carries_client_version_and_the_bearer(monkeypatch):
+    requests = []
+
+    def catalog(request):
+        requests.append(request)
+        return httpx.Response(200, json=CODEX_MODELS)
+
+    serve_probes(monkeypatch, {CODEX_CATALOG: catalog})
+
+    # A session stores the chat URL; the catalog sits beside /responses.
+    await capabilities.thinking_levels(CODEX + "/responses", "gpt-6.1-sol",
+                                       {"Authorization": "Bearer live-access-token"})
+
+    [request] = requests
+    assert request.url.params["client_version"] == capabilities.CODEX_CATALOG_CLIENT_VERSION
+    assert request.headers["Authorization"] == "Bearer live-access-token"
+
+
+def test_codex_client_version_is_new_enough_for_every_listed_model():
+    # An older client_version hides the models that need a newer one.
+    def version(text):
+        return tuple(int(part) for part in text.split("."))
+
+    newest = max(version(item["minimal_client_version"]) for item in CODEX_MODELS["models"])
+    assert version(capabilities.CODEX_CATALOG_CLIENT_VERSION) >= newest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [401, 400, httpx.ConnectTimeout("slow")],
+                         ids=["no-bearer", "client-version-rejected", "timeout"])
+async def test_failed_codex_catalog_is_unknown_and_not_cached(monkeypatch, failure):
+    routes = {CODEX_CATALOG: failure}
+    seen = serve_probes(monkeypatch, routes)
+
+    levels = await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")
+    assert levels.support == dict.fromkeys(capabilities.LEVELS, "unknown")
+
+    routes[CODEX_CATALOG] = CODEX_MODELS
+    assert (await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")).support == CODEX_LEVELS
+    assert len(seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_is_cached_for_10_minutes_and_refresh_clears_it(monkeypatch):
+    seen = serve_probes(monkeypatch, {CODEX_CATALOG: CODEX_MODELS})
+    now = [1000.0]
+    monkeypatch.setattr(capabilities, "_now", lambda: now[0])
+
+    await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")
+    now[0] += 599
+    await capabilities.thinking_levels(CODEX, "gpt-6-luna")
+    assert len(seen) == 1
+    now[0] += 2
+    await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")
+    assert len(seen) == 2
+
+    capabilities.forget_endpoint(CODEX)
+    await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")
+    assert len(seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_codex_catalog_gets_longer_than_the_shared_probe_bound(monkeypatch):
+    import asyncio
+
+    async def slow(request):
+        # A cold catalog fetch took 1.25 s against the shared 1 s bound.
+        await asyncio.sleep(0.2)
+        if request.url.path == "/backend-api/codex/models":
+            return httpx.Response(200, json=CODEX_MODELS)
+        if request.url.path == "/props":
+            return httpx.Response(200, json=BONSAI_PROPS)
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    monkeypatch.setattr(chat_completions, "_get_http_client", lambda: client)
+    not_lmstudio = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(404)))
+    monkeypatch.setattr(chat_helpers, "httpx", SimpleNamespace(get=not_lmstudio.get))
+    monkeypatch.setattr(capabilities, "PROBE_TIMEOUT_SECONDS", 0.05)
+
+    assert (await capabilities.thinking_levels(CODEX, "gpt-6.1-sol")).support == CODEX_LEVELS
+    # Every other provider keeps the shared bound.
+    assert await _ask() == capabilities.UNKNOWN

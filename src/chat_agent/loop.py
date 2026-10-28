@@ -39,7 +39,7 @@ from src.chat_agent import (
     transcript, turn_context,
 )
 from src.chat_agent.providers import (
-    XAI,
+    RESPONSES_PROVIDERS,
     Endpoint,
     ProviderError,
     ReasoningDelta,
@@ -48,7 +48,7 @@ from src.chat_agent.providers import (
     TextDelta,
     chat_completions,
     provider_key,
-    xai_responses,
+    responses,
 )
 from src.chat_agent.routing import ComposerToggles
 from src import settings
@@ -217,8 +217,8 @@ def _stream_round(
     tool_schemas: Sequence[Dict[str, Any]], thinking: Optional[str],
 ) -> AsyncIterator[RoundEvent]:
     max_tokens = _max_tokens(turn.max_tokens, endpoint, conversation, tool_schemas)
-    if provider == XAI:
-        return xai_responses.stream_round(
+    if provider in RESPONSES_PROVIDERS:
+        return responses.stream_round(
             endpoint, conversation, cache_key=turn.session_id,
             temperature=turn.temperature, max_tokens=max_tokens, tools=tool_schemas,
             thinking=thinking,

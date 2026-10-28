@@ -18,7 +18,7 @@ import src.constants as constants
 import src.foreground_model_routing as foreground_model_routing
 import src.settings as settings
 from src.chat_agent import loop, store, transcript
-from src.chat_agent.providers import chat_completions, xai_responses
+from src.chat_agent.providers import chat_completions, responses
 from src.tool_capabilities import capabilities_for_action
 
 OPENROUTER = "https://openrouter.ai/api/v1"
@@ -463,9 +463,8 @@ async def test_legacy_approval_continuation_stays_legacy(harness):
     [
         "https://api.anthropic.com/v1",
         "http://localhost:11434",
-        "https://chatgpt.com/backend-api/codex",
     ],
-    ids=["anthropic", "ollama-native", "chatgpt-subscription"],
+    ids=["anthropic", "ollama-native"],
 )
 async def test_providers_without_adapter_stay_legacy(harness, endpoint_url):
     _switch_on()
@@ -629,7 +628,7 @@ def _xai_session(harness, monkeypatch, model="grok-4.7"):
         return httpx.Response(200, content=XAI_FIXTURE, headers={"content-type": "text/event-stream"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
-    monkeypatch.setattr(xai_responses, "_get_http_client", lambda: client)
+    monkeypatch.setattr(responses, "_get_http_client", lambda: client)
     return requests
 
 
@@ -700,3 +699,162 @@ async def test_model_switch_mid_chat_drops_the_other_models_reasoning(harness, m
     second_input = json.loads(requests[1].content)["input"]
     assert "reasoning" not in [item.get("type") for item in second_input]
     assert _fixture_output_items()[1] in second_input
+
+
+# --- ChatGPT Subscription on Responses -------------------------------------
+
+CHATGPT_URL = "https://chatgpt.com/backend-api/codex"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "chat_agent"
+CHATGPT_TOOL_ROUND = (FIXTURES / "chatgpt_responses_round1_tool_call.sse").read_bytes()
+CHATGPT_TEXT_ROUND = (FIXTURES / "chatgpt_responses_round2_text.sse").read_bytes()
+CHATGPT_ANSWER = "The current weather in Taipei is cloudy with a temperature of 24°C."
+
+
+def _chatgpt_session(harness, monkeypatch, *replies):
+    """A ChatGPT Subscription chat whose provider answers ``replies`` ((status, body)) in order."""
+    harness.session.endpoint_url = CHATGPT_URL
+    harness.session.model = "gpt-6.1-sol"
+    requests = []
+    pending = list(replies)
+
+    def provider(request):
+        requests.append(request)
+        status, body = pending.pop(0)
+        return httpx.Response(status, content=body, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+    monkeypatch.setattr(responses, "_get_http_client", lambda: client)
+    return requests
+
+
+def _output_items(raw):
+    events = [json.loads(line[6:]) for line in raw.decode().splitlines() if line.startswith("data: {")]
+    return [e["item"] for e in events if e["type"] == "response.output_item.done"]
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_turn_runs_on_responses_and_saves_tagged_blocks(harness, monkeypatch):
+    _switch_on()
+    requests = _chatgpt_session(harness, monkeypatch, (200, CHATGPT_TOOL_ROUND), (200, CHATGPT_TEXT_ROUND))
+    harness.session.temperature_override = 0.6
+    harness.session.max_tokens_override = 256
+
+    response, body = await harness.send(_Request("agent"))
+
+    assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
+    assert harness.captured["legacy_agent"] == 0
+    assert harness.captured["provider_requests"] == []
+    first, second = requests
+    assert str(first.url) == "https://chatgpt.com/backend-api/codex/responses"
+    payload = json.loads(first.content)
+    assert payload["store"] is False and payload["stream"] is True
+    assert payload["include"] == ["reasoning.encrypted_content"]
+    assert payload["prompt_cache_key"] == "session-1"
+    assert payload["input"][0]["role"] == "system"
+    assert payload["tools"] and all(t["type"] == "function" and "name" in t for t in payload["tools"])
+    assert payload["tool_choice"] == "auto"
+    assert "temperature" not in payload
+    assert payload["max_output_tokens"] == 256
+    # The model's call goes back unchanged, followed by the tool's result.
+    [call_item] = _output_items(CHATGPT_TOOL_ROUND)
+    assert json.dumps(call_item, separators=(",", ":"), ensure_ascii=False).encode() in second.content
+    result = json.loads(second.content)["input"][-1]
+    assert (result["type"], result["call_id"]) == ("function_call_output", "call_r1_0")
+    assert "".join(e["delta"] for e in _data_events(body) if "delta" in e) == CHATGPT_ANSWER
+    [row] = harness.saved
+    assert row.content == CHATGPT_ANSWER
+    agent_v2 = row.metadata["agent_v2"]
+    assert (agent_v2["provider"], agent_v2["model"]) == ("chatgpt-subscription", "gpt-6.1-sol")
+    blocks = [block for turn_round in agent_v2["rounds"] for block in turn_round["blocks"]]
+    assert [b["type"] for b in blocks] == ["tool_call", "text"]
+    assert {b["provider"] for b in blocks} == {"chatgpt-subscription"}
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_turn_without_workspace_runs_on_new_runtime(harness, monkeypatch):
+    # The reported case: agent mode, Thinking "Auto", no workspace picked.
+    _switch_on()
+    requests = _chatgpt_session(harness, monkeypatch, (200, CHATGPT_TEXT_ROUND))
+
+    response, body = await harness.send(_Request("agent", workspace=""))
+
+    assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
+    assert harness.captured["legacy_agent"] == 0
+    [request] = requests
+    payload = json.loads(request.content)
+    assert "temperature" not in payload and "reasoning" not in payload
+    assert "event: error" not in body
+    [row] = harness.saved
+    assert row.content == CHATGPT_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_http_error_names_chatgpt_subscription(harness, monkeypatch):
+    _switch_on()
+    rejection = json.dumps({"error": {"message": "Unsupported parameter: temperature"}}).encode()
+    _chatgpt_session(harness, monkeypatch, (400, rejection))
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert "event: error" in body
+    assert "ChatGPT Subscription returned HTTP 400: Unsupported parameter: temperature" in body
+    assert "xAI" not in body
+    assert harness.saved == []
+
+
+CHATGPT_REASONING_ROUND = (FIXTURES / "chatgpt_responses_reasoning.sse").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_next_turn_replays_the_saved_turn_byte_identical(harness, monkeypatch):
+    _switch_on()
+    requests = _chatgpt_session(
+        harness, monkeypatch, (200, CHATGPT_REASONING_ROUND), (200, CHATGPT_REASONING_ROUND),
+    )
+    await harness.send(_Request("agent"))
+    [turn_round] = harness.saved[0].metadata["agent_v2"]["rounds"]
+    reasoning = turn_round["blocks"][0]
+    assert (reasoning["type"], reasoning["provider"], reasoning["model"]) == (
+        "reasoning", "chatgpt-subscription", "gpt-6.1-sol")
+    first_input = json.loads(requests[0].content)["input"]
+    harness.context.history = [*harness.context.history, harness.context.current, _as_history_row(harness.saved[0])]
+
+    await harness.send(_Request("agent"))
+
+    replayed = ",".join(
+        json.dumps(item, separators=(",", ":"), ensure_ascii=False) for item in _output_items(CHATGPT_REASONING_ROUND)
+    ).encode()
+    assert replayed in requests[1].content
+    second_input = json.loads(requests[1].content)["input"]
+    assert second_input[: len(first_input) - 1] == first_input[:-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_url", "first_model", "first_round", "second_model"),
+    [
+        ("https://api.x.ai/v1", "grok-4.7", XAI_FIXTURE, "gpt-6.1-sol"),
+        (CHATGPT_URL, "gpt-6.1-sol", CHATGPT_REASONING_ROUND, "gpt-6-astra"),
+    ],
+    ids=["xai-to-chatgpt", "gpt-6.1-sol-to-gpt-6-astra"],
+)
+async def test_chatgpt_model_switch_drops_other_models_reasoning(
+    harness, monkeypatch, first_url, first_model, first_round, second_model,
+):
+    _switch_on()
+    requests = _chatgpt_session(harness, monkeypatch, (200, first_round), (200, CHATGPT_TEXT_ROUND))
+    harness.session.endpoint_url, harness.session.model = first_url, first_model
+    await harness.send(_Request("agent"))
+    first_answer = harness.saved[0].content
+    # The first turn did produce reasoning, so its absence below is the switch's doing.
+    assert "reasoning" in [item["type"] for item in _output_items(first_round)]
+    harness.context.history = [harness.context.current, _as_history_row(harness.saved[0])]
+    harness.session.endpoint_url, harness.session.model = CHATGPT_URL, second_model
+
+    await harness.send(_Request("agent"))
+
+    assert str(requests[1].url) == "https://chatgpt.com/backend-api/codex/responses"
+    second_input = json.loads(requests[1].content)["input"]
+    assert "reasoning" not in [item.get("type") for item in second_input]
+    # The answer itself stays in the history; only the reasoning is dropped.
+    assert json.dumps(first_answer, ensure_ascii=False)[1:-1] in json.dumps(second_input, ensure_ascii=False)

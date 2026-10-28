@@ -26,8 +26,12 @@ from src.chat_helpers import _is_local_host, _lmstudio_models_cache, _probe_lmst
 # leaving the server root llama.cpp and Ollama serve native routes from;
 # _origin is (scheme, host, port) with the scheme's default port filled in.
 from src.agent_runtime.context_resolution import _origin, _serving_base
-from src.chat_agent.providers import THINKING_OFF, chat_completions, wire_effort
+from src.chat_agent.providers import CHATGPT, THINKING_OFF, chat_completions, wire_effort
 from src.chat_agent.store import THINKING_AUTO, THINKING_GRADED
+# Relies on: _extract_reasoning_levels(item) returns a Codex catalog model's
+# supported_reasoning_levels ({effort} objects or strings) as lower-case
+# effort strings, [] when the list is absent.
+from src.chatgpt_subscription import _extract_reasoning_levels
 from src.endpoint_resolver import normalize_base
 # Relies on: _native_tool_transport_rejected(text) matches the legacy markers
 # of a provider refusing tool calls; plain (non-SSE) text is matched as is.
@@ -53,6 +57,13 @@ LEVEL_REFUSED = "{model} doesn't support thinking level {level}; it answered at 
 
 PROBE_TIMEOUT_SECONDS = 1.0
 SERVER_REPORTED_TTL_SECONDS = 60.0
+# The Codex catalog is a 655 KB body; a cold fetch took 1.25 s (2026-10-28).
+CHATGPT_PROBE_TIMEOUT_SECONDS = 5.0
+# The catalog changes on model releases, not per minute.
+CHATGPT_REPORTED_TTL_SECONDS = 600.0
+# Must be >= every model's minimal_client_version: an older value hides newer
+# models (0.99.0 listed 1 model on 2026-10-28; current ones need >= 0.155.0).
+CODEX_CATALOG_CLIENT_VERSION = "99.0.0"
 # Ollama's wording; the legacy matcher predates Ollama's tool check.
 _OLLAMA_TOOLS_REJECTED = "does not support tools"
 # Local servers on these ports have no capability endpoint (vLLM, SGLang).
@@ -140,16 +151,24 @@ async def _report(key: _Key, endpoint_url: str, model: str, headers: Any) -> _Re
     cached = _reported.get(key)
     if cached is not None and cached[1] > _now():
         return cached[0]
+    timeout, ttl = _probe_limits(endpoint_url)
     try:
         # A hard bound: per-request timeouts don't cover a body that trickles.
-        reported = await asyncio.wait_for(_probe(endpoint_url, model, headers), PROBE_TIMEOUT_SECONDS)
+        reported = await asyncio.wait_for(_probe(endpoint_url, model, headers), timeout)
     except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as exc:
         logger.info("chat_agent: capability probe for %s failed (%s)", model, type(exc).__name__)
         return _Report()
-    expiry = _now() + SERVER_REPORTED_TTL_SECONDS
+    expiry = _now() + ttl
     for listed_model, report in reported.items():
         _reported[(key[0], listed_model)] = (report, expiry)
     return reported.get(model, _Report())
+
+
+def _probe_limits(endpoint_url: str) -> Tuple[float, float]:
+    """(timeout, ttl) of a probe of this endpoint's server."""
+    if _detect_provider(endpoint_url) == CHATGPT:
+        return CHATGPT_PROBE_TIMEOUT_SECONDS, CHATGPT_REPORTED_TTL_SECONDS
+    return PROBE_TIMEOUT_SECONDS, SERVER_REPORTED_TTL_SECONDS
 
 
 def is_tools_rejection(status: Optional[int], message: str) -> bool:
@@ -165,6 +184,8 @@ def is_effort_rejection(status: Optional[int], message: str) -> bool:
 async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Report]:
     """What the server reports, by model; empty when it reports nothing."""
     provider = _detect_provider(endpoint_url)
+    if provider == CHATGPT:
+        return await _probe_codex_catalog(endpoint_url, headers)
     if provider in ("openrouter", "mistral", "copilot"):
         return await _probe_catalog(provider, endpoint_url, headers)
     if provider != "openai" or not _is_local_host(_origin(endpoint_url)[1]):
@@ -268,6 +289,35 @@ async def _probe_catalog(provider: str, endpoint_url: str, headers: Any) -> Dict
         if isinstance(flag, bool):
             reports[item["id"]] = _Report(YES if flag else NO)
     return reports
+
+
+async def _probe_codex_catalog(endpoint_url: str, headers: Any) -> Dict[str, _Report]:
+    """The Codex backend's own model list, the one Codex CLI's picker reads."""
+    response = await _client().get(
+        f"{normalize_base(endpoint_url)}/models",
+        params={"client_version": CODEX_CATALOG_CLIENT_VERSION},
+        headers=_provider_headers(CHATGPT, headers if isinstance(headers, dict) else None),
+        timeout=CHATGPT_PROBE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return {}
+    # The catalog has no tool flag: tools stay UNKNOWN ("try").
+    return {
+        item["slug"]: _Report(thinking=_codex_levels(_extract_reasoning_levels(item)))
+        for item in payload["models"] if isinstance(item, dict) and item.get("slug")
+    }
+
+
+def _codex_levels(efforts: list) -> ThinkingLevels:
+    if not efforts:
+        return ThinkingLevels()
+    # Listed means supported, as in Codex CLI; no model lists "none", so Off is
+    # unsupported. "ultra" has no Odysseus level.
+    return ThinkingLevels({
+        level: SUPPORTED if wire_effort(level) in efforts else UNSUPPORTED for level in LEVELS
+    })
 
 
 def _reports_by_model(

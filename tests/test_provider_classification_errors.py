@@ -66,6 +66,26 @@ class TestFormatUpstreamError:
         )
         assert "nope" in msg
 
+    def test_param_named_by_the_body_is_kept(self):
+        # The Codex effort refusal names the field only in `param` (TDD 05).
+        body = ('{"error": {"message": "Unsupported value: \'none\' is not supported with the '
+                '\'gpt-6.1-sol\' model.", "param": "reasoning.effort", "code": "unsupported_value"}}')
+        msg = _format_upstream_error(400, body, "https://chatgpt.com/backend-api/codex")
+        assert msg == (
+            "ChatGPT Subscription returned HTTP 400: Unsupported value: 'none' is not supported "
+            "with the 'gpt-6.1-sol' model. (param: reasoning.effort)"
+        )
+
+    def test_body_without_param_is_unchanged(self):
+        for body in ('{"error": {"message": "bad request"}}',
+                     '{"error": {"message": "bad request", "param": null}}'):
+            msg = _format_upstream_error(400, body, "https://api.openai.com/v1")
+            assert msg == "OpenAI returned HTTP 400: bad request"
+
+    def test_param_without_message_has_no_leading_space(self):
+        msg = _format_upstream_error(400, '{"error": {"param": "tools"}}', "https://api.openai.com/v1")
+        assert msg == "OpenAI returned HTTP 400: (param: tools)"
+
     def test_unknown_url_falls_back_to_generic_label(self):
         msg = _format_upstream_error(401, "", "")
         assert msg.startswith("provider rejected the API key")

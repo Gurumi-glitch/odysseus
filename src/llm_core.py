@@ -1556,8 +1556,8 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
-    if not _restricts_temperature(model):
-        payload["temperature"] = temperature
+    # ``temperature`` is accepted from callers but never sent: the Codex backend
+    # has no temperature field and answers 400 for every model.
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
@@ -1567,7 +1567,7 @@ def _build_chatgpt_responses_payload(
 
 
 CHATGPT_ALLOWED_PAYLOAD_KEYS = frozenset({
-    "model", "instructions", "input", "stream", "store", "temperature", "reasoning",
+    "model", "instructions", "input", "stream", "store", "reasoning",
 })
 
 
@@ -1614,6 +1614,10 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
             err = j.get("error") or j
             if isinstance(err, dict):
                 detail = (err.get("message") or err.get("detail") or "").strip()
+                # The Codex effort refusal names the field only in `param`, and
+                # chat_agent's is_effort_rejection matches on this text.
+                if err.get("param"):
+                    detail = f"{detail} (param: {err['param']})".strip()
             elif isinstance(err, str):
                 detail = err.strip()
     except Exception:
@@ -1678,8 +1682,11 @@ def _moonshot_rejects_custom_temperature(provider: str, model: str) -> bool:
 
 def _omit_temperature(provider: str, model: str) -> bool:
     """Check if a request should use the provider's default temperature."""
-    return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
-        provider, model
+    return (
+        _restricts_temperature(model)
+        or _moonshot_rejects_custom_temperature(provider, model)
+        # The Codex backend has no temperature field: any value is a 400.
+        or provider == "chatgpt-subscription"
     )
 
 

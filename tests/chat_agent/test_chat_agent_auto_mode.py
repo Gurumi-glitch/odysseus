@@ -15,7 +15,7 @@ import pytest
 import routes.chat_routes as chat_routes
 from core.models import ChatMessage
 from src.chat_agent import classifier, store, tools
-from src.chat_agent.providers import chat_completions
+from src.chat_agent.providers import chat_completions, responses
 from tests.chat_agent.test_chat_agent_asks_route import (  # noqa: F401 (fixtures)
     _bash,
     _events,
@@ -443,3 +443,53 @@ async def test_a_target_counts_as_named_only_as_a_whole_address(harness, admin, 
     assert facts["provenance"]["targets"] == [{"target": "ann@example.co", "named_in_user_messages": False}]
     # The classifier reads the arguments parsed, as the executor does.
     assert facts["action"]["arguments"]["to"] == "ann@example.co"
+
+
+def _responses_verdict(decision):
+    """A verdict as the Codex backend streams it: one message item, then completed."""
+    text = json.dumps({"decision": decision, "reason": "", "category": ""})
+    item = {"type": "message", "id": "msg_v", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}],
+            "phase": "final_answer"}
+    events = [
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+        {"type": "response.completed", "response": {"status": "completed", "output": [item], "usage": {}}},
+    ]
+    return "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
+
+
+@pytest.mark.asyncio
+async def test_a_chatgpt_classifier_judges_in_the_responses_dialect(
+    harness, admin, executor, workspace, says, monkeypatch,
+):
+    picked = {"classifier_endpoint_id": "ep-chatgpt", "classifier_model": "gpt-6.1-sol"}
+    monkeypatch.setattr("src.settings.get_setting", lambda key, default=None: picked.get(key, default))
+    monkeypatch.setattr(
+        classifier, "resolve_endpoint_by_id",
+        lambda endpoint_id, model, owner=None, require_exact_model=False: (
+            "https://chatgpt.com/backend-api/codex", model, {"Authorization": "Bearer chatgpt"},
+        ),
+    )
+    codex_requests = []
+
+    def codex(request):
+        codex_requests.append(request)
+        return httpx.Response(200, content=_responses_verdict("allow"), headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(codex))
+    monkeypatch.setattr(responses, "_get_http_client", lambda: client)
+    says("List my files.")
+    harness.provider_rounds = [_bash("ls"), _sse_events(["Done."])]
+
+    body = await _send(harness, _auto(workspace))
+
+    [judged] = codex_requests
+    assert str(judged.url) == "https://chatgpt.com/backend-api/codex/responses"
+    payload = json.loads(judged.content)
+    assert payload["model"] == "gpt-6.1-sol"
+    assert payload["input"][0]["content"] == classifier.SYSTEM_PROMPT
+    # classifier.TEMPERATURE is 0.0; the Codex backend refuses any temperature.
+    assert "temperature" not in payload
+    assert _classifier_requests(harness) == []
+    assert executor == ["ls"]
+    assert _events(body, "ask_user") == []

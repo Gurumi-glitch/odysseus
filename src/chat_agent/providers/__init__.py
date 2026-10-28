@@ -27,6 +27,9 @@ from typing import Any, Dict, List, Optional, Union
 from src.llm_core import _detect_provider, _host_match
 
 XAI = "xai"
+CHATGPT = "chatgpt-subscription"
+# Providers that speak the Responses dialect (providers/responses.py).
+RESPONSES_PROVIDERS = frozenset({XAI, CHATGPT})
 # The chat's Off thinking level; every dialect spells it "none" on its effort scale (spec #89).
 THINKING_OFF = "off"
 OFF_EFFORT = "none"

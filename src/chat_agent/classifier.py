@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from src import settings
 from src.chat_agent import permissions, prompt, store
 from src.chat_agent.providers import (
-    XAI, Endpoint, ProviderError, RoundEnd, chat_completions, provider_key, xai_responses,
+    RESPONSES_PROVIDERS, Endpoint, ProviderError, RoundEnd, chat_completions, provider_key, responses,
 )
 # Relies on: resolve_endpoint_by_id(require_exact_model=True) returns the
 # (chat url, model, headers) of an enabled endpoint the owner may use, or None
@@ -363,9 +363,9 @@ class AutoMode:
         }
 
     async def _call(self, endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Optional[str]:
-        if provider_key(endpoint.url) == XAI:
+        if provider_key(endpoint.url) in RESPONSES_PROVIDERS:
             # Its own prompt-cache key, so the chat's cached prefix is untouched.
-            events = xai_responses.stream_round(
+            events = responses.stream_round(
                 endpoint, messages, cache_key=f"{self.session_id}:{DENIED_BY}",
                 temperature=TEMPERATURE, max_tokens=0,
             )
