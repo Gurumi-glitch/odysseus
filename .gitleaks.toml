@@ -33,3 +33,15 @@ regexTarget = "secret"
 regexes = [
   '''^ternary-bonsai-2-27b-ptq1_0-mtp$''',
 ]
+
+[[allowlists]]
+description = "Synthetic dummy API key in trace artifact sanitizer test fixture"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(?:^|/)tests/test_trace_artifact_sanitizer\.py$''',
+]
+regexTarget = "secret"
+regexes = [
+  '''^sk-123456789$''',
+]
