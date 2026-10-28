@@ -218,3 +218,25 @@ def test_the_workspace_alias_resolves_before_matching(workspace):
                    workspace=workspace) == ALLOW
     assert _decide("read_file", "/workspace/secrets/key", deny=["read_file(secrets/*)"],
                    workspace=workspace) == DENY
+
+
+@pytest.fixture
+def agent_workspace(workspace, monkeypatch):
+    # With no workspace picked, the file tools resolve relative paths in the
+    # agent workspace (upstream #6722), not in the server's cwd.
+    monkeypatch.setattr(permissions, "default_agent_workspace", lambda: workspace)
+    return workspace
+
+
+def test_without_a_workspace_relative_paths_match_where_the_agent_workspace_opens_them(agent_workspace):
+    deny = [f"write_file({agent_workspace}/secrets/*)"]
+    assert _decide("write_file", "secrets/key\nnew", deny=deny) == DENY
+    assert _decide("read_file", "notes/link", deny=["read_file(secrets/*)"]) == DENY
+    assert _decide("write_file", "notes/a.md\nnew", allow=["write_file(notes/*)"]) == ALLOW
+
+
+def test_without_a_safe_agent_workspace_a_relative_path_is_unsure(monkeypatch):
+    def unsafe():
+        raise RuntimeError("agent workspace is not a safe real directory")
+    monkeypatch.setattr(permissions, "default_agent_workspace", unsafe)
+    assert _decide("read_file", "notes/a.md", deny=["read_file(secrets/*)"]) == ASK

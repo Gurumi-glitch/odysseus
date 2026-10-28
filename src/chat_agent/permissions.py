@@ -69,6 +69,9 @@ from src.tool_policy import WEB_ACCESS_TOOL_NAMES, web_search_enabled_for_turn
 # Relies on: _resolve_tool_path_in_workspace returns the realpath the file
 # tools open inside the workspace, or raises ValueError where they refuse.
 from src.tool_execution import _resolve_tool_path_in_workspace
+# Relies on: default_agent_workspace is the root RequestAuthority seals when
+# no workspace is set, or raises when it seals none (upstream #6722).
+from src.tool_execution import default_agent_workspace
 # manage_tasks_args / find_task are do_manage_tasks' own parsing and lookup,
 # so the gate judges the task the executor will act on (no second reading).
 from src.tools.system import find_task, manage_tasks_args
@@ -524,8 +527,15 @@ def _path_views(path: str, workspace: Optional[str]) -> Optional[List[str]]:
     if clean is None:
         return None
     if not workspace:
-        # Without a workspace the file tools open the path's realpath.
-        return [clean, os.path.realpath(os.path.expanduser(path))]
+        expanded = os.path.expanduser(path)
+        if os.path.isabs(expanded):
+            return [clean, os.path.realpath(expanded)]
+        # Without a workspace the file tools open a relative path in the
+        # agent workspace, so match it there rather than in the server's cwd.
+        try:
+            workspace = default_agent_workspace()
+        except RuntimeError:
+            return None  # No root is sealed, so the executor refuses it too.
     try:
         resolved = _resolve_tool_path_in_workspace(workspace, path)
     except ValueError:
