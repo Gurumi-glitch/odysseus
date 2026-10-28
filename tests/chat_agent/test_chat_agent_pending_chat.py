@@ -13,6 +13,10 @@ from core import database
 from tests.chat_agent.test_chat_agent_capabilities import (
     BONSAI,
     BONSAI_PROPS,
+    CODEX,
+    CODEX_CATALOG,
+    CODEX_LEVELS,
+    CODEX_MODELS,
     LLAMA,
     _fresh_caches,  # noqa: F401  (autouse: clean capability caches)
     serve_probes,
@@ -33,6 +37,7 @@ def api(monkeypatch, tmp_path):
 
     import routes.chat_routes as chat_routes
     import src.constants as constants
+    import src.endpoint_resolver as endpoint_resolver
     from routes.chat_agent_routes import setup_chat_agent_routes
 
     monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
@@ -41,6 +46,7 @@ def api(monkeypatch, tmp_path):
     database.Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     monkeypatch.setattr(chat_routes, "SessionLocal", factory)
+    monkeypatch.setattr(endpoint_resolver, "SessionLocal", factory)
     with factory() as db:
         for endpoint_id, owner, base, enabled in [
             ("alice-llama", "alice", LLAMA, True),
@@ -50,6 +56,9 @@ def api(monkeypatch, tmp_path):
         ]:
             db.add(database.ModelEndpoint(id=endpoint_id, name=endpoint_id, owner=owner,
                                           base_url=base, is_enabled=enabled))
+        # Its bearer lives in a ProviderAuthSession, never in api_key.
+        db.add(database.ModelEndpoint(id="alice-chatgpt", name="ChatGPT", owner="alice", base_url=CODEX,
+                                      provider_auth_id="auth-1", is_enabled=True))
         db.commit()
 
     app = FastAPI()
@@ -145,6 +154,60 @@ async def test_endpoints_the_owner_cannot_chat_with_are_not_found(api, monkeypat
 
     assert response.status_code == 404
     assert seen == []
+
+
+def _codex_catalog(monkeypatch):
+    """Serve the catalog only to a bearer, as the Codex backend does; returns the requests."""
+    import httpx
+
+    requests = []
+
+    def catalog(request):
+        requests.append(request)
+        if "Authorization" not in request.headers:
+            return httpx.Response(401, json={"detail": "Unauthorized"})
+        return httpx.Response(200, json=CODEX_MODELS)
+
+    serve_probes(monkeypatch, {CODEX_CATALOG: catalog})
+    return requests
+
+
+@pytest.mark.asyncio
+async def test_pending_chatgpt_pick_probes_the_catalog_with_a_fresh_bearer(api, monkeypatch):
+    import src.endpoint_resolver as endpoint_resolver
+
+    _switch_on()
+    requests = _codex_catalog(monkeypatch)
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint_runtime",
+                        lambda ep, owner=None: (CODEX, "live-access-token"))
+
+    response = await _capabilities(api, model="gpt-6.1-sol", endpoint_id="alice-chatgpt")
+
+    assert response.status_code == 200
+    assert response.json()["thinking"]["levels"] == CODEX_LEVELS
+    [request] = requests
+    assert request.headers["Authorization"] == "Bearer live-access-token"
+
+
+@pytest.mark.asyncio
+async def test_pending_chatgpt_pick_with_a_failed_refresh_leaves_levels_unknown(api, monkeypatch):
+    import src.endpoint_resolver as endpoint_resolver
+    from src.chatgpt_subscription import ChatGPTSubscriptionReauthRequired
+
+    _switch_on()
+    requests = _codex_catalog(monkeypatch)
+
+    def refresh_fails(ep, owner=None):
+        raise ChatGPTSubscriptionReauthRequired("ChatGPT Subscription token refresh failed with HTTP 401.")
+
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint_runtime", refresh_fails)
+
+    response = await _capabilities(api, model="gpt-6.1-sol", endpoint_id="alice-chatgpt")
+
+    assert response.status_code == 200
+    assert response.json()["thinking"]["levels"] == UNKNOWN
+    # Asked without a bearer, refused, and never a sign-in prompt.
+    assert requests and all("Authorization" not in request.headers for request in requests)
 
 
 # --- Settings without a session ----------------------------------------------------

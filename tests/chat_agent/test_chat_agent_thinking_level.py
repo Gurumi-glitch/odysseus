@@ -243,15 +243,23 @@ def api(monkeypatch, tmp_path):
 
     import httpx
     from fastapi import FastAPI
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
+    import routes.chat_helpers as chat_helpers
     import routes.session_routes as session_routes
     import src.constants as constants
+    from core import database
     from routes.chat_agent_routes import setup_chat_agent_routes
     from tests.chat_agent.test_chat_agent_ask_steer_authority import _Db
 
     monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setattr(session_routes, "SessionLocal", _Db)
+    # The tables resolve_session_auth reads the chat's endpoint credentials from.
+    engine = create_engine(f"sqlite:///{tmp_path / 'odysseus.db'}")
+    database.Base.metadata.create_all(engine)
+    monkeypatch.setattr(chat_helpers, "SessionLocal", sessionmaker(bind=engine, autoflush=False))
     session = SimpleNamespace(endpoint_url=LLAMA, model=BONSAI, headers={})
     app = FastAPI()
 
@@ -263,6 +271,7 @@ def api(monkeypatch, tmp_path):
     app.include_router(setup_chat_agent_routes(SimpleNamespace(get_session=lambda session_id: session)))
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://odysseus")
     client.session = session
+    client.db = chat_helpers.SessionLocal
     return client
 
 
@@ -393,6 +402,42 @@ async def test_capabilities_report_new_runtime_for_a_chatgpt_subscription_chat(a
     body = (await _capabilities(api)).json()
 
     assert (body["route"], body["reason"], body["thinking"]["available"]) == ("chat_agent", "", True)
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_chat_levels_come_from_the_codex_catalog_with_a_fresh_bearer(api, monkeypatch):
+    import httpx
+
+    import src.endpoint_resolver as endpoint_resolver
+    from core.database import ModelEndpoint, Session as DbSession
+    from tests.chat_agent.test_chat_agent_capabilities import CODEX_CATALOG, CODEX_LEVELS, CODEX_MODELS
+
+    _switch_on()
+    with api.db() as db:
+        db.add(ModelEndpoint(id="alice-chatgpt", name="ChatGPT", owner="alice", base_url=CHATGPT_URL,
+                             provider_auth_id="auth-1", is_enabled=True))
+        db.add(DbSession(id="chat-1", name="chat", owner="alice", endpoint_url=CHATGPT_URL,
+                         model="gpt-6.1-sol", headers={}))
+        db.commit()
+    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint_runtime",
+                        lambda ep, owner=None: (CHATGPT_URL, "live-access-token"))
+    requests = []
+
+    def catalog(request):
+        requests.append(request)
+        return httpx.Response(200, json=CODEX_MODELS)
+
+    serve_probes(monkeypatch, {CODEX_CATALOG: catalog})
+    # Empty, as after sync_session_metadata rewrites the cached session (#117).
+    api.session.endpoint_url, api.session.model, api.session.headers = CHATGPT_URL, "gpt-6.1-sol", {}
+
+    body = (await _capabilities(api)).json()
+
+    assert body["thinking"]["levels"] == CODEX_LEVELS
+    [request] = requests
+    assert request.headers["Authorization"] == "Bearer live-access-token"
+    with api.db() as db:
+        assert db.get(DbSession, "chat-1").headers == {}
 
 
 @pytest.mark.asyncio
