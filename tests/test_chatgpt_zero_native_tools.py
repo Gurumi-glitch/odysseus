@@ -30,7 +30,7 @@ _MESSAGES = [
     {"role": "assistant", "content": "<tool>read_file</tool>"},
     {"role": "tool", "content": "README.md"},
 ]
-_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store", "temperature"}
+_ALLOWED_KEYS = {"model", "instructions", "input", "stream", "store"}
 
 
 def test_responses_payload_has_no_native_tool_surfaces():
@@ -48,6 +48,15 @@ def test_responses_payload_has_no_native_tool_surfaces():
     roles = [item["role"] for item in payload["input"]]
     assert roles == ["user", "assistant", "user"]  # tool results become user input text
     assert "system" not in roles
+
+
+# The Codex backend rejects any temperature with 400 "Unsupported parameter:
+# temperature"; gpt-6* and codex-auto-review were missed by the model-name rule.
+@pytest.mark.parametrize("model", ["gpt-6.1-sol", "gpt-6-astra", "codex-auto-review", "gpt-5.6-sol"])
+@pytest.mark.parametrize("temperature", [0.0, 0.3, 1.0])
+def test_responses_payload_never_sends_temperature(model, temperature):
+    payload = llm_core._build_chatgpt_responses_payload(model, _MESSAGES, temperature, 4096, stream=True)
+    assert "temperature" not in payload
 
 
 def test_upper_level_tools_argument_is_discarded_by_chatgpt_builder():
