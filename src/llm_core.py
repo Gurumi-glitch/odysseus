@@ -1614,6 +1614,10 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
             err = j.get("error") or j
             if isinstance(err, dict):
                 detail = (err.get("message") or err.get("detail") or "").strip()
+                # The Codex effort refusal names the field only in `param`, and
+                # chat_agent's is_effort_rejection matches on this text.
+                if err.get("param"):
+                    detail = f"{detail} (param: {err['param']})".strip()
             elif isinstance(err, str):
                 detail = err.strip()
     except Exception:

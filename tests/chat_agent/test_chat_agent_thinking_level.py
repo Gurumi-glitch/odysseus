@@ -194,6 +194,42 @@ async def test_thinking_level_payload_per_dialect(harness, monkeypatch, url, mod
     assert await _turn_payload(harness, monkeypatch, url, model, level, routes) == sent
 
 
+# The Codex backend's answer to effort "none" on gpt-6.1-sol (live probe,
+# 2026-10-28, TDD 05): "effort" appears only in `param`, not in the message.
+CHATGPT_OFF_REFUSAL = json.dumps({"error": {
+    "message": "Unsupported value: 'none' is not supported with the 'gpt-6.1-sol' model.",
+    "type": "invalid_request_error",
+    "param": "reasoning.effort",
+    "code": "unsupported_value",
+}}).encode()
+
+
+@pytest.mark.asyncio
+async def test_chatgpt_refused_off_is_learned_and_the_round_resent_without_reasoning(harness, monkeypatch):
+    from src.chat_agent import store
+    from tests.chat_agent.test_chat_agent_route import (
+        CHATGPT_ANSWER, CHATGPT_TEXT_ROUND, _chatgpt_session, _data_events, _Request, _switch_on,
+    )
+
+    _switch_on()
+    store.set_chat_settings("alice", "session-1", {store.THINKING_LEVEL: "off"})
+    requests = _chatgpt_session(harness, monkeypatch, (400, CHATGPT_OFF_REFUSAL), (200, CHATGPT_TEXT_ROUND))
+
+    response, body = await harness.send(_Request("agent"))
+
+    assert response.headers["X-Odysseus-Runtime"] == "chat_agent"
+    refused, resent = (json.loads(r.content) for r in requests)
+    assert refused["reasoning"] == {"effort": "none"}
+    assert "reasoning" not in resent
+    assert resent["input"] == refused["input"]
+    [notice] = [e for e in _data_events(body) if e.get("type") == "thinking_level_refused"]
+    assert notice["level"] == "off"
+    assert "event: error" not in body
+    [row] = harness.saved
+    assert row.content == CHATGPT_ANSWER
+    assert (await capabilities.thinking_levels(CHATGPT_URL, "gpt-6.1-sol")).support["off"] == U
+
+
 # --- Settings and capabilities routes, over HTTP ----------------------------
 
 ANTHROPIC = "https://api.anthropic.com/v1"
