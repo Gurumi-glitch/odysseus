@@ -44,8 +44,7 @@ from src.context_compactor import (
     trim_for_context,
 )
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
-from src.endpoint_resolver import _resolve_endpoint_by_id_with_descriptor
+from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url, resolve_endpoint_by_id
 from src.foreground_model_routing import (
     build_foreground_model_candidates,
     build_foreground_route_descriptors,
@@ -2046,21 +2045,19 @@ def _stick_to_registered_route(sess, session_id: str, owner, endpoint_id, model)
     """Persist the sticky route from its endpoint row, not from the turn's
     candidate tuple, so the stored URL is always a registered one.
 
-    Relies on: ``_resolve_endpoint_by_id_with_descriptor`` with
-    ``require_exact_model=True`` is the call that built the fallback candidates,
-    so it returns the same route, or None once the row is disabled or out of scope.
+    Relies on: ``resolve_endpoint_by_id(require_exact_model=True)`` makes the
+    same row lookup that built the fallback candidates, so it returns the same
+    route, or None once the row is disabled, out of scope or without credentials.
     """
-    resolved = _resolve_endpoint_by_id_with_descriptor(
-        endpoint_id, model, owner=owner, require_exact_model=True,
-    )
+    resolved = resolve_endpoint_by_id(endpoint_id, model, owner=owner, require_exact_model=True)
     if not resolved:
-        logger.warning("Fallback endpoint %r is no longer available for %s; session route kept",
+        logger.warning("Fallback endpoint %r could not be re-resolved for %s; session route kept",
                        endpoint_id, session_id)
         return
-    (chat_url, resolved_model, headers), descriptor = resolved
+    chat_url, resolved_model, headers = resolved
     _persist_session_route(
         sess, session_id, model=resolved_model, endpoint_url=chat_url, headers=headers,
-        endpoint_id=descriptor["endpoint_id"],
+        endpoint_id=endpoint_id,
     )
 
 

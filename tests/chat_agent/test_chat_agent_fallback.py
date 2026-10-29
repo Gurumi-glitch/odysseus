@@ -92,10 +92,9 @@ def harness(monkeypatch, tmp_path):
 
     def resolve_registered(endpoint_id, model=None, owner=None, *, require_exact_model=False):
         harness.route_lookups.append((endpoint_id, model, owner, require_exact_model))
-        route = harness.registered_routes.get(endpoint_id)
-        return (route, {"endpoint_id": endpoint_id}) if route else None
+        return harness.registered_routes.get(endpoint_id)
 
-    monkeypatch.setattr(chat_routes, "_resolve_endpoint_by_id_with_descriptor", resolve_registered)
+    monkeypatch.setattr(chat_routes, "resolve_endpoint_by_id", resolve_registered)
     # Large window: the fallback fits without compaction unless a test says so.
     monkeypatch.setattr(transcript, "get_context_length", lambda url, model: 128_000)
     harness.row = _SessionRow()
@@ -344,6 +343,7 @@ async def test_new_runtime_falls_back_to_chatgpt_in_the_responses_dialect(harnes
         foreground_model_routing, "resolve_fallback_entries",
         lambda *args, **kwargs: [(CHATGPT_URL, "gpt-6.1-sol", dict(chatgpt_headers))],
     )
+    harness.registered_routes["chatgpt-ep"] = (CHATGPT_URL, "gpt-6.1-sol", dict(chatgpt_headers))
     _script(monkeypatch, harness, {PRIMARY_MODEL: [503]})
     codex_requests = []
 
@@ -369,6 +369,9 @@ async def test_new_runtime_falls_back_to_chatgpt_in_the_responses_dialect(harnes
     [row] = harness.saved
     assert row.content == CHATGPT_ANSWER
     assert row.metadata["agent_v2"]["provider"] == "chatgpt-subscription"
+    assert (harness.row.model, harness.row.endpoint_url, harness.row.endpoint_id) == (
+        "gpt-6.1-sol", CHATGPT_URL, "chatgpt-ep",
+    )
 
 
 async def _answer_from_backup(harness, monkeypatch, runtime):
