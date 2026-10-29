@@ -45,6 +45,7 @@ from src.context_compactor import (
 )
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import _resolve_endpoint_by_id_with_descriptor
 from src.foreground_model_routing import (
     build_foreground_model_candidates,
     build_foreground_route_descriptors,
@@ -2041,7 +2042,29 @@ def _persist_session_route(sess, session_id: str, *, model, endpoint_url, header
         db.close()
 
 
-def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: list, event: dict) -> None:
+def _stick_to_registered_route(sess, session_id: str, owner, endpoint_id, model) -> None:
+    """Persist the sticky route from its endpoint row, not from the turn's
+    candidate tuple, so the stored URL is always a registered one.
+
+    Relies on: ``_resolve_endpoint_by_id_with_descriptor`` with
+    ``require_exact_model=True`` is the call that built the fallback candidates,
+    so it returns the same route, or None once the row is disabled or out of scope.
+    """
+    resolved = _resolve_endpoint_by_id_with_descriptor(
+        endpoint_id, model, owner=owner, require_exact_model=True,
+    )
+    if not resolved:
+        logger.warning("Fallback endpoint %r is no longer available for %s; session route kept",
+                       endpoint_id, session_id)
+        return
+    (chat_url, resolved_model, headers), descriptor = resolved
+    _persist_session_route(
+        sess, session_id, model=resolved_model, endpoint_url=chat_url, headers=headers,
+        endpoint_id=descriptor["endpoint_id"],
+    )
+
+
+def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: list, event: dict, *, owner) -> None:
     """A fallback answered: the chat stays on it until the user picks another
     model (spec #44: fallback is sticky on both runtimes).
 
@@ -2049,15 +2072,12 @@ def _stick_to_fallback(sess, session_id: str, candidates: list, descriptors: lis
     sit on several endpoints, so both must match. ``candidates`` and
     ``descriptors`` are the parallel foreground lists of this turn.
     """
-    for (url, model, headers), descriptor in zip(candidates[1:], descriptors[1:]):
+    for (_url, model, _headers), descriptor in zip(candidates[1:], descriptors[1:]):
         if (
             model == event.get("answered_by")
             and descriptor.get("endpoint_id") == event.get("answered_by_endpoint_id")
         ):
-            _persist_session_route(
-                sess, session_id, model=model, endpoint_url=url, headers=headers,
-                endpoint_id=descriptor.get("endpoint_id"),
-            )
+            _stick_to_registered_route(sess, session_id, owner, descriptor.get("endpoint_id"), model)
             return
     logger.warning("Fallback answered by %r is not a candidate of %s; session route kept",
                    event.get("answered_by"), session_id)
@@ -3187,12 +3207,9 @@ def setup_chat_routes(
                 message=message,
                 candidates=fallback_candidates,
                 fallback_statuses=foreground_policy.eligible_statuses,
-                stick_route=lambda candidate: _persist_session_route(
-                    sess, session,
-                    model=candidate.endpoint.model,
-                    endpoint_url=candidate.endpoint.url,
-                    headers=candidate.endpoint.headers,
-                    endpoint_id=candidate.route.get("endpoint_id"),
+                stick_route=lambda candidate: _stick_to_registered_route(
+                    sess, session, owner,
+                    candidate.route.get("endpoint_id"), candidate.endpoint.model,
                 ),
                 after_turn=functools.partial(
                     run_post_response_tasks,
@@ -4434,7 +4451,7 @@ def setup_chat_routes(
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     _stick_to_fallback(
                                         sess, session, _foreground_candidates,
-                                        _foreground_route_descriptors, data,
+                                        _foreground_route_descriptors, data, owner=_user,
                                     )
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "model_actual":
@@ -4930,7 +4947,7 @@ def setup_chat_routes(
                                     data["selected_model"] = data.get("selected_model") or _requested_model
                                     _stick_to_fallback(
                                         sess, session, _foreground_candidates,
-                                        _foreground_route_descriptors, data,
+                                        _foreground_route_descriptors, data, owner=_user,
                                     )
                                     yield chunk
                                 elif data.get("type") == "model_actual":
