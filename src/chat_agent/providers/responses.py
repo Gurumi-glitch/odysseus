@@ -147,8 +147,13 @@ def _input_part(part: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _function_tool(tool: Dict[str, Any]) -> Dict[str, Any]:
-    """Responses function tools are flat; the executor's schemas are Chat Completions shaped."""
-    return {"type": "function", **tool["function"]}
+    """Responses function tools are flat; the executor's schemas are Chat Completions shaped.
+
+    Responses defaults ``strict`` to true, which makes every property required:
+    the model then fills unused optional fields with "" / 0 and tools such as
+    manage_calendar reject the call. Our schemas mark only real requirements.
+    """
+    return {"type": "function", **tool["function"], "strict": False}
 
 
 async def stream_round(

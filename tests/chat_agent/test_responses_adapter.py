@@ -285,7 +285,8 @@ def test_chat_completions_tool_schemas_are_sent_flat_with_auto_choice():
     )
 
     assert payload["tools"] == [{
-        "type": "function", "name": "manage_notes", "description": "Notes", "parameters": {"type": "object"}}]
+        "type": "function", "name": "manage_notes", "description": "Notes", "parameters": {"type": "object"},
+        "strict": False}]
     assert payload["tool_choice"] == "auto"
     assert "parallel_tool_calls" not in payload
 
@@ -326,6 +327,22 @@ def test_chatgpt_payload_sends_max_output_tokens_when_set_and_never_temperature(
     assert "max_output_tokens" not in responses.build_payload(
         CHATGPT, CONVERSATION, cache_key="s", temperature=None, max_tokens=0,
     )
+
+
+def test_chatgpt_tools_opt_out_of_strict_so_optional_fields_stay_optional():
+    # Strict mode made gpt-6.1 send manage_calendar every field, local_start={"date": ""}
+    # and dtstart="" included, and the tool refused all of them.
+    schema = {"type": "function", "function": {
+        "name": "manage_calendar", "description": "Calendar",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string"}, "dtstart": {"type": "string"}}, "required": ["action"]}}}
+
+    [tool] = responses.build_payload(
+        CHATGPT, CONVERSATION, cache_key="s", temperature=None, max_tokens=0, tools=[schema],
+    )["tools"]
+
+    assert tool["strict"] is False
+    assert tool["parameters"]["required"] == ["action"]
 
 
 @pytest.mark.asyncio
