@@ -86,6 +86,15 @@ def harness(monkeypatch, tmp_path):
         lambda *args, **kwargs: {"endpoint_id": "primary-ep", "endpoint_label": "Primary"},
     )
     monkeypatch.setattr(foreground_model_routing, "endpoint_cost_tracked", lambda url: False)
+    # The sticky write re-resolves the answering route from its endpoint row.
+    harness.registered_routes = {"backup-ep": (BACKUP_URL, BACKUP_MODEL, dict(BACKUP_HEADERS))}
+    harness.route_lookups = []
+
+    def resolve_registered(endpoint_id, model=None, owner=None, *, require_exact_model=False):
+        harness.route_lookups.append((endpoint_id, model, owner, require_exact_model))
+        return harness.registered_routes.get(endpoint_id)
+
+    monkeypatch.setattr(chat_routes, "resolve_endpoint_by_id", resolve_registered)
     # Large window: the fallback fits without compaction unless a test says so.
     monkeypatch.setattr(transcript, "get_context_length", lambda url, model: 128_000)
     harness.row = _SessionRow()
@@ -334,6 +343,7 @@ async def test_new_runtime_falls_back_to_chatgpt_in_the_responses_dialect(harnes
         foreground_model_routing, "resolve_fallback_entries",
         lambda *args, **kwargs: [(CHATGPT_URL, "gpt-6.1-sol", dict(chatgpt_headers))],
     )
+    harness.registered_routes["chatgpt-ep"] = (CHATGPT_URL, "gpt-6.1-sol", dict(chatgpt_headers))
     _script(monkeypatch, harness, {PRIMARY_MODEL: [503]})
     codex_requests = []
 
@@ -359,3 +369,49 @@ async def test_new_runtime_falls_back_to_chatgpt_in_the_responses_dialect(harnes
     [row] = harness.saved
     assert row.content == CHATGPT_ANSWER
     assert row.metadata["agent_v2"]["provider"] == "chatgpt-subscription"
+    assert (harness.row.model, harness.row.endpoint_url, harness.row.endpoint_id) == (
+        "gpt-6.1-sol", CHATGPT_URL, "chatgpt-ep",
+    )
+
+
+async def _answer_from_backup(harness, monkeypatch, runtime):
+    if runtime == "new":
+        _switch_on()
+        _script(monkeypatch, harness, {PRIMARY_MODEL: [503], BACKUP_MODEL: [["From backup"]]})
+        return await harness.send(_Request("agent"))
+    monkeypatch.setattr(chat_routes, "stream_llm_with_fallback", _legacy_fallback_stream("backup-ep"))
+    return await harness.send(_Request("chat", use_rag="false"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["new", "legacy"])
+async def test_fallback_sticks_to_the_row_url_not_the_tuple_url(harness, monkeypatch, runtime):
+    # CodeQL 417-422: the stored URL must come from the endpoint row, never
+    # from the turn's candidate tuple.
+    monkeypatch.setattr(
+        foreground_model_routing, "resolve_fallback_entries",
+        lambda *args, **kwargs: [("https://tuple.example/v1", BACKUP_MODEL, {"Authorization": "Bearer tuple"})],
+    )
+
+    await _answer_from_backup(harness, monkeypatch, runtime)
+
+    assert harness.route_lookups == [("backup-ep", BACKUP_MODEL, "alice", True)]
+    assert (harness.session.endpoint_url, harness.session.headers) == (BACKUP_URL, BACKUP_HEADERS)
+    assert (harness.row.endpoint_url, harness.row.headers) == (BACKUP_URL, BACKUP_HEADERS)
+    assert harness.row.endpoint_id == "backup-ep"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runtime", ["new", "legacy"])
+async def test_fallback_on_a_disabled_endpoint_keeps_the_session_route(harness, monkeypatch, runtime):
+    harness.registered_routes.clear()
+    route = (harness.session.model, harness.session.endpoint_url, harness.session.endpoint_id)
+
+    await _answer_from_backup(harness, monkeypatch, runtime)
+
+    assert harness.route_lookups
+    assert (harness.session.model, harness.session.endpoint_url, harness.session.endpoint_id) == route
+    assert (harness.row.model, harness.row.endpoint_url, harness.row.endpoint_id) == (
+        PRIMARY_MODEL, "https://openrouter.ai/api/v1", "primary-ep",
+    )
+    assert harness.db.commits == 0

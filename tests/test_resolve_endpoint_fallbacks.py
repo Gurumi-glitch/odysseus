@@ -287,6 +287,21 @@ def test_descriptor_resolution_preserves_safe_endpoint_identity(monkeypatch):
     )]
 
 
+def test_sticky_re_resolve_returns_the_fallback_candidate_route(monkeypatch):
+    # routes.chat_routes._stick_to_registered_route relies on this: re-resolving a
+    # fallback by id with the same arguments returns the route the turn used.
+    _install_resolver_fakes(monkeypatch, {}, [_endpoint("backup", "backup-model")])
+
+    [(candidate, descriptor)] = resolve_fallback_entries_with_descriptors(
+        [{"endpoint_id": "backup", "model": "backup-model"}],
+        require_exact_model=True,
+    )
+
+    assert resolve_endpoint_by_id(
+        descriptor["endpoint_id"], candidate[1], require_exact_model=True,
+    ) == candidate
+
+
 def test_exact_id_descriptor_wins_when_routes_are_identical(monkeypatch):
     first = _endpoint("account-one", "same-model")
     second = _endpoint("account-two", "same-model")
