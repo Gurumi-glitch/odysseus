@@ -279,6 +279,7 @@ export function openMemoryModal(tabName = 'browse') {
       else if (m.default?.loadSkills) m.default.loadSkills(true);
     });
   }
+  if (mode === 'memory') return loadMemories();
 }
 
 function _decodeMemoryAnchorId(memoryId) {
@@ -299,9 +300,8 @@ function _resetMemoryDeepLinkFilters() {
 // Memory search output may expose a shortened id, so prefix matching is
 // intentional here.
 export async function openMemory(memoryId, attempt = 0) {
-  openMemoryModal('browse');
   _resetMemoryDeepLinkFilters();
-  await loadMemories();
+  await openMemoryModal('browse');
   if (renderMemoryList) renderMemoryList();
   const wanted = _decodeMemoryAnchorId(memoryId);
   if (!wanted) return;
