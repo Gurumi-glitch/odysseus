@@ -123,6 +123,23 @@ async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -
             _shared_cache_pending.pop(key, None)
 
 
+def is_valid_cron(cron_expression: str) -> bool:
+    """True for a standard 5-field cron expression that croniter can parse.
+
+    croniter also accepts 6- and 7-field expressions with a seconds field, but
+    the scheduler works at one-minute resolution and would run such a task
+    every second.
+    """
+    if len((cron_expression or "").split()) != 5:
+        return False
+    try:
+        from croniter import croniter
+        croniter(cron_expression)
+    except Exception:
+        return False
+    return True
+
+
 def compute_next_run(schedule: str, scheduled_time: str,
                      scheduled_day: int = None,
                      scheduled_date: datetime = None,
@@ -166,6 +183,9 @@ def compute_next_run(schedule: str, scheduled_time: str,
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     if schedule == "cron" and cron_expression:
+        if not is_valid_cron(cron_expression):
+            logger.warning(f"Invalid cron expression '{cron_expression}'")
+            return None
         try:
             from croniter import croniter
             cron = croniter(cron_expression, now)
