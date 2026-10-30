@@ -333,7 +333,7 @@ def _digest_windows(now):
 
 
 def _checkin_calendar_events(db, owner, start, end):
-    """Calendar events in [start, end] for ONE owner, for the check-in digest.
+    """Calendar events in [start, end) for ONE owner, for the check-in digest.
 
     Ownership lives on CalendarCal.owner; events inherit it via calendar_id.
     The digest query had no owner scope, so it pulled EVERY user's events into
@@ -347,7 +347,7 @@ def _checkin_calendar_events(db, owner, start, end):
         .filter(
             _CC.owner == owner,
             _CE.dtstart >= start,
-            _CE.dtstart <= end,
+            _CE.dtstart < end,
             _CE.status != "cancelled",
         )
         .order_by(_CE.dtstart)
