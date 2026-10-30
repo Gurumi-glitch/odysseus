@@ -163,11 +163,13 @@ function buildCategoryChips() {
   const container = document.getElementById('memory-category-filters');
   if (!container) return;
 
+  const cats = new Set(memories.map(m => m.category || 'fact'));
+  if (activeCategory !== 'all' && !cats.has(activeCategory)) activeCategory = 'all';
+
   // Hide the chip row entirely when there are no memories — no point showing
   // an "all" chip with nothing to filter.
   if (!memories.length) { container.innerHTML = ''; return; }
 
-  const cats = new Set(memories.map(m => m.category || 'fact'));
   const sorted = ['all', ...Array.from(cats).sort()];
   const counts = memories.reduce((result, memory) => {
     const category = memory.category || 'fact';
