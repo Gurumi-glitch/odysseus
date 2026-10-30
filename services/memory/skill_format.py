@@ -87,10 +87,14 @@ _FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_-]*):(.*)$", re.IGNORECASE)
 _FM_BLOCK_LIST_RE = re.compile(r"^\s*-(.*)$")
 
 
-def _parse_scalar(raw: str) -> Any:
+def _parse_scalar(raw: str, *, string_only: bool = False) -> Any:
     raw = raw.strip()
     if raw == "":
         return ""
+    # String fields keep their spelling; quoted values still use the decoder
+    # below so existing escapes round-trip as before.
+    if string_only and not (raw[0] == raw[-1] and raw[0] in ("'", '"')):
+        return raw
     if raw.startswith("[") and raw.endswith("]"):
         inner = raw[1:-1].strip()
         if not inner:
@@ -174,7 +178,7 @@ def parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
                 pending_key = key
                 fm[key] = []
             else:
-                fm[key] = _parse_scalar(val)
+                fm[key] = _parse_scalar(val, string_only=(key == "version"))
                 pending_key = None
             continue
         m2 = _FM_BLOCK_LIST_RE.match(line)
