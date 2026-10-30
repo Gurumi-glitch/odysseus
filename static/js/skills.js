@@ -1324,6 +1324,9 @@ function _toggleSkillEdit(card, name) {
   ta.className = 'skill-md-editor';
   ta.spellcheck = false;
   ta.value = (card._md != null ? card._md : (pre ? pre.textContent : '')) || '';
+  // Let the source set the intrinsic height; the card's existing flex/max
+  // height keeps long files bounded and the Save footer reachable.
+  ta.rows = Math.max(ta.rows, ta.value.split(/\r\n|\r|\n/).length);
   ta.addEventListener('click', (e) => e.stopPropagation());
   if (pre) pre.style.display = 'none';
   preview.insertBefore(ta, preview.querySelector('.doclib-card-expanded-actions'));
