@@ -1296,6 +1296,9 @@ async function _expandSkillCard(card, name) {
       card._md = md || '';
     } else {
       pre.textContent = 'Loading…';
+      const editBtn = [...card.querySelectorAll('.skill-card-preview button')]
+        .find(button => button.textContent.trim() === 'Edit');
+      if (editBtn) editBtn.disabled = true;
       try {
         const md = await _fetchSkillMarkdown(name);
         pre.textContent = md || '(empty)';
@@ -1303,6 +1306,8 @@ async function _expandSkillCard(card, name) {
         card._md = md;
       } catch (e) {
         pre.textContent = `Failed to load SKILL.md: ${e.message || 'Unknown error'}`;
+      } finally {
+        if (editBtn) editBtn.disabled = !card._mdLoaded;
       }
     }
   }
@@ -1311,6 +1316,9 @@ async function _expandSkillCard(card, name) {
 // Swap the read-only <pre> for an editable <textarea> (and back). The
 // Edit button toggles; a Save button commits via the markdown endpoint.
 function _toggleSkillEdit(card, name) {
+  // A loading/error preview is not source text. Menu entry points must obey
+  // the same readiness gate as the disabled footer control.
+  if (!card._mdLoaded) return;
   const preview = card.querySelector('.skill-card-preview');
   if (!preview) return;
   const existing = preview.querySelector('.skill-md-editor');
