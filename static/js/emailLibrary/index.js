@@ -2423,7 +2423,14 @@ export function openEmailLibrary(opts = {}) {
   }
 
   // Wire events
-  document.getElementById('email-lib-close').addEventListener('click', closeEmailLibrary);
+  document.getElementById('email-lib-close').addEventListener('click', () => {
+    const modal = document.getElementById('email-lib-modal');
+    if (modal?.classList.contains('email-reading') || modal?.querySelector('.doclib-card-expanded')) {
+      _exitEmailReaderModeForList();
+      return;
+    }
+    closeEmailLibrary();
+  });
   document.getElementById('email-settings-header-back')?.addEventListener('click', _hideEmailSettingsPage);
 
   // Clicking the modal header (anywhere except buttons/inputs) collapses
