@@ -4302,7 +4302,7 @@ def setup_cookbook_routes() -> APIRouter:
             tmux output can stop at a stale progress line if the pane/session
             disappears before Cookbook captures the final DOWNLOAD_OK marker.
             In that case, trust the cache shape: a snapshot directory with files
-            and no *.incomplete blobs means HuggingFace finished materializing the
+            and no unfinished blobs means HuggingFace finished materializing the
             model. cache_root is the task's custom download dir — the runner
             pointed HF_HOME there, so the cache lives under <cache_root>/hub,
             not wherever this probe's environment says.
@@ -4327,7 +4327,8 @@ def setup_cookbook_routes() -> APIRouter:
             """Best-effort check for resumable HF partial blobs.
 
             A lost SSH/tmux session can leave a real download still incomplete.
-            Treat any *.incomplete blob as stronger evidence than stale
+            Treat unfinished blobs (excluding empty markers paired with a
+            completed blob) as stronger evidence than stale
             "100%" lines in the captured pane output.
             """
             if not repo_id or "/" not in repo_id:
