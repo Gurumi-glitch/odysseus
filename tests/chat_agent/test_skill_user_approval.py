@@ -309,17 +309,21 @@ def _audit_passed(sm, name, confidence=0.95, status="published"):
     return name
 
 
-def test_auto_approve_off_leaves_only_builtins_and_user_approved(env):
+def test_auto_approve_off_admits_every_published_skill_without_an_audit(env):
+    # Upstream #6643: with Auto-approve OFF, publishing is the approval.
     sm, prefs = env
     _builtin(sm)
     builtins = {s["name"] for s in sm.load_all() if s.get("source") == "builtin"}
     approved = _add(sm)
     _publish(sm, approved)
     audited = _audit_passed(sm, "audited-skill")
+    unaudited = _add(sm, name="unaudited-skill", description="unaudited procedure",
+                     source="learned", status="published", when_to_use="only for unaudited")
+    _add(sm, name="draft-skill", description="draft procedure", when_to_use="only for drafts")
     assert _index_names(sm) == builtins | {approved, audited}
     prefs["auto_approve_skills"] = False
 
-    assert _index_names(sm) == builtins | {approved}
+    assert _index_names(sm) == builtins | {approved, audited, unaudited}
 
 
 def test_threshold_zero_admits_low_confidence_passes_but_never_drafts(env):

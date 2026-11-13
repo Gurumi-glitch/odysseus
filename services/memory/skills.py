@@ -131,9 +131,11 @@ def is_usable(skill: Dict) -> bool:
     if skill.get("user_approved"):
         return True
     auto_approve, min_confidence = _approval_policy(skill.get("owner"))
+    if not auto_approve:
+        # Auto-approve OFF: publishing is the approval, no audit (upstream #6643).
+        return True
     return (
-        auto_approve
-        and str(skill.get("audit_verdict") or "").lower() == "pass"
+        str(skill.get("audit_verdict") or "").lower() == "pass"
         and _to_float(skill.get("confidence"), 0.0) >= min_confidence
     )
 
@@ -847,14 +849,16 @@ class SkillsManager:
             skills = self.load_all()
         if not skills or not query.strip():
             return []
-        # `min_confidence` and `published_only` stay in the signature only
-        # because the legacy loop, which this fork does not edit, still passes
-        # them; is_usable reads the owner's auto-approve policy and threshold
-        # itself. `include_user_only` is for the user's own
+        # is_usable reads the owner's auto-approve policy and threshold itself.
+        # `published_only` is the legacy loop's copy of Auto-approve OFF (it
+        # passes `not auto_approve_skills`), so it admits any published skill
+        # the same way; `min_confidence` stays only for signature
+        # compatibility. `include_user_only` is for the user's own
         # `/skills search`, which lists slash commands, user-only ones included.
         skills = [
             s for s in skills
-            if is_usable(s) and (include_user_only or not s.get("disable_model_invocation"))
+            if (is_usable(s) or (published_only and s.get("status") == "published"))
+            and (include_user_only or not s.get("disable_model_invocation"))
         ]
         available = set(available_toolsets) if available_toolsets is not None else None
         if available is not None:
