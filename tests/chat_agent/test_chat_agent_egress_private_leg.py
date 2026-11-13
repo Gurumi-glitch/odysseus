@@ -162,7 +162,9 @@ def _native_tool_names():
     from src.tool_capabilities import KNOWN_CAPABILITY_TOOLS
     names = set(permissions.POSTURE) | set(KNOWN_CAPABILITY_TOOLS)
     names |= {schema.get("function", schema)["name"] for schema in FUNCTION_TOOL_SCHEMAS}
-    return sorted(names)
+    # The runtime never offers the editor-bridge tools, so the gate never sees them.
+    from src.chat_agent.tools import EDITOR_ONLY_TOOLS
+    return sorted(names - EDITOR_ONLY_TOOLS)
 
 
 def test_every_native_tool_is_in_the_private_leg_table():

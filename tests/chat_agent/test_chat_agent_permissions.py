@@ -9,6 +9,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.chat_agent import permissions
 from src.chat_agent.permissions import ALLOW, ASK, DENY
 from src.chat_agent.routing import ComposerToggles
+from src.chat_agent.tools import EDITOR_ONLY_TOOLS
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 
@@ -40,6 +41,8 @@ def non_admin(monkeypatch):
 
 def test_every_native_and_email_tool_has_a_written_posture():
     names = {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS} | BUILTIN_EMAIL_TOOLS
+    # The runtime never offers the editor-bridge tools, so they need no posture.
+    names -= EDITOR_ONLY_TOOLS
     assert sorted(names - set(permissions.POSTURE)) == []
 
 
