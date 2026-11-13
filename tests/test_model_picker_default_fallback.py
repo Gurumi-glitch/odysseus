@@ -71,6 +71,8 @@ const window={__odysseusDefaultChat:{endpoint_url:pending.url,endpoint_id:'share
 const localStorage={setItem(){}};
 let _defaultChatPickInFlight=false,_defaultPendingSeq=0,_autoSelectingDefault=false;
 function providerLogo(){return null;}function providerLabel(){return 'Fixture';}function _updateReasoningEffortUI(){}
+// The chat-agent Thinking level selector refreshes on every picker update; it has no DOM here.
+function refreshThinkingLevel(){}
 eval(JSON.parse(process.argv[1])+'\nupdateModelPicker();');
 console.log(JSON.stringify({pending,label:label.textContent}));
 '''

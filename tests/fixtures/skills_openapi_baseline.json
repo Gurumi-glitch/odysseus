@@ -257,6 +257,17 @@
             ],
             "title": "Description"
           },
+          "disable_model_invocation": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disable Model Invocation"
+          },
           "fallback_for_toolsets": {
             "anyOf": [
               {
@@ -834,7 +845,7 @@
     },
     "/api/skills/slash-catalog": {
       "get": {
-        "description": "Return skills that are available as slash commands.\n\nMirrors the agent prompt's published-skill index so the UI never offers\na slash command the model would not normally be allowed to discover.",
+        "description": "Return usable skills as slash commands, user-only ones included.",
         "operationId": "get_slash_catalog_api_skills_slash_catalog_get",
         "responses": {
           "200": {

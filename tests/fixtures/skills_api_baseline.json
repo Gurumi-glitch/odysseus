@@ -1960,6 +1960,26 @@
           }
         },
         {
+          "name": "disable_model_invocation",
+          "kind": "KEYWORD_ONLY",
+          "annotation": {
+            "origin": "typing.Union",
+            "module": "typing",
+            "arguments": [
+              {
+                "type": "builtins.bool"
+              },
+              {
+                "type": "builtins.NoneType"
+              }
+            ]
+          },
+          "default": {
+            "type": "builtins.NoneType",
+            "value": null
+          }
+        },
+        {
           "name": "title",
           "kind": "KEYWORD_ONLY",
           "annotation": {
@@ -2660,6 +2680,46 @@
             "arguments": [
               {
                 "type": "builtins.str"
+              },
+              {
+                "type": "builtins.NoneType"
+              }
+            ]
+          },
+          "default": {
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "validation": {
+            "alias": {
+              "type": "builtins.NoneType",
+              "value": null
+            },
+            "alias_priority": {
+              "type": "builtins.NoneType",
+              "value": null
+            },
+            "validation_alias": {
+              "type": "builtins.NoneType",
+              "value": null
+            },
+            "discriminator": {
+              "type": "builtins.NoneType",
+              "value": null
+            },
+            "validate_default": {
+              "type": "builtins.NoneType",
+              "value": null
+            }
+          }
+        },
+        "disable_model_invocation": {
+          "annotation": {
+            "origin": "typing.Union",
+            "module": "typing",
+            "arguments": [
+              {
+                "type": "builtins.bool"
               },
               {
                 "type": "builtins.NoneType"

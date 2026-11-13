@@ -474,8 +474,10 @@ def test_english_source_url_still_autolinked(node_available):
     assert 'href="https://a.com/"' in html
 
 
-_IMG_PREFIX = '<img src="https://nonexistent.invalid/x.png" '
-_IMG_SUFFIX = ' loading="lazy" decoding="async">'
+# Images render as upstream's thumbnail: one <a class="chat-image"> wrapper
+# around the <img>, so that wrapper is the only anchor an image may produce.
+_IMG_PREFIX = '<img class="chat-inline-image" src="https://nonexistent.invalid/x.png" '
+_IMG_SUFFIX = ' loading="lazy" decoding="async" referrerpolicy="no-referrer">'
 
 
 def test_autolink_does_not_run_inside_image_alt(node_available):
@@ -490,14 +492,14 @@ def test_autolink_does_not_run_inside_image_alt(node_available):
     ):
         html = _run_markdown_case(f"![{alt}](https://nonexistent.invalid/x.png)")
         assert html.count("<img ") == 1, html
-        assert "<a " not in html, html
+        assert html.count("<a ") == 1 and '<a class="chat-image"' in html, html
         assert f'{_IMG_PREFIX}alt="{alt}"{_IMG_SUFFIX}' in html, html
 
 
 def test_autolink_does_not_run_inside_image_title(node_available):
     for title in ("x https://x.com/x/onerror=alert(1)//", "看https://x.com/x/onerror=alert(1)//"):
         html = _run_markdown_case(f'![x](https://nonexistent.invalid/x.png "{title}")')
-        assert "<a " not in html, html
+        assert html.count("<a ") == 1 and '<a class="chat-image"' in html, html
         assert f'{_IMG_PREFIX}alt="x" title="{title}"{_IMG_SUFFIX}' in html, html
 
 
