@@ -9,7 +9,7 @@ import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import dragSortModule from './dragSort.js';
 import spinnerModule from './spinner.js';
-import { modelColor } from './chatRenderer.js?v=20261013turnerr1';
+import { modelColor } from './chatRenderer.js?v=20261113sync1';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
 
@@ -589,6 +589,12 @@ export async function refreshModels(force = false, opts = {}) {
           + '<span class="muted-sm">Ask an admin to configure model endpoints</span>';
       }
       box.appendChild(noModels);
+      const openAdmin = noModels.querySelector('#models-open-admin');
+      if (openAdmin) openAdmin.addEventListener('click', (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('user-bar-admin');
+        if (btn) btn.click();
+      });
     }
   } catch (e) {
     console.error(e);

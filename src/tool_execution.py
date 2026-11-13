@@ -1558,6 +1558,31 @@ def _agent_subprocess_env() -> dict:
     return base
 
 
+def _legacy_private_browser_enabled() -> bool:
+    return os.getenv("ODYSSEUS_PRIVATE_BROWSER_LEGACY", "0").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+async def _legacy_private_browser(operation, transport, *, progress_cb=None, session_id=None, owner=None):
+    from src.agent_tools.web_tools_prewave3 import PrivateBrowserTool
+    ctx = {
+        "progress_cb": progress_cb,
+        "subproc_env": _agent_subprocess_env(),
+        "session_id": session_id,
+        "owner": owner,
+    }
+    try:
+        result = await PrivateBrowserTool().execute(operation.input, ctx)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.warning("legacy private_browser failed: %s", error)
+        return f"{transport}: ERROR", {"error": f"private_browser: {error}", "exit_code": 1}
+    if not isinstance(result, dict):
+        result = {"output": str(result), "exit_code": 0}
+    label = "ERROR" if result.get("error") or result.get("exit_code") not in (None, 0) else "EXECUTED"
+    return f"{transport}: {label}", result
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -1731,6 +1756,14 @@ async def execute_tool_block(
         }
 
     transport = operation.transport_tool
+    if operation.tool == "private_browser" and _legacy_private_browser_enabled():
+        # The legacy process cannot establish the sealed browser/page identity
+        # required by the current runtime. Never execute it ahead of resource
+        # binding and the untrusted-context approval gate, even when opted in.
+        return f"{transport}: UNSUPPORTED", {
+            **page_unavailable(),
+            "error": "Legacy browser transport cannot establish the required browser authority.",
+        }
     if operation.tool == "private_browser":
         try:
             _, browser_args = parse_browser_operation(operation.input)
@@ -1884,10 +1917,17 @@ async def execute_tool_block(
             )
 
     if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
-        decision = security_context.decision_for(
-            getattr(block, "tool_type", None),
-            getattr(block, "content", None),
-        )
+        if isinstance(authority, RequestAuthority):
+            with bind_request_authority(authority):
+                decision = security_context.decision_for(
+                    getattr(block, "tool_type", None),
+                    getattr(block, "content", None),
+                )
+        else:
+            decision = security_context.decision_for(
+                getattr(block, "tool_type", None),
+                getattr(block, "content", None),
+            )
         if not decision.allowed:
             logger.warning(
                 "External-context policy blocked tool=%r",
@@ -2193,7 +2233,8 @@ async def _execute_tool_block_impl(
     if tool == "generate_image":
         from src.ai_interaction import do_generate_image
         desc = "generate_image"
-        result = await dispatched(do_generate_image(content, session_id=session_id, owner=owner))
+        image_privacy = (client_runtime_context or {}).get('web_ui_state', {}).get('incognito') is True
+        result = await dispatched(do_generate_image(content, session_id=session_id, owner=owner, **({'incognito': True} if image_privacy else {})))
     elif (tool in NATIVE_FILESYSTEM_TOOLS
           and (active_resource_operation() is not None or tool != "apply_patch"
                or not _tui_host_bridge_patch_url(client_runtime_context))):
@@ -2353,7 +2394,8 @@ async def _execute_tool_block_impl(
         result = await dispatched(do_list_cookbook_servers(content, owner=owner))
     elif tool == "edit_image":
         desc = "edit_image"
-        result = await dispatched(do_edit_image(content, owner=owner))
+        image_privacy = (client_runtime_context or {}).get('web_ui_state', {}).get('incognito') is True
+        result = await dispatched(do_edit_image(content, owner=owner, **({'incognito': True} if image_privacy else {})))
     elif tool == "edit_file":
         result = await dispatched(_direct_fallback(tool, content)) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
