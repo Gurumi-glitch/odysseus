@@ -2553,6 +2553,8 @@
                 delete_email then run without a confirmation even after the agent has
                 seen untrusted external content (email, web pages, documents), so a
                 prompt-injected instruction can reach them directly.
+                Applies to the legacy agent loop only: the new chat-agent runtime
+                keeps its own permission rules and still asks.
               </div>
               <div id="set-toolApprovalEnvNote" class="admin-toggle-sub" style="margin-top:4px;display:none;color:var(--red);"></div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
