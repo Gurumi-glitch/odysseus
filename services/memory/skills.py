@@ -131,9 +131,11 @@ def is_usable(skill: Dict) -> bool:
     if skill.get("user_approved"):
         return True
     auto_approve, min_confidence = _approval_policy(skill.get("owner"))
+    if not auto_approve:
+        # Auto-approve OFF: publishing is the approval, no audit (upstream #6643).
+        return True
     return (
-        auto_approve
-        and str(skill.get("audit_verdict") or "").lower() == "pass"
+        str(skill.get("audit_verdict") or "").lower() == "pass"
         and _to_float(skill.get("confidence"), 0.0) >= min_confidence
     )
 
@@ -599,6 +601,19 @@ class SkillsManager:
         sk.path = self._skill_file(cat, nm)
         return sk.to_dict()
 
+    def has_skill(self, name: str, owner: Optional[str] = None) -> bool:
+        """Whether `owner` already has a skill called `name`, in any category.
+
+        Update and delete find a skill by name within its owner, so two of
+        one owner's skills sharing a name would make them act on whichever
+        file is walked first.
+        """
+        for path in self._iter_skill_files():
+            sk = self._read_skill(path)
+            if sk and sk.name == name and (sk.owner or "") == (owner or ""):
+                return True
+        return False
+
     def update_skill(self, skill_id: str, updates: Dict, owner: Optional[str] = None) -> bool:
         """`skill_id` is the slug name. Allows updating any field plus
         renames if `name` changes (file is moved on disk).
@@ -650,6 +665,9 @@ class SkillsManager:
             # Rename
             new_name = slugify(updates.get("name") or sk.name)
             if new_name != sk.name:
+                if self.has_skill(new_name, owner=owner):
+                    logger.warning(f"Skill rename target name in use: {new_name}")
+                    return False
                 sk.name = new_name
 
             # Write to potentially new path
@@ -825,18 +843,22 @@ class SkillsManager:
         available_toolsets: Optional[Iterable[str]] = None,
         platform: Optional[str] = None,
         include_user_only: bool = False,
+        published_only: bool = False,
     ) -> List[Dict]:
         if skills is None:
             skills = self.load_all()
         if not skills or not query.strip():
             return []
-        # `min_confidence` stays in the signature only because the legacy loop,
-        # which this fork does not edit, still passes it; is_usable reads the
-        # owner's threshold itself. `include_user_only` is for the user's own
+        # is_usable reads the owner's auto-approve policy and threshold itself.
+        # `published_only` is the legacy loop's copy of Auto-approve OFF (it
+        # passes `not auto_approve_skills`), so it admits any published skill
+        # the same way; `min_confidence` stays only for signature
+        # compatibility. `include_user_only` is for the user's own
         # `/skills search`, which lists slash commands, user-only ones included.
         skills = [
             s for s in skills
-            if is_usable(s) and (include_user_only or not s.get("disable_model_invocation"))
+            if (is_usable(s) or (published_only and s.get("status") == "published"))
+            and (include_user_only or not s.get("disable_model_invocation"))
         ]
         available = set(available_toolsets) if available_toolsets is not None else None
         if available is not None:

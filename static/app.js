@@ -10,8 +10,8 @@ import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js?v=20260908personaname1';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20261019pending2';
-import compareModule from './js/compare/index.js?v=20260909mobilepaneaddscroll1';
+import chatModule from './js/chat.js?v=20261113sync1';
+import compareModule from './js/compare/index.js?v=20261113sync1';
 import documentModule from './js/document.js?v=20260916docctx2';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
@@ -22,7 +22,7 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20261013turnerr1';
+import chatRenderer from './js/chatRenderer.js?v=20261113sync1';
 // Keep this specifier identical to every consumer (especially chat.js).
 // Different query strings create separate ES-module instances with separate
 // current-session state, so the picker can display one model while chat sends
@@ -37,7 +37,7 @@ import { UI_VIS_DEFAULT_OFF, resolveVisibility } from './js/ui_visibility.js?v=2
 import tasksModule from './js/tasks.js?v=20260914taskmodel1';
 import calendarModule from './js/calendar.js?v=20260914emailsource11';
 import notesModule from './js/notes.js?v=20260911notesselectioncancel1';
-import adminModule from './js/admin.js?v=20260929csssplit';
+import adminModule from './js/admin.js?v=20261113sync1';
 import settingsModule from './js/settings.js?v=20260912writingstyle3';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
@@ -561,10 +561,21 @@ function initializeEventListeners() {
 
   // Export: PDF
   const exportPdfBtn = el('export-pdf-btn');
+  let preparingPdf = false;
   if (exportPdfBtn) {
-    exportPdfBtn.addEventListener('click', (e) => {
+    exportPdfBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       exportMenu.classList.remove('open');
+      if (preparingPdf) return;
+      preparingPdf = true;
+      try {
+        await sessionModule.prepareHistoryForPrint();
+      } catch (error) {
+        uiModule.showError(error?.message || 'Could not prepare the chat for PDF export.');
+        return;
+      } finally {
+        preparingPdf = false;
+      }
       const meta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
       const sessionName = meta ? meta.name : 'Odysseus Chat';
       const originalTitle = document.title;
@@ -1308,8 +1319,7 @@ function initializeEventListeners() {
   const toolThemeBtn = el('tool-theme-btn');
   if (toolThemeBtn) {
     toolThemeBtn.addEventListener('click', () => {
-      const tm = document.getElementById('theme-modal');
-      if (tm) tm.classList.remove('hidden');
+      themeModule.openPopup();
     });
   }
 

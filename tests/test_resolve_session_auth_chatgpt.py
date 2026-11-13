@@ -355,8 +355,13 @@ def _seed_chatgpt_session(TestSessionLocal):
 
 def _auto_name(monkeypatch, sess):
     """Run auto_name_session with no task/utility endpoint configured."""
+    import src.database as database
     import src.llm_core as llm_core
     import src.settings as settings
+
+    # The title call authorizes the session URL against the endpoint rows it
+    # reads through src.database, so point that at the seeded test DB too.
+    monkeypatch.setattr(database, "SessionLocal", chat_helpers.SessionLocal)
 
     monkeypatch.setattr(settings, "load_settings", lambda: {})
     monkeypatch.setattr(settings, "get_user_setting", lambda key, owner="", default=None: default)
@@ -417,5 +422,6 @@ def test_auto_name_chatgpt_session_without_credentials_drops_stale_bearer(monkey
         llm_calls, renames = _auto_name(monkeypatch, sess)  # must not raise
 
     assert all("stale-token" not in str(headers) for headers in llm_calls)
-    assert renames == []
-    assert "Auto-name failed for sess1" in caplog.text
+    # A rejected title call falls back to the deterministic title.
+    assert renames == [("sess1", "Explain the Codex backend")]
+    assert "Auto-name failed" not in caplog.text

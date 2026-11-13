@@ -32,7 +32,7 @@ from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 # intersects with no parent authority when none is bound.
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block, format_tool_result
 from src.tool_capabilities import _action_from_content, tool_result_is_successful, tool_result_was_denied
-from src.turn_contract import canonical_tool
+from src.turn_contract import FAMILY_TOOLS, canonical_tool
 from src.chat_agent.permissions import mcp_server, task_args
 # Relies on: False only for the legacy text-only Qwen tool routers, which
 # reject image parts.
@@ -129,14 +129,26 @@ def schema_name(schema: Dict[str, Any]) -> str:
     return str((schema.get("function") or {}).get("name") or "")
 
 
+# Relies on: FAMILY_TOOLS["photo_editor"] is the editor-bridge family, which
+# legacy offers only when an image-editor session is bound to the turn
+# (turn_contract's context-only family). Editor turns go to /api/editor/agent,
+# so a chat-agent turn never has that session and these tools could only fail.
+# generate_image is in the family too but is an everyday built-in.
+EDITOR_ONLY_TOOLS = FAMILY_TOOLS["photo_editor"] - {"generate_image"}
+
+
+def _runtime_schemas() -> List[Dict[str, Any]]:
+    return [s for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in EDITOR_ONLY_TOOLS]
+
+
 def upfront_tool_names() -> List[str]:
-    return [schema_name(s) for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in DEFERRED_TOOLS]
+    return [schema_name(s) for s in _runtime_schemas() if schema_name(s) not in DEFERRED_TOOLS]
 
 
 def upfront_schemas(denied: Iterable[str], surface: str) -> List[Dict[str, Any]]:
     denied = set(denied)
     schemas = [
-        schema for schema in FUNCTION_TOOL_SCHEMAS
+        schema for schema in _runtime_schemas()
         if schema_name(schema) not in DEFERRED_TOOLS and schema_name(schema) not in denied
     ]
     return _apply_tool_surface_to_schemas(schemas, surface)
@@ -156,7 +168,7 @@ def deferred_catalog(denied: Iterable[str], *, include_mcp: bool) -> List[Dict[s
     """Deferred built-ins, then MCP tools, minus what this turn denies."""
     denied = set(denied)
     catalog = [
-        schema for schema in FUNCTION_TOOL_SCHEMAS
+        schema for schema in _runtime_schemas()
         if schema_name(schema) in DEFERRED_TOOLS and schema_name(schema) not in denied
     ]
     manager = get_mcp_manager()
