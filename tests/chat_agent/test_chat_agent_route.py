@@ -19,6 +19,7 @@ import src.foreground_model_routing as foreground_model_routing
 import src.settings as settings
 from src.chat_agent import loop, store, transcript
 from src.chat_agent.providers import chat_completions, responses
+from core.models import ChatMessage
 from src.tool_capabilities import capabilities_for_action
 
 OPENROUTER = "https://openrouter.ai/api/v1"
@@ -278,6 +279,37 @@ async def test_switch_on_agent_turn_streams_and_saves_on_new_runtime(harness):
         {"blocks": [{"type": "text", "text": "Hello!"}]}
     ]
     assert row.metadata["agent_v2"]["provider"] == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_sends_the_saved_user_row_id_before_the_reply(harness, monkeypatch):
+    """The page cuts the chat by this id on a later regenerate or edit (#6225)."""
+    _switch_on()
+    build = chat_routes.build_chat_context
+
+    async def saving_build_context(*args, **kwargs):
+        # What the real builder does: save the turn's user row into the history.
+        harness.session.history.append(ChatMessage("user", "hello", metadata={"_db_id": "user-row-7"}))
+        return await build(*args, **kwargs)
+
+    monkeypatch.setattr(chat_routes, "build_chat_context", saving_build_context)
+
+    _, body = await harness.send(_Request("agent"))
+
+    events = _data_events(body)
+    saved = {"type": "user_message_saved", "id": "user-row-7"}
+    assert saved in events
+    first_delta = next(i for i, e in enumerate(events) if "delta" in e)
+    assert events.index(saved) < first_delta
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_sends_no_user_row_id_when_none_was_saved(harness):
+    _switch_on()
+
+    _, body = await harness.send(_Request("agent"))
+
+    assert not [e for e in _data_events(body) if e.get("type") == "user_message_saved"]
 
 
 @pytest.mark.asyncio

@@ -182,6 +182,16 @@ def _event(data: dict) -> str:
     return f"data: {json.dumps(data)}\n\n"
 
 
+def _saved_user_row_id(sess) -> Optional[str]:
+    # Relies on: build_chat_context saved this turn's user row through
+    # SessionManager.add_message, which appends it to sess.history and stamps
+    # metadata["_db_id"]; the legacy stream reads the id the same way.
+    for message in reversed(getattr(sess, "history", None) or []):
+        if getattr(message, "role", None) == "user":
+            return (getattr(message, "metadata", None) or {}).get("_db_id")
+    return None
+
+
 def _error_event(message: str, status: Optional[int] = None) -> str:
     return f"event: error\ndata: {json.dumps({'error': message, 'status': status})}\n\n"
 
@@ -454,6 +464,12 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         )
         # The turn's user message: a fallback's compaction keeps it and what follows.
         current = conversation[-1]
+        # The page cuts the chat by this id when the message is later
+        # regenerated or edited; without it, it falls back to page position.
+        # Incognito rows are never saved, so the last history row is an older turn.
+        user_row_id = None if turn.toggles.incognito else _saved_user_row_id(sess)
+        if user_row_id:
+            yield _event({"type": "user_message_saved", "id": user_row_id})
         tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
         scope = tools.ExecutionScope(
             owner=turn.owner,
