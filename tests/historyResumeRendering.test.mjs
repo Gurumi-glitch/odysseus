@@ -63,6 +63,8 @@ async function setup() {
       sessionModule: { getCurrentSessionId: () => window.currentSession, getSessions: () => window.sessions, updateModelPicker: () => { window.pickerUpdates++; }, markStreaming: noop, clearStreaming: noop, selectSession: () => { window.reloads++; }, loadSessions: () => { window.reloads++; } },
     });
     window.markdownModule = (await import('/static/js/markdown.js')).default;
+    window.getShowPersonaName = () => true;
+    window._renderAssistantBody = text => markdownModule.processWithThinking(text);
     markdownModule.renderMermaid = undefined;
     window.createTurnRendering = (await import('/static/js/turnRendering.js')).createTurnRendering;
     window.startsContinuationRound = (await import('/static/js/turnRendering.js')).startsContinuationRound;

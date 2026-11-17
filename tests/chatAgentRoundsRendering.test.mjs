@@ -15,6 +15,8 @@ const askCards = renderer
 const resume = chat.slice(chat.indexOf('export async function resumeStream('), chat.indexOf('\n  /**\n   * Check for background streams')).replace('export ', '');
 // The auto mode denial line on a tool card (#68).
 const toolDenial = renderer.slice(renderer.indexOf('export function toolDenialHtml('), renderer.indexOf('function _suppressRawToolOutput(')).replace('export ', '');
+// The persona override the round path shares with the single-bubble path (#131).
+const assistantBody = renderer.slice(renderer.indexOf('function _renderAssistantBody('), renderer.indexOf('\n}\n', renderer.indexOf('function _renderAssistantBody(')) + 3);
 let browser;
 before(async () => { browser = await chromium.launch({ headless: true }); });
 after(async () => { await browser?.close(); });
@@ -30,7 +32,7 @@ async function setup() {
     return route.fulfill({ contentType: 'text/javascript', body: source });
   });
   await page.goto('http://render.test/');
-  await page.evaluate(async ({ addMessage, resume, askCards, toolDenial }) => {
+  await page.evaluate(async ({ addMessage, resume, askCards, toolDenial, assistantBody }) => {
     const noop = () => {};
     const esc = value => { const node = document.createElement('div'); node.textContent = String(value ?? ''); return node.innerHTML; };
     Object.assign(window, {
@@ -67,6 +69,9 @@ async function setup() {
     window.addMessage = (0, eval)('(' + addMessage + ')');
     window.resumeStream = (0, eval)('(' + resume + ')');
     window.toolDenialHtml = (0, eval)('(' + toolDenial + ')');
+    window.showPersonaName = true;
+    window.getShowPersonaName = () => window.showPersonaName;
+    window._renderAssistantBody = (0, eval)('(' + assistantBody + ')');
     window.chatRenderer = { addMessage: window.addMessage, recordSessionMetricsCost: noop, buildSourcesBox, buildFindingsBox, buildRagSourcesBox, toolDenialHtml: window.toolDenialHtml, ...cards };
     let controller;
     const stream = new ReadableStream({ start(value) { controller = value; } });
@@ -75,7 +80,7 @@ async function setup() {
       if (String(url).includes('/api/chat/resume/')) return new Response(stream, { headers: { 'X-Odysseus-Run-Id': 'run-1', 'X-Odysseus-Runtime': window.resumeRuntime } });
       return new Response(JSON.stringify({ history: window.savedHistory }));
     };
-  }, { addMessage, resume, askCards, toolDenial });
+  }, { addMessage, resume, askCards, toolDenial, assistantBody });
   return page;
 }
 
@@ -278,6 +283,34 @@ test('history: a Shorter/Simpler rewrite (chosen variant) replaces the last roun
       'ai:Let me look at the workspace.', 'tools:done', 'steer:also check the tests dir',
       'ai:Now the tests.', 'tools:denied!', 'ai:Shorter: two files.',
     ]);
+  } finally { await page.close(); }
+});
+
+test('history: a chat_agent row with a character name shows it as the role label and hides the thinking, like a legacy row (#131)', async () => {
+  const page = await setup();
+  try {
+    const result = await page.evaluate(() => {
+      const row = { _fromHistory: true, runtime: 'chat_agent', model: 'test', character_name: 'Penelope', thinking: 'private reasoning', round_texts: ['<think>private reasoning</think> Ahoy, I am Penelope.'] };
+      const render = metadata => {
+        document.querySelector('#chat-history').replaceChildren();
+        addMessage('assistant', '<think>private reasoning</think> Ahoy, I am Penelope.', 'test', metadata);
+        const bubble = document.querySelector('#chat-history .msg-ai');
+        return { role: bubble.querySelector('.role').firstChild.textContent, text: bubble.querySelector('.body').textContent.trim(), thinkingBlocks: bubble.querySelectorAll('details, .think-block, .thinking-block').length };
+      };
+      const persona = render(row);
+      showPersonaName = false;
+      const hiddenName = render(row);
+      showPersonaName = true;
+      const noCharacter = render({ ...row, character_name: undefined, thinking: undefined });
+      return { persona, hiddenName, noCharacter };
+    });
+    assert.equal(result.persona.role, 'Penelope');
+    assert.equal(result.persona.text, 'Ahoy, I am Penelope.');
+    assert.equal(result.persona.thinkingBlocks, 0);
+    assert.equal(result.hiddenName.role, 'test');
+    assert.equal(result.hiddenName.text, 'Ahoy, I am Penelope.');
+    assert.equal(result.noCharacter.role, 'test');
+    assert.match(result.noCharacter.text, /private reasoning/);
   } finally { await page.close(); }
 });
 

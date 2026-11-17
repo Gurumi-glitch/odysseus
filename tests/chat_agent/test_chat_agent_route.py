@@ -282,6 +282,45 @@ async def test_switch_on_agent_turn_streams_and_saves_on_new_runtime(harness):
 
 
 @pytest.mark.asyncio
+async def test_new_runtime_sends_legacy_model_info_with_the_persona_before_the_reply(harness, monkeypatch):
+    """chat.js learns the model route and the character name only from this event (#131)."""
+    _switch_on()
+    build = chat_routes.build_chat_context
+
+    async def persona_build_context(*args, **kwargs):
+        ctx = await build(*args, **kwargs)
+        ctx.preset.character_name = "Penelope"
+        return ctx
+
+    monkeypatch.setattr(chat_routes, "build_chat_context", persona_build_context)
+
+    _, body = await harness.send(_Request("agent"))
+
+    events = _data_events(body)
+    [info] = [e for e in events if e.get("type") == "model_info"]
+    assert info == {
+        "type": "model_info",
+        "model": "x-ai/grok-4.1-fast",
+        "endpoint_id": info["endpoint_id"],
+        "endpoint_label": info["endpoint_label"],
+        "character_name": "Penelope",
+    }
+    assert info["endpoint_label"]
+    assert events.index(info) < next(i for i, e in enumerate(events) if "delta" in e)
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_model_info_has_no_character_name_without_a_persona(harness):
+    _switch_on()
+
+    _, body = await harness.send(_Request("agent"))
+
+    [info] = [e for e in _data_events(body) if e.get("type") == "model_info"]
+    assert "character_name" not in info
+    assert info["model"] == "x-ai/grok-4.1-fast"
+
+
+@pytest.mark.asyncio
 async def test_new_runtime_sends_the_saved_user_row_id_before_the_reply(harness, monkeypatch):
     """The page cuts the chat by this id on a later regenerate or edit (#6225)."""
     _switch_on()
