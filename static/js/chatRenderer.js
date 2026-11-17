@@ -3608,6 +3608,7 @@ export function addMessage(role, content, modelName, metadata) {
             pair.requestedEndpointId,
             contEndpointId,
           );
+          if (metadata?.character_name && getShowPersonaName()) roleEl.textContent = metadata.character_name;
           if (
             pair.requestedModel
             && contModel
@@ -3643,7 +3644,7 @@ export function addMessage(role, content, modelName, metadata) {
           if (isLastTextRound && metadata?.rag_sources?.length) {
             agentFindingsSuffix += buildRagSourcesBox(metadata.rag_sources);
           }
-          body.innerHTML = agentSourcesPrefix + markdownModule.processWithThinking(markdownModule.squashOutsideCode(txt)) + agentFindingsSuffix;
+          body.innerHTML = agentSourcesPrefix + _renderAssistantBody(markdownModule.squashOutsideCode(txt), metadata) + agentFindingsSuffix;
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;

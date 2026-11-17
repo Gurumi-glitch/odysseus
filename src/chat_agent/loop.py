@@ -356,6 +356,19 @@ def _fallback_event(
     }
 
 
+def _model_info_event(selected: Candidate, character_name: Optional[str]) -> Dict[str, Any]:
+    """The legacy ``model_info`` event: chat.js learns the route and persona only from it (#131)."""
+    event = {
+        "type": "model_info",
+        "model": selected.endpoint.model,
+        "endpoint_id": selected.route.get("endpoint_id"),
+        "endpoint_label": selected.route.get("endpoint_label"),
+    }
+    if character_name:
+        event["character_name"] = character_name
+    return event
+
+
 def _round_record(end: RoundEnd) -> Dict[str, Any]:
     if end.usage is None:
         return {"blocks": end.blocks}
@@ -470,6 +483,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
         user_row_id = None if turn.toggles.incognito else _saved_user_row_id(sess)
         if user_row_id:
             yield _event({"type": "user_message_saved", "id": user_row_id})
+        yield _event(_model_info_event(turn.candidates[0], contexts[-1].preset.character_name))
         tool_schemas, offered = _offered(upfront, catalog, conversation, surface, skills, invoked_tools)
         scope = tools.ExecutionScope(
             owner=turn.owner,
