@@ -13,6 +13,7 @@ import routes.history.history_routes as history_routes
 from src.chat_agent import loop
 from src.chat_agent.providers import Endpoint, responses
 from src.generation_budget import context_safety_margin
+from src.llm_core import LLMConfig
 from tests.chat_agent.test_chat_agent_route import _data_events, _Request, _sse_tool_calls, _switch_on
 from tests.chat_agent.test_chat_agent_route import harness  # noqa: F401
 
@@ -68,8 +69,6 @@ def _window(monkeypatch, window, measured):
 
 @pytest.mark.asyncio
 async def test_unset_temperature_sends_the_default_and_unset_max_tokens_nothing(harness):
-    # Unset temperature followed spec #89 (send nothing) until the 2026-11-18
-    # per-model settings merge, where the default became the built-in 1.0.
     _switch_on()
     harness.provider_rounds = [_sse_tool_calls(("no_such_tool", {})), _stream([{"content": "Done."}])]
 
@@ -78,7 +77,7 @@ async def test_unset_temperature_sends_the_default_and_unset_max_tokens_nothing(
     requests = harness.captured["provider_requests"]
     assert len(requests) == 2
     for payload in requests:
-        assert payload["temperature"] == 1.0
+        assert payload["temperature"] == LLMConfig.DEFAULT_TEMPERATURE
         assert "max_tokens" not in payload and "max_completion_tokens" not in payload
 
 
