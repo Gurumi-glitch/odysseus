@@ -13,6 +13,7 @@ import pytest
 
 import routes.chat_routes as chat_routes
 import src.foreground_model_routing as foreground_model_routing
+from src import model_customization
 from src.chat_agent import loop, transcript
 from src.chat_agent.providers import chat_completions, responses
 from tests.chat_agent.test_chat_agent_route import (
@@ -158,6 +159,20 @@ async def test_new_runtime_503_falls_back_and_sticks(harness, monkeypatch):
     )
     assert harness.row.headers == BACKUP_HEADERS
     assert harness.db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_each_fallback_candidate_sends_its_own_model_temperature(harness, monkeypatch):
+    _switch_on()
+    saved = {PRIMARY_MODEL: {"temperature": 0.3}, BACKUP_MODEL: {"temperature": 0.7}}
+    monkeypatch.setattr(model_customization, "lookup", lambda url, model: saved.get(model))
+    _script(monkeypatch, harness, {PRIMARY_MODEL: [503], BACKUP_MODEL: [["From ", "backup"]]})
+
+    await harness.send(_Request("agent"))
+
+    assert [(p["model"], p["temperature"]) for p in harness.captured["provider_requests"]] == [
+        (PRIMARY_MODEL, 0.3), (BACKUP_MODEL, 0.7),
+    ]
 
 
 @pytest.mark.asyncio

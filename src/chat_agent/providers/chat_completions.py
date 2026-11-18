@@ -48,6 +48,10 @@ from src.llm_core import (
     _uses_max_completion_tokens,
 )
 
+# Relied on: apply_sampling writes only the per-model sampling fields this
+# URL's provider format carries (never temperature), in place; no entry is a no-op.
+from src import model_customization
+
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
 # reasoning_details (in order) and the reasoning_content of DeepSeek-style servers.
 _REASONING_FIELDS = ("reasoning_details", "reasoning_content")
@@ -78,12 +82,12 @@ def build_payload(
         # calls per round, and the loop runs them one at a time (spec #44).
         payload["tools"] = list(tools)
         payload["tool_choice"] = "auto"
-    # Unset sends nothing, so the server's own sampling default applies (spec #89).
     if temperature is not None and not _omit_temperature(provider, endpoint.model):
         payload["temperature"] = temperature
     if max_tokens > 0:
         key = "max_completion_tokens" if _uses_max_completion_tokens(endpoint.model) else "max_tokens"
         payload[key] = max_tokens
+    model_customization.apply_sampling(payload, endpoint.url, endpoint.model)
     if thinking is not None:
         effort = wire_effort(thinking)
         if provider == "openrouter":

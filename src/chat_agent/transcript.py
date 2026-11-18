@@ -413,14 +413,19 @@ SUMMARY_TEMPERATURE = 0.2
 SUMMARY_TIMEOUT_S = 30
 
 
-def reported_context_tokens(rows: Sequence[ChatMessage]) -> Optional[int]:
+def _row_dict(row: Any) -> Dict[str, Any]:
+    return row.to_dict() if hasattr(row, "to_dict") else row
+
+
+def reported_context_tokens(rows: Sequence[Any]) -> Optional[int]:
     """The next request's size from the newest reported usage, or None when no
-    trusted row carries one."""
+    trusted row carries one. Rows are ChatMessage or their dict form, the same
+    duck typing the /context route applies to session.history."""
     for index in range(len(rows) - 1, -1, -1):
-        rounds = trusted_rounds(rows[index].to_dict())
+        rounds = trusted_rounds(_row_dict(rows[index]))
         usage = rounds[-1].get("usage") if rounds else None
         if usage:
-            later = [row.to_dict() for row in rows[index + 1:]]
+            later = [_row_dict(row) for row in rows[index + 1:]]
             return usage["input_tokens"] + usage["output_tokens"] + (estimate_tokens(later) if later else 0)
     return None
 

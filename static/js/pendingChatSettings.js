@@ -4,7 +4,7 @@
 
 let held = {};
 
-// change: {temperature_override?, max_tokens_override?}; null means Default.
+// change: {temperature_override?, max_tokens_override?}; null clears it (Max tokens: no limit).
 export function holdPendingGeneration(change) {
   held = { ...held, ...change };
 }
@@ -13,7 +13,7 @@ export function pendingGeneration() {
   return { ...held };
 }
 
-// A new chat starts at Default.
+// A new chat starts with nothing held.
 export function dropPendingGeneration() {
   held = {};
 }

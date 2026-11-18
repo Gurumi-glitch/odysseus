@@ -1,3 +1,4 @@
+import { effectiveTemperature, temperatureHint } from './sessionTemperature.js';
 // static/js/chat.js
 
 /**
@@ -6,9 +7,6 @@
 // ES6 module — IIFE removed
 
 import Storage from './storage.js';
-import {
-  TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, temperatureToSlider, sliderToTemperature, formatTemperature,
-} from './generationSettings.js?v=20261013templeft1';
 import uiModule from './ui.js?v=20260916largetoolscroll1';
 import sessionModule from './sessions.js';
 import chatRenderer, { renderToolIcon } from './chatRenderer.js?v=20261113sync1';
@@ -724,19 +722,25 @@ import { invalidateSettings } from './appConfig.js';
     window.addEventListener(CAPABILITIES_CHANGED, rereadOverflow);
   }
 
-  // save(change) gets {temperature_override} or {max_tokens_override}; null = Default / No limit.
+  // save(change) gets {temperature_override} or {max_tokens_override}; null = No limit.
   function _appendGenerationSliders(popup, d, save) {
-    const addGenerationSlider = (label, value, min, max, step, formatter, key, toStored = Number) => {
+    const addGenerationSlider = (label, value, min, max, step, formatter, key) => {
       const row = document.createElement('div');
       row.className = 'chat-context-threshold-row';
       row.innerHTML = `<div class="chat-context-threshold-top"><span>${label}</span><span>${formatter(value)}</span></div>`;
       const input = document.createElement('input');
       Object.assign(input, { type: 'range', min: String(min), max: String(max), step: String(step), value: String(value), className: 'chat-context-threshold-slider preset-range' });
       input.addEventListener('input', () => { row.querySelector('.chat-context-threshold-top span:last-child').textContent = formatter(Number(input.value)); });
-      input.addEventListener('change', () => save({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : toStored(input.value) }));
+      input.addEventListener('change', () => save({ [key]: key === 'max_tokens_override' && Number(input.value) > 8192 ? null : Number(input.value) }));
       row.appendChild(input); popup.appendChild(row);
     };
-    addGenerationSlider('Temperature', temperatureToSlider(d.temperature_override), TEMPERATURE_DEFAULT_STOP, TEMPERATURE_MAX, TEMPERATURE_STEP, formatTemperature, 'temperature_override', sliderToTemperature);
+    addGenerationSlider('Temperature', effectiveTemperature(d), 0, 2, 0.1, v => Number(v).toFixed(1), 'temperature_override');
+    if (temperatureHint(d)) {
+      const hintEl = document.createElement('div');
+      hintEl.style.cssText = 'font-size:11px;opacity:0.65;margin-top:2px;';
+      hintEl.textContent = temperatureHint(d);
+      popup.appendChild(hintEl);
+    }
     addGenerationSlider('Max tokens', d.max_tokens_override ?? 8448, 256, 8448, 256, v => Number(v) > 8192 ? 'No limit' : Number(v).toLocaleString(), 'max_tokens_override');
   }
 
