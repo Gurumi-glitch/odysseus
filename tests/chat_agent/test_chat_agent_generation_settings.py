@@ -67,7 +67,9 @@ def _window(monkeypatch, window, measured):
 
 
 @pytest.mark.asyncio
-async def test_unset_temperature_and_max_tokens_send_nothing(harness):
+async def test_unset_temperature_sends_the_default_and_unset_max_tokens_nothing(harness):
+    # Unset temperature followed spec #89 (send nothing) until the 2026-11-18
+    # per-model settings merge, where the default became the built-in 1.0.
     _switch_on()
     harness.provider_rounds = [_sse_tool_calls(("no_such_tool", {})), _stream([{"content": "Done."}])]
 
@@ -76,7 +78,7 @@ async def test_unset_temperature_and_max_tokens_send_nothing(harness):
     requests = harness.captured["provider_requests"]
     assert len(requests) == 2
     for payload in requests:
-        assert "temperature" not in payload
+        assert payload["temperature"] == 1.0
         assert "max_tokens" not in payload and "max_completion_tokens" not in payload
 
 

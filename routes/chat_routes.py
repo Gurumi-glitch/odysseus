@@ -3187,7 +3187,7 @@ def setup_chat_routes(
                 owner=owner,
                 toggles=composer_toggles,
                 auto_escalated=auto_escalated,
-                # Unset sends nothing: the server's default applies (spec #89).
+                # Unset falls back per candidate to the model's saved setting, else 1.0.
                 temperature=temperature_override,
                 max_tokens=getattr(sess, "max_tokens_override", None) or 0,
                 build_context=functools.partial(

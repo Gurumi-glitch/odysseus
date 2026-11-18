@@ -51,6 +51,9 @@ from src.chat_agent.providers import (
     responses,
 )
 from src.chat_agent.routing import ComposerToggles
+# Relies on: resolve_temperature returns the explicit value when set, else the
+# model's saved temperature (formats that carry it), else LLMConfig.DEFAULT_TEMPERATURE.
+from src import model_customization
 from src import settings
 from src.llm_core import LLMConfig
 # Relies on: fit_output_token_budget returns a positive allowance unchanged
@@ -227,14 +230,15 @@ def _stream_round(
     tool_schemas: Sequence[Dict[str, Any]], thinking: Optional[str],
 ) -> AsyncIterator[RoundEvent]:
     max_tokens = _max_tokens(turn.max_tokens, endpoint, conversation, tool_schemas)
+    temperature = model_customization.resolve_temperature(endpoint.url, endpoint.model, turn.temperature)
     if provider in RESPONSES_PROVIDERS:
         return responses.stream_round(
             endpoint, conversation, cache_key=turn.session_id,
-            temperature=turn.temperature, max_tokens=max_tokens, tools=tool_schemas,
+            temperature=temperature, max_tokens=max_tokens, tools=tool_schemas,
             thinking=thinking,
         )
     return chat_completions.stream_round(
-        endpoint, conversation, temperature=turn.temperature, max_tokens=max_tokens,
+        endpoint, conversation, temperature=temperature, max_tokens=max_tokens,
         tools=tool_schemas, thinking=thinking,
     )
 

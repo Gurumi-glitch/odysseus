@@ -102,7 +102,7 @@ test('pending chat: the pill opens Context overflow, Temperature and Max tokens 
   try {
     const popup = await openPopup(page);
     assert.equal(popup.overflowDisabled, false);
-    assert.deepEqual(popup.sliders, ['Temperature Default', 'Max tokens No limit']);
+    assert.deepEqual(popup.sliders, ['Temperature 1.0', 'Max tokens No limit']);
     assert.doesNotMatch(popup.text, /Memory extraction|Usage|Auto compact/);
   } finally { await page.close(); }
 });
@@ -149,7 +149,7 @@ test('first message: a Thinking level picked on the pending chat is stored on th
   } finally { await page.close(); }
 });
 
-test('a later new chat starts at Default again', async () => {
+test('a later new chat starts at the default temperature again', async () => {
   const page = await setup();
   try {
     await openPopup(page);
@@ -162,6 +162,6 @@ test('a later new chat starts at Default again', async () => {
     await page.evaluate(() => window.sessions.createDirectChat('http://host.docker.internal:1235/v1', 'Bonsai', 'ep1'));
     await page.waitForSelector('.chat-context-popup', { state: 'detached' });
 
-    assert.equal((await openPopup(page)).sliders[0], 'Temperature Default');
+    assert.equal((await openPopup(page)).sliders[0], 'Temperature 1.0');
   } finally { await page.close(); }
 });
