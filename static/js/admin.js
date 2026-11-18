@@ -13,6 +13,7 @@ import {
   renderUsageCardHtml as renderChatgptUsageCardHtml,
 } from './chatgptSubscriptionUsage.js';
 import { getSettings, getTools, invalidateSettings, invalidateTools } from './appConfig.js';
+import { initModelCustomization } from './settings/modelCustomization.js';
 
 let initialized = false;
 let modalEl = null;
@@ -1572,6 +1573,7 @@ async function loadEndpoints() {
     console.error('Failed to load endpoints', e);
     return false;
   }
+  initModelCustomization();
   return true;
 }
 
