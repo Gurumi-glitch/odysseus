@@ -69,8 +69,7 @@ async function setup() {
   await page.goto(base + '/');
   await page.waitForFunction(() => window.ready);
   await page.evaluate(() => window.sessions.createDirectChat('http://host.docker.internal:1235/v1', 'Bonsai', 'ep1'));
-  await page.waitForFunction(() => document.querySelector('.thinking-level-select') && !document.getElementById('chat-context-pill').hidden);
-  await page.waitForTimeout(50);
+  await page.waitForFunction(() => document.querySelector('.thinking-level-select')?.disabled === false && !document.getElementById('chat-context-pill').hidden);
   return page;
 }
 
@@ -81,8 +80,7 @@ const thinking = page => page.evaluate(() => {
 
 async function openPopup(page) {
   await page.click('#chat-context-pill');
-  await page.waitForSelector('.chat-context-popup');
-  await page.waitForTimeout(50);
+  await page.waitForFunction(() => document.querySelector('.chat-context-popup .chat-context-select')?.disabled === false);
   return page.evaluate(() => {
     const popup = document.querySelector('.chat-context-popup');
     const sliders = [...popup.querySelectorAll('.chat-context-threshold-row')].map(row => [...row.querySelectorAll('.chat-context-threshold-top span')].map(span => span.textContent).join(' '));
@@ -121,7 +119,6 @@ test('first message: the new session gets the held Temperature before anything r
     });
 
     assert.equal(await page.evaluate(() => window.sessions.materializePendingSession()), true);
-    await page.waitForTimeout(100);
 
     const calls = await page.evaluate(() => window.calls);
     const keys = calls.map(c => c.key);
@@ -138,11 +135,10 @@ test('first message: a Thinking level picked on the pending chat is stored on th
   const page = await setup();
   try {
     await page.selectOption('.thinking-level-select', 'xhigh');
-    await page.waitForTimeout(50);
+    await page.waitForFunction(() => window.calls.some(c => c.key === 'PUT /api/chat_agent/settings') && !document.querySelector('.thinking-level-select').disabled);
     await page.evaluate(() => { window.calls.length = 0; });
 
     assert.equal(await page.evaluate(() => window.sessions.materializePendingSession()), true);
-    await page.waitForTimeout(100);
 
     const calls = await page.evaluate(() => window.calls);
     const keys = calls.map(c => c.key);
@@ -164,7 +160,7 @@ test('a later new chat starts at Default again', async () => {
     });
     await page.keyboard.press('Escape');
     await page.evaluate(() => window.sessions.createDirectChat('http://host.docker.internal:1235/v1', 'Bonsai', 'ep1'));
-    await page.waitForTimeout(50);
+    await page.waitForSelector('.chat-context-popup', { state: 'detached' });
 
     assert.equal((await openPopup(page)).sliders[0], 'Temperature Default');
   } finally { await page.close(); }
