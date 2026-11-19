@@ -38,13 +38,17 @@ from src.chat_agent.providers import (
 #   _get_http_client: the shared AsyncClient (connection reuse, TLS overrides);
 #   _stream_timeout: streaming httpx.Timeout from a read timeout in seconds;
 #   _format_upstream_error: HTTP status + body -> user-readable sentence;
-#   _host_match: the URL's hostname is the domain or a subdomain of it.
+#   _host_match: the URL's hostname is the domain or a subdomain of it;
+#   _normalize_mistral_content: a delta's content (str, or Mistral's chunk list) ->
+#     (answer text, thinking text), joining only "text" chunks and the text inside
+#     "thinking" chunks and skipping every other chunk type.
 from src.llm_core import (
     LLMConfig,
     _detect_provider,
     _format_upstream_error,
     _get_http_client,
     _host_match,
+    _normalize_mistral_content,
     _normalize_openai_chat_url,
     _omit_temperature,
     _provider_headers,
@@ -133,6 +137,8 @@ def _messages(conversation: List[Dict[str, Any]], provider: str, model: str) -> 
 
 
 def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) -> Dict[str, Any]:
+    """Mistral wants the whole assistant message back, its ThinkChunk included
+    (docs.mistral.ai/inference/conversations/reasoning), so its content is a chunk list."""
     text = "".join(block["text"] for block in blocks if block["type"] == "text")
     tool_calls = [
         {"id": block["call_id"], "type": "function",
@@ -145,6 +151,11 @@ def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) 
     for block in blocks:
         if block["type"] == "reasoning" and replays_reasoning(block, provider, model):
             message.update({field: block[field] for field in _REASONING_FIELDS if field in block})
+            if provider == "mistral" and block.get("text"):
+                message["content"] = [
+                    {"type": "thinking", "thinking": [{"type": "text", "text": block["text"]}]},
+                    *([{"type": "text", "text": text}] if text else []),
+                ]
     return message
 
 
@@ -244,8 +255,11 @@ async def stream_round(
                 reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                 for event in streamed.feed_thinking(reasoning or ""):
                     yield event
-                if delta.get("content"):
-                    for event in streamed.feed(delta["content"]):
+                answer, chunk_thinking = _normalize_mistral_content(delta.get("content"))
+                for event in streamed.feed_thinking(chunk_thinking):
+                    yield event
+                if answer:
+                    for event in streamed.feed(answer):
                         yield event
                 for fragment in delta.get("tool_calls") or ():
                     _merge_tool_call(calls, fragment)
