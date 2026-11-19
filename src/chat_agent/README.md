@@ -72,9 +72,9 @@ model-name lists behind it are not consulted (`routing.py`, #79).
 
 ## Conventions for later tickets
 
-- Every imported private legacy helper is listed with its relied-on assumption
-  in a comment at the import and pinned in
-  `tests/chat_agent/test_chat_agent_legacy_pins.py`.
+- Every imported private legacy helper has its relied-on assumption pinned in
+  `tests/chat_agent/test_chat_agent_legacy_pins.py`; add a comment at the import
+  only when the name cannot convey it, one line at most.
 - Persisted paths come from `src/constants.py` (`CHAT_AGENT_DIR`); directories
   are created on first write.
 - `prompt._replay` turns a history row with `agent_v2.rounds` into

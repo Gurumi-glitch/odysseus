@@ -1,4 +1,4 @@
-"""A provider stop that is not a normal finish ends the turn (ticket #140, spec #146).
+"""A provider stop that is not a normal finish ends the turn.
 
 Driven through the chat route with scripted provider streams; the executor's
 inner worker counts the calls that really run.
@@ -116,6 +116,7 @@ async def test_content_filter_on_openai_is_a_refusal(harness):
 
 @pytest.mark.asyncio
 async def test_network_error_with_a_tool_call_does_not_run_the_call(harness, worker_calls):
+    """The saved round drops the call: with no result it would not replay."""
     _use(harness, ZAI_PAAS, ZAI_MODEL)
     harness.provider_rounds = [_stopped_tool_call("network_error")]
     message = f"Stopped: {ZAI_MODEL} stopped the answer: the provider failed (finish_reason: network_error)."
@@ -128,7 +129,6 @@ async def test_network_error_with_a_tool_call_does_not_run_the_call(harness, wor
     assert not [e for e in _data_events(body) if e.get("type") == "tool_start"]
     [row] = harness.saved
     assert row.metadata["error"] == message
-    # A call without a result would not replay; the streamed text stays.
     assert [b["type"] for b in _blocks(row)] == ["text"]
 
 

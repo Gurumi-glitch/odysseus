@@ -30,19 +30,6 @@ from src.chat_agent.providers import (
     wire_effort,
 )
 
-# Each helper below is module-level in llm_core and relied on as:
-#   _detect_provider: endpoint URL -> provider key ("openrouter", "openai", ...);
-#   _normalize_openai_chat_url: base URL -> its /chat/completions URL;
-#   _provider_headers: session headers + provider-required headers;
-#   _omit_temperature / _uses_max_completion_tokens: per-model payload rules;
-#   _get_http_client: the shared AsyncClient (connection reuse, TLS overrides);
-#   _stream_timeout: streaming httpx.Timeout from a read timeout in seconds;
-#   _format_upstream_error: HTTP status + body -> user-readable sentence;
-#   _host_match: the URL's hostname is the domain or a subdomain of it;
-#   _normalize_mistral_content: a delta's content -> (answer text, thinking text):
-#     a str is all answer; Mistral's chunk list joins only "text" chunks and the
-#     "thinking" chunks' text (an inner list of text chunks or a plain string),
-#     skipping every other chunk type; anything else (None) is ("", "").
 from src.llm_core import (
     LLMConfig,
     _detect_provider,
@@ -57,21 +44,18 @@ from src.llm_core import (
     _uses_max_completion_tokens,
 )
 
-# Relied on: apply_sampling writes only the per-model sampling fields this
-# URL's provider format carries (never temperature), in place; no entry is a no-op.
 from src import model_customization
 
 logger = logging.getLogger(__name__)
 
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
-# reasoning_details (in order), the reasoning_content of DeepSeek-style servers
-# and the plain reasoning of vLLM, Ollama and Groq (Groq's assistant message
-# takes "reasoning": groq-python ChatCompletionAssistantMessageParam, generated
-# from Groq's OpenAPI spec).
+# reasoning_details (in order), DeepSeek-style reasoning_content, and the plain
+# reasoning of vLLM, Ollama and Groq.
+# Groq accepts "reasoning" on assistant messages (groq-python
+# ChatCompletionAssistantMessageParam).
 _REASONING_FIELDS = ("reasoning_details", "reasoning_content", "reasoning")
-# Legacy stream_llm sends stream_options to every Chat Completions provider
-# except these two (llm_core, "Improve OpenRouter and Groq provider requests");
-# OpenRouter reports usage in its last chunk without it.
+# Providers that get no stream_options: OpenRouter reports usage in its last
+# chunk without it.
 _NO_STREAM_OPTIONS = frozenset({"openrouter", "groq"})
 # Provider keys whose host documents thinking.type as the on/off control.
 _THINKING_SWITCH_PROVIDERS = frozenset({"moonshot", "kimi-code"})
@@ -79,8 +63,8 @@ _THINKING_SWITCH_PROVIDERS = frozenset({"moonshot", "kimi-code"})
 
 def _documents_thinking_switch(url: str, provider: str) -> bool:
     """Hosts whose docs turn thinking off with ``thinking.type``: DeepSeek,
-    Z.ai (international and bigmodel.cn, standard and Coding Plan) and Moonshot/Kimi.
-    Z.ai's Coding Plan would silently map effort ``none`` to ``low``."""
+    Z.ai and Moonshot/Kimi. Z.ai's Coding Plan would map effort ``none`` to
+    ``low``."""
     return (
         provider in _THINKING_SWITCH_PROVIDERS
         or _host_match(url, "deepseek.com", "z.ai", "bigmodel.cn")
@@ -140,10 +124,9 @@ def _messages(conversation: List[Dict[str, Any]], provider: str, model: str) -> 
 
 
 def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) -> Dict[str, Any]:
-    """One round's blocks as an assistant message: text, tool calls and the
-    reasoning fields this provider and model produced. Mistral wants the whole
-    message back, its ThinkChunk included
-    (docs.mistral.ai/inference/conversations/reasoning), so its content is a chunk list."""
+    """One round's blocks as an assistant message, with the reasoning fields
+    this provider and model produced. Mistral gets a chunk list holding its
+    ThinkChunk (docs.mistral.ai/inference/conversations/reasoning)."""
     text = "".join(block["text"] for block in blocks if block["type"] == "text")
     tool_calls = [
         {"id": block["call_id"], "type": "function",
@@ -174,9 +157,8 @@ def _request_headers(endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Dict
     return headers
 
 
-# Provider finish reasons by outcome. Values do not collide across providers
-# (Z.ai, DeepSeek, OpenAI, OpenRouter), so one table serves all hosts. "length"
-# is the output limit and is handled apart from this table.
+# Provider finish reasons by outcome; one table serves every host. "length"
+# (the output limit) counts as normal here and is handled apart.
 _NORMAL_FINISH = frozenset({"stop", "tool_calls", "function_call", "length"})
 _REFUSED_FINISH = frozenset({"sensitive", "content_filter"})
 _ERROR_FINISH = frozenset({

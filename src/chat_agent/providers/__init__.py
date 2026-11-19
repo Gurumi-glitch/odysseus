@@ -65,7 +65,7 @@ class ReasoningDelta:
 class ProviderError:
     status: Optional[int]
     message: str
-    # The refused request carried a ``thinking`` field (capabilities.is_effort_rejection).
+    # The refused request carried a ``thinking`` field.
     sent_thinking: bool = False
 
 
@@ -86,9 +86,8 @@ class RoundEnd:
     usage: Optional[Usage]
     # The provider stopped the round at its output limit (finish_reason=length).
     output_limit: bool = False
-    # The provider's own stop reason when it refused or failed the round
-    # (``stop`` is STOP_REFUSED or STOP_ERROR); ``finish_reason`` is the raw value.
     stop: str = STOP_NORMAL
+    # The provider's raw value, set only when ``stop`` is not STOP_NORMAL.
     finish_reason: Optional[str] = None
 
 

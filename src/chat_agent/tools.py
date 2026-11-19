@@ -138,8 +138,7 @@ EDITOR_ONLY_TOOLS = FAMILY_TOOLS["photo_editor"] - {"generate_image"}
 
 
 ASK_USER = "ask_user"
-# The legacy description says the call ends the turn; here the turn waits in
-# place for the answer (loop.py, GLOSSARY "Ask"), so this runtime describes that.
+# Replaces the legacy description: here the turn waits for the answer.
 ASK_USER_DESCRIPTION = (
     "Ask the user a question to get a decision or clarification when the task is genuinely "
     "ambiguous and the answer changes what you do next (e.g. pick between approaches, confirm "
@@ -156,8 +155,7 @@ ASK_USER_DESCRIPTION = (
 
 
 def _with_ask_user_description(schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Relies on: the legacy ask_user schema keeps its parameters in
-    schema["function"]["parameters"]; only the description differs here."""
+    """The legacy ask_user schema with this runtime's description."""
     function = {**schema["function"], "description": ASK_USER_DESCRIPTION}
     return {**schema, "function": function}
 
@@ -171,9 +169,8 @@ def upfront_tool_names() -> List[str]:
 
 
 def upfront_schemas(denied: Iterable[str], surface: str) -> List[Dict[str, Any]]:
-    """The upfront schemas on this tool surface. ask_user keeps its description
-    on the compact surface too: it is the only text saying the answer comes back
-    as the tool result."""
+    """The upfront schemas for this surface. ask_user keeps its description on
+    the compact surface: the only text saying the answer is the tool result."""
     denied = set(denied)
     schemas = [
         schema for schema in _runtime_schemas()

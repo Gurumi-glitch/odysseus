@@ -191,8 +191,7 @@ LLAMA_ROUTES = {"GET /props": BONSAI_PROPS}
         # DeepSeek: Off is thinking.type disabled.
         (DEEPSEEK, "deepseek-flash", {}, "high", {"reasoning_effort": "high"}),
         (DEEPSEEK, "deepseek-flash", {}, "off", {"thinking": {"type": "disabled"}}),
-        # Z.ai (paas, Coding Plan, bigmodel.cn) and Moonshot/Kimi: Off is
-        # thinking.type disabled with no effort; graded levels keep reasoning_effort (#141).
+        # Z.ai and Moonshot/Kimi: Off is thinking.type disabled.
         (ZAI_PAAS, "glm-5.2", {}, "off", THINKING_OFF),
         (ZAI_PAAS, "glm-5.2", {}, "high", {"reasoning_effort": "high"}),
         (ZAI_CODING, "glm-5.3", {}, "off", THINKING_OFF),
@@ -201,8 +200,7 @@ LLAMA_ROUTES = {"GET /props": BONSAI_PROPS}
         (MOONSHOT, "kimi-k2.6", {}, "off", THINKING_OFF),
         (MOONSHOT, "kimi-k2.6", {}, "high", {"reasoning_effort": "high"}),
         (KIMI_CODE, "kimi-k2.7-code", {}, "off", THINKING_OFF),
-        # Negative neighbours: other hosts never get a thinking field, even for a
-        # model whose name says glm or kimi (identity is the host, not the name).
+        # Other hosts never get a thinking field, whatever the model name.
         (OPENAI, "gpt-5.5", {}, "off", {"reasoning_effort": "none"}),
         (OPENAI, "gpt-5.5", {}, "high", {"reasoning_effort": "high"}),
         (LOCAL_VLLM, "glm-5.2", {}, "off", {"reasoning_effort": "none"}),
