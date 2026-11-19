@@ -314,8 +314,6 @@ async def test_ask_user_question_waits_for_the_answer_in_the_same_turn(harness):
     assert row.metadata["tool_events"][0]["ask_user"]["resolved"] == "answer"
 
 
-# --- ask_user holds the round's other calls (ticket #139) ----------------------
-
 NOTE = ("manage_notes", {"action": "add", "title": "Groceries", "content": "milk"})
 QUESTION = ("ask_user", {"question": "Which list?", "options": [{"label": "Work"}, {"label": "Home"}]})
 HELD = "Not run: waiting for the user's answer to ask_user; call it again if still needed"

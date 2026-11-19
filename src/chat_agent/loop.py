@@ -75,11 +75,8 @@ logger = logging.getLogger(__name__)
 
 TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
 ASK_EXPIRED_REASON = "Not run: the user did not answer the request in time."
-# A round holding ask_user next to other calls asks first (spec #146, Asking):
-# the first ask_user runs, every other call of the round is answered as not run.
 ASK_HELD_REASON = "Not run: waiting for the user's answer to ask_user; call it again if still needed"
-# The same hold when that ask_user was refused or invalid, so no question was shown.
-ASK_NOT_ASKED_REASON = "Not run: ask_user in this round was not asked; call it again if still needed"
+ASK_NOT_SHOWN_REASON = "Not run: ask_user in this round was not asked; call it again if still needed"
 FINISH_REASON = "Not run: the user asked to finish with the results so far."
 REPEAT_STOP_REASON = (
     f"Not run: this exact call was repeated {repeat_guard.STOP_STREAK} times in a row, "
@@ -105,7 +102,6 @@ OUTPUT_LIMIT_TOOL_CALL = (
     "Stopped: {model} reached the output limit in the middle of a tool call; the call was not run."
 )
 OUTPUT_LIMIT_NOTICE = "stopped at output limit"
-# A round the provider refused or failed (spec #146, Provider stops). No retry.
 PROVIDER_STOP = "Stopped: {model} stopped the answer: the provider {what} (finish_reason: {finish_reason})."
 PROVIDER_STOP_WHAT = {STOP_REFUSED: "refused it", STOP_ERROR: "failed"}
 # With no fallback configured, one retry on these (the legacy foreground
@@ -645,7 +641,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                 elif held:
                     decision = permissions.Decision(
-                        permissions.DENY, ASK_HELD_REASON if question_shown else ASK_NOT_ASKED_REASON,
+                        permissions.DENY,
+                        ASK_HELD_REASON if question_shown
+                        else ASK_NOT_SHOWN_REASON,
                     )
                 else:
                     tool_calls_used += 1
@@ -756,7 +754,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 # Per call, not per round: a restart must not mark a call
                 # that already ran as cancelled (it would replay as not run).
                 writer.checkpoint()
-            # ask_user ran first; providers expect results in the assistant's call order.
+            # ask_user ran first; results go back in the assistant's call order.
             call_order = {call["call_id"]: index for index, call in enumerate(calls)}
             results.sort(key=lambda result: call_order[result["call_id"]])
             conversation.extend({"role": "tool", **result} for result in results)

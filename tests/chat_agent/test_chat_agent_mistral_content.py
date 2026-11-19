@@ -1,4 +1,4 @@
-"""Mistral reasoning models stream ``delta.content`` as chunk lists (ticket #143, spec #146).
+"""Mistral reasoning models stream ``delta.content`` as chunk lists.
 
 Frames are handwritten from docs.mistral.ai/inference/conversations/reasoning
 (streaming: a list holding a ThinkChunk, then one list holding the closing

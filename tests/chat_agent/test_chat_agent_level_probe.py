@@ -259,7 +259,7 @@ async def test_other_failures_still_fall_back(harness, monkeypatch, level, error
         (503, "phi-4-reasoning is loading", False),
         # A replayed thinking field the server doesn't take.
         (400, "messages[2].reasoning_content: extra fields not permitted", False),
-        # "thinking" refuses only a request that carried a thinking field; High sends reasoning_effort.
+        # A refused thinking counts only when the request sent a thinking field.
         (400, "Parameter `thinking` is invalid", False),
         (400, "thinking is enabled but reasoning_content is missing in assistant tool call message", False),
         (404, "No endpoints found for moonshotai/kimi-k2:thinking", False),
@@ -286,8 +286,8 @@ async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, mo
 
 
 ZAI_PAAS = "https://api.z.ai/api/paas/v4"
-# Z.ai's documented error shape (docs.z.ai api-code.md: code 1214 "Parameter ${field} is invalid");
-# the exact text for a refused `thinking` is unconfirmed until the live probe (#145).
+# Handwritten from Z.ai's documented error shape (code 1214, "Parameter
+# ${field} is invalid"); the text is unconfirmed against the live API.
 ZAI_THINKING_REFUSED = {"error": {"code": "1214", "message": "Parameter `thinking` is invalid"}}
 
 

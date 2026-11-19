@@ -99,8 +99,6 @@ SCENARIOS = {
         ],
         "results": {"web_search": {"output": "Odysseus 2.0 shipped.", "exit_code": 0}},
     },
-    # Reasoning in the `reasoning` field before a tool round (#142); the new runtime
-    # replays it on the second request, which this test does not compare.
     "reasoning_tool": {
         "request": {"allow_web_search": "true"},
         "rounds": [
@@ -109,8 +107,6 @@ SCENARIOS = {
         ],
         "results": {"web_search": {"output": "Odysseus 2.0 shipped.", "exit_code": 0}},
     },
-    # A question next to another call (#139). Non-interactive, so the new runtime's wait
-    # is answered "deny" at once; the legacy loop has no wait and ends its turn at the question.
     "ask_user_plus_tool": {
         "request": {"interactive": "false"},
         "rounds": [

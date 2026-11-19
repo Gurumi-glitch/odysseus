@@ -10,6 +10,7 @@ tests/test_resolve_endpoint_fallbacks.py.
 
 import json
 
+import httpx
 import pytest
 
 from src.agent_loop import _agent_route_tool_mode, _apply_tool_surface_to_schemas
@@ -17,6 +18,7 @@ from src.agent_runtime.authority import active_request_authority
 from src.agent_tools import FUNCTION_TOOL_SCHEMAS
 from src.chat_agent.providers import Endpoint
 from src.chat_agent.providers.chat_completions import build_payload
+from src import model_customization
 from src.endpoint_resolver import normalize_base
 from src.mcp_manager import McpManager
 from src.tool_capabilities import (
@@ -29,12 +31,15 @@ from src.tool_policy import WEB_ACCESS_TOOL_NAMES
 from src.tool_schemas import function_call_to_tool_block
 from src.turn_contract import canonical_tool
 from src.llm_core import (
+    LLMConfig,
     _detect_provider,
     _format_upstream_error,
+    _get_http_client,
     _host_match,
     _normalize_mistral_content,
     _normalize_openai_chat_url,
     _provider_headers,
+    _stream_timeout,
 )
 
 
@@ -105,6 +110,50 @@ def test_provider_headers_keep_session_auth_and_add_json_content_type():
 def test_upstream_error_is_a_readable_sentence():
     message = _format_upstream_error(429, b'{"error": {"message": "slow down"}}', "https://openrouter.ai/api/v1")
     assert "429" in message and "slow down" in message
+
+
+def test_stream_timeout_reads_given_seconds_connects_per_config(monkeypatch):
+    monkeypatch.setattr(LLMConfig, "CONNECT_TIMEOUT", 4.5)
+    timeout = _stream_timeout("300")
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == 300.0
+    assert timeout.connect == 4.5
+
+
+def test_http_client_is_one_shared_async_client():
+    client = _get_http_client()
+    assert isinstance(client, httpx.AsyncClient)
+    assert _get_http_client() is client
+
+
+LOCAL_URL = "http://192.168.1.20:1234/v1/chat/completions"
+
+
+def test_apply_sampling_writes_carried_fields_not_temperature(monkeypatch):
+    saved = {"temperature": 0.2, "top_p": 0.9, "top_k": 40, "num_ctx": 8192,
+             "thinking": "on"}
+    monkeypatch.setattr(model_customization, "lookup", lambda url, model: saved)
+    payload = {"model": "m", "temperature": 0.7}
+
+
+    returned = model_customization.apply_sampling(payload, LOCAL_URL, "m")
+
+    assert returned is payload
+    assert payload == {
+        "model": "m", "temperature": 0.7, "top_p": 0.9, "top_k": 40,
+    }
+    hosted = {"model": "m"}
+    model_customization.apply_sampling(
+        hosted, "https://openrouter.ai/api/v1/chat/completions", "m",
+    )
+    assert hosted == {"model": "m", "top_p": 0.9}
+
+
+def test_apply_sampling_without_an_entry_leaves_the_payload_alone(monkeypatch):
+    monkeypatch.setattr(model_customization, "lookup", lambda url, model: None)
+    payload = {"model": "m"}
+    model_customization.apply_sampling(payload, LOCAL_URL, "m")
+    assert payload == {"model": "m"}
 
 
 def test_payload_follows_per_model_temperature_and_token_rules():

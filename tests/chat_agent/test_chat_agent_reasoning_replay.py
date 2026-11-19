@@ -1,4 +1,4 @@
-"""Reasoning goes back in the field it arrived in (ticket #142, spec #146).
+"""Reasoning goes back in the field it arrived in.
 
 Driven through the chat route with scripted provider streams; the second
 request the transport captured is what the provider would see.

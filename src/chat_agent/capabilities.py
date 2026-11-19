@@ -72,10 +72,9 @@ _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
 # templates, LM Studio's "reasoning_effort" 400) or OpenRouter's refusal to turn
 # mandatory reasoning off (#80); bare "reasoning" also names models and fields.
 _EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory", re.IGNORECASE)
-# The thinking parameter (Z.ai, Moonshot) as a standalone word, not inside a
-# model name such as "kimi-k2-thinking"; it counts only when the request carried
-# a thinking field (Moonshot's replay 400 and OpenRouter's ":thinking" variant
-# 404 name it too).
+# "thinking" as its own word, not inside a model name (kimi-k2-thinking).
+# Other errors name it without refusing the field (Moonshot's replay 400,
+# OpenRouter's ":thinking" model ids), so callers gate on a sent thinking field.
 _THINKING_REJECTED = re.compile(r"(?<![\w-])thinking(?![\w-])", re.IGNORECASE)
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
