@@ -71,7 +71,9 @@ _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
 # The effort parameter by name ("Unexpected reasoning effort" from llama.cpp
 # templates, LM Studio's "reasoning_effort" 400) or OpenRouter's refusal to turn
 # mandatory reasoning off (#80); bare "reasoning" also names models and fields.
-_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory", re.IGNORECASE)
+# The thinking parameter (Z.ai, Moonshot) counts only as a standalone word, not
+# inside a model name such as "kimi-k2-thinking".
+_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory|(?<![\w-])thinking(?![\w-])", re.IGNORECASE)
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
 
