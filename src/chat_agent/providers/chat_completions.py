@@ -38,13 +38,17 @@ from src.chat_agent.providers import (
 #   _get_http_client: the shared AsyncClient (connection reuse, TLS overrides);
 #   _stream_timeout: streaming httpx.Timeout from a read timeout in seconds;
 #   _format_upstream_error: HTTP status + body -> user-readable sentence;
-#   _host_match: the URL's hostname is the domain or a subdomain of it.
+#   _host_match: the URL's hostname is the domain or a subdomain of it;
+#   _normalize_mistral_content: a delta's content (str, or Mistral's chunk list) ->
+#     (answer text, thinking text), joining only "text" chunks and the text inside
+#     "thinking" chunks and skipping every other chunk type.
 from src.llm_core import (
     LLMConfig,
     _detect_provider,
     _format_upstream_error,
     _get_http_client,
     _host_match,
+    _normalize_mistral_content,
     _normalize_openai_chat_url,
     _omit_temperature,
     _provider_headers,
@@ -59,8 +63,9 @@ logger = logging.getLogger(__name__)
 from src import model_customization
 
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
-# reasoning_details (in order) and the reasoning_content of DeepSeek-style servers.
-_REASONING_FIELDS = ("reasoning_details", "reasoning_content")
+# reasoning_details (in order), the reasoning_content of DeepSeek-style servers
+# and the plain reasoning of vLLM, Ollama and Groq.
+_REASONING_FIELDS = ("reasoning_details", "reasoning_content", "reasoning")
 # Legacy stream_llm sends stream_options to every Chat Completions provider
 # except these two (llm_core, "Improve OpenRouter and Groq provider requests");
 # OpenRouter reports usage in its last chunk without it.
@@ -132,6 +137,8 @@ def _messages(conversation: List[Dict[str, Any]], provider: str, model: str) -> 
 
 
 def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) -> Dict[str, Any]:
+    """Mistral wants the whole assistant message back, its ThinkChunk included
+    (docs.mistral.ai/inference/conversations/reasoning), so its content is a chunk list."""
     text = "".join(block["text"] for block in blocks if block["type"] == "text")
     tool_calls = [
         {"id": block["call_id"], "type": "function",
@@ -144,6 +151,11 @@ def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) 
     for block in blocks:
         if block["type"] == "reasoning" and replays_reasoning(block, provider, model):
             message.update({field: block[field] for field in _REASONING_FIELDS if field in block})
+            if provider == "mistral" and block.get("text"):
+                message["content"] = [
+                    {"type": "thinking", "thinking": [{"type": "text", "text": block["text"]}]},
+                    *([{"type": "text", "text": text}] if text else []),
+                ]
     return message
 
 
@@ -208,6 +220,7 @@ async def stream_round(
             return
         details: List[Any] = []
         reasoning_content = ""
+        reasoning_field = ""
         streamed = _RoundText()
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
@@ -236,19 +249,25 @@ async def stream_round(
                 # concatenating all chunks in order".
                 details.extend(delta.get("reasoning_details") or ())
                 reasoning_content += delta.get("reasoning_content") or ""
+                reasoning_field += delta.get("reasoning") or ""
                 # vLLM >= 0.20 and OpenRouter send readable reasoning as
                 # "reasoning"; read one field so a server sending both isn't doubled.
                 reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                 for event in streamed.feed_thinking(reasoning or ""):
                     yield event
-                if delta.get("content"):
-                    for event in streamed.feed(delta["content"]):
+                answer, chunk_thinking = _normalize_mistral_content(delta.get("content"))
+                for event in streamed.feed_thinking(chunk_thinking):
+                    yield event
+                if answer:
+                    for event in streamed.feed(answer):
                         yield event
                 for fragment in delta.get("tool_calls") or ():
                     _merge_tool_call(calls, fragment)
         for event in streamed.flush():
             yield event
-        blocks = _blocks(endpoint, streamed.text, details, reasoning_content, streamed.thinking)
+        blocks = _blocks(
+            endpoint, streamed.text, details, reasoning_content, reasoning_field, streamed.thinking,
+        )
         blocks += [
             {"type": "tool_call", "call_id": call["call_id"] or f"call_{uuid.uuid4().hex}",
              "name": call["name"], "arguments": call["arguments"]}
@@ -339,13 +358,18 @@ def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any])
 
 
 def _blocks(
-    endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str, thinking: str,
+    endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str, reasoning_field: str,
+    thinking: str,
 ) -> List[Dict[str, Any]]:
+    """The round's blocks. ``reasoning`` is kept for replay only when neither
+    ``reasoning_details`` nor ``reasoning_content`` carried the same reasoning
+    (OpenRouter sends ``reasoning`` beside ``reasoning_details``)."""
     blocks: List[Dict[str, Any]] = []
     reasoning = {
         field: value
         for field, value in (
-            ("reasoning_details", details), ("reasoning_content", reasoning_content), ("text", thinking),
+            ("reasoning_details", details), ("reasoning_content", reasoning_content),
+            ("reasoning", "" if details or reasoning_content else reasoning_field), ("text", thinking),
         )
         if value
     }
