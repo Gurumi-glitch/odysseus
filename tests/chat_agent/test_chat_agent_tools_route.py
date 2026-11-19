@@ -337,3 +337,52 @@ async def test_tool_call_cap_stops_the_turn_and_answers_every_call(harness, monk
         assert [n.title for n in session.query(database.Note)] == ["one"]
     [row] = harness.saved
     assert [r["call_id"] for r in row.metadata["agent_v2"]["rounds"][0]["results"]] == ["call_0", "call_1"]
+
+
+def _offered_ask_user(payload):
+    return next(t for t in payload["tools"] if t["function"]["name"] == "ask_user")
+
+
+def _select_surface(db, surface):
+    with db() as session:
+        session.add(database.ModelEndpoint(
+            id="ep-1", name="OpenRouter", base_url="https://openrouter.ai/api/v1",
+            owner="alice", model_tool_modes=json.dumps({"x-ai/grok-4.1-fast": surface}),
+        ))
+        session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["full", "compact"])
+async def test_ask_user_is_offered_with_the_pause_and_answer_semantics(harness, db, surface):
+    _select_surface(db, surface)
+
+    await harness.send(_Request("agent"))
+
+    [payload] = harness.captured["provider_requests"]
+    description = _offered_ask_user(payload)["function"]["description"]
+    assert "ENDS your turn" not in description
+    assert "pauses" in description
+    assert "answer comes back as the tool result" in description
+    assert "Other calls in that round are not run until the answer arrives" in description
+    assert _offered_ask_user(payload)["function"]["parameters"]["required"] == ["question", "options"]
+
+
+def test_the_shared_legacy_ask_user_schema_still_ends_the_turn():
+    from src.agent_tools import FUNCTION_TOOL_SCHEMAS
+    legacy = next(t for t in FUNCTION_TOOL_SCHEMAS if t["function"]["name"] == "ask_user")
+    assert "ENDS your turn" in legacy["function"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_tells_the_model_to_ask_through_ask_user_and_stays_byte_identical(harness):
+    await harness.send(_Request("agent"))
+    await harness.send(_Request("agent"))
+
+    first, second = harness.captured["provider_requests"]
+    system = first["messages"][0]["content"]
+    assert (
+        "When the next step needs the user's decision, ask with ask_user and make no other "
+        "tool call in that round; don't ask in plain text and act in the same reply."
+    ) in system
+    assert second["messages"][0]["content"] == system

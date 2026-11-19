@@ -35,7 +35,11 @@ def _error(body):
 
 
 def _compact(payload):
-    return all("description" not in tool["function"] for tool in payload["tools"])
+    # ask_user keeps its description on every surface (tools.upfront_schemas).
+    return all(
+        "description" not in tool["function"]
+        for tool in payload["tools"] if tool["function"]["name"] != "ask_user"
+    )
 
 
 @pytest.mark.asyncio
