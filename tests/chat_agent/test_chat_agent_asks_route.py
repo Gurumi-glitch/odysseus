@@ -312,3 +312,97 @@ async def test_ask_user_question_waits_for_the_answer_in_the_same_turn(harness):
     assert _tool_messages(second)[0] == "The user answered: Home"
     [row] = harness.saved
     assert row.metadata["tool_events"][0]["ask_user"]["resolved"] == "answer"
+
+
+# --- ask_user holds the round's other calls (ticket #139) ----------------------
+
+NOTE = ("manage_notes", {"action": "add", "title": "Groceries", "content": "milk"})
+QUESTION = ("ask_user", {"question": "Which list?", "options": [{"label": "Work"}, {"label": "Home"}]})
+HELD = "Not run: waiting for the user's answer to ask_user; call it again if still needed"
+
+
+@pytest.fixture
+def note_worker(monkeypatch):
+    """The tools the worker was asked to run, ask_user excluded (the real handler answers it)."""
+    ran = []
+    real = tool_execution._execute_tool_block_impl
+
+    async def run(block, *args, **kwargs):
+        if block.tool_type == "ask_user":
+            return await real(block, *args, **kwargs)
+        ran.append(block.tool_type)
+        return block.tool_type, {"output": "saved", "exit_code": 0}
+
+    monkeypatch.setattr(tool_execution, "_execute_tool_block_impl", run)
+    return ran
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("calls", [(NOTE, QUESTION), (QUESTION, NOTE)], ids=["ask_last", "ask_first"])
+async def test_ask_user_holds_the_other_calls_of_its_round(harness, note_worker, calls):
+    harness.provider_rounds = [_sse_tool_calls(*calls), _sse_events(["Using Home."])]
+    seen = {}
+
+    async def on_ask(card):
+        seen["ran_before_answer"] = list(note_worker)
+        await post_answer(harness, answer_request(), card["ask_id"], "answer", "Home")
+
+    body = await send_and_answer(harness, _Request("agent"), on_ask)
+
+    assert seen == {"ran_before_answer": []}
+    assert note_worker == []
+    kinds = [(e["type"], e.get("tool")) for e in _data_events(body)
+             if e.get("type") in {"tool_start", "ask_user"}]
+    assert kinds[:2] == [("tool_start", "ask_user"), ("ask_user", None)]
+    held = next(e for e in _events(body, "tool_output") if e["tool"] == "manage_notes")
+    assert held["exit_code"] == 126 and HELD in held["output"]
+    _, second = harness.captured["provider_requests"]
+    answers = [m["content"] for m in second["messages"] if m["role"] == "tool"]
+    assert len(answers) == 2 and "The user answered: Home" in answers
+    assert sum(HELD in content for content in answers) == 1
+    [row] = harness.saved
+    assert {e["tool"] for e in row.metadata["tool_events"]} == {"ask_user", "manage_notes"}
+
+
+@pytest.mark.asyncio
+async def test_a_round_without_ask_user_still_runs_every_call(harness, note_worker):
+    harness.provider_rounds = [
+        _sse_tool_calls(NOTE, ("manage_notes", {"action": "list"})), _sse_events(["Done."]),
+    ]
+
+    await send_and_answer(harness, _Request("agent"), answering(harness))
+
+    assert note_worker == ["manage_notes", "manage_notes"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_first_of_several_ask_user_calls_is_asked(harness, note_worker):
+    second_question = ("ask_user", {"question": "Which day?", "options": [{"label": "Mon"}, {"label": "Tue"}]})
+    harness.provider_rounds = [_sse_tool_calls(QUESTION, second_question), _sse_events(["Home."])]
+
+    body = await send_and_answer(harness, _Request("agent"), answering(harness, ("answer", "Home")))
+
+    [card] = [e["data"] for e in _events(body, "ask_user")]
+    assert card["question"] == "Which list?"
+    _, second = harness.captured["provider_requests"]
+    answers = [m["content"] for m in second["messages"] if m["role"] == "tool"]
+    assert len(answers) == 2 and "The user answered: Home" in answers
+    assert sum(HELD in content for content in answers) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_expired_ask_still_ends_the_turn_and_holds_the_other_calls(harness, note_worker, monkeypatch):
+    monkeypatch.setattr(asks, "ASK_TIMEOUT_SECONDS", 0.05)
+    harness.provider_rounds = [_sse_tool_calls(NOTE, QUESTION), _sse_events(["never reached"])]
+
+    async def ignore(card):
+        return None
+
+    await send_and_answer(harness, _Request("agent"), ignore)
+
+    assert note_worker == []
+    assert len(harness.captured["provider_requests"]) == 1
+    [row] = harness.saved
+    assert row.metadata["stop_reason"] == "ask_expired"
+    held = next(e for e in row.metadata["tool_events"] if e["tool"] == "manage_notes")
+    assert held["exit_code"] == 126

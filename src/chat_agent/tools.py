@@ -137,8 +137,36 @@ def schema_name(schema: Dict[str, Any]) -> str:
 EDITOR_ONLY_TOOLS = FAMILY_TOOLS["photo_editor"] - {"generate_image"}
 
 
+ASK_USER = "ask_user"
+# The legacy description says the call ends the turn; here the turn waits in
+# place for the answer (loop.py, GLOSSARY "Ask"), so this runtime describes that.
+ASK_USER_DESCRIPTION = (
+    "Ask the user a question to get a decision or clarification when the task is genuinely "
+    "ambiguous and the answer changes what you do next (e.g. pick between approaches, confirm "
+    "an assumption, choose a target, or request required missing data). The user sees "
+    "clickable option buttons; calling this pauses the turn and their answer comes back as "
+    "the tool result. Make no other tool call in the same round. Other calls in that round "
+    "are not run until the answer arrives; call them again afterwards if still needed. "
+    "For open-ended missing data such as an exact calendar date, include an 'Exact date' "
+    "option and ask the user to type it; do not invent arbitrary choices. Prefer sensible "
+    "defaults over asking; only ask when you truly cannot proceed well without the user's "
+    "input. Do NOT use it to confirm irreversible/destructive actions that have a dedicated "
+    "confirmation flow."
+)
+
+
+def _with_ask_user_description(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Relies on: the legacy ask_user schema keeps its parameters in
+    schema["function"]["parameters"]; only the description differs here."""
+    function = {**schema["function"], "description": ASK_USER_DESCRIPTION}
+    return {**schema, "function": function}
+
+
 def _runtime_schemas() -> List[Dict[str, Any]]:
-    return [s for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in EDITOR_ONLY_TOOLS]
+    return [
+        _with_ask_user_description(s) if schema_name(s) == ASK_USER else s
+        for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in EDITOR_ONLY_TOOLS
+    ]
 
 
 def upfront_tool_names() -> List[str]:
@@ -151,7 +179,12 @@ def upfront_schemas(denied: Iterable[str], surface: str) -> List[Dict[str, Any]]
         schema for schema in _runtime_schemas()
         if schema_name(schema) not in DEFERRED_TOOLS and schema_name(schema) not in denied
     ]
-    return _apply_tool_surface_to_schemas(schemas, surface)
+    # The compact surface strips descriptions; ask_user keeps its own because
+    # it is the only text that says the answer comes back as the tool result.
+    return [
+        _with_ask_user_description(schema) if schema_name(schema) == ASK_USER else schema
+        for schema in _apply_tool_surface_to_schemas(schemas, surface)
+    ]
 
 
 def unavailable_line(names: Iterable[str]) -> str:
