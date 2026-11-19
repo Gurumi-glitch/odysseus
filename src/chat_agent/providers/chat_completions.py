@@ -59,6 +59,18 @@ _REASONING_FIELDS = ("reasoning_details", "reasoning_content")
 # except these two (llm_core, "Improve OpenRouter and Groq provider requests");
 # OpenRouter reports usage in its last chunk without it.
 _NO_STREAM_OPTIONS = frozenset({"openrouter", "groq"})
+# Provider keys whose host documents thinking.type as the on/off control.
+_THINKING_SWITCH_PROVIDERS = frozenset({"moonshot", "kimi-code"})
+
+
+def _documents_thinking_switch(url: str, provider: str) -> bool:
+    """Hosts whose docs turn thinking off with ``thinking.type``: DeepSeek,
+    Z.ai (international and bigmodel.cn, standard and Coding Plan) and Moonshot/Kimi.
+    Z.ai's Coding Plan would silently map effort ``none`` to ``low``."""
+    return (
+        provider in _THINKING_SWITCH_PROVIDERS
+        or _host_match(url, "deepseek.com", "z.ai", "bigmodel.cn")
+    )
 
 
 def build_payload(
@@ -92,8 +104,7 @@ def build_payload(
         effort = wire_effort(thinking)
         if provider == "openrouter":
             payload["reasoning"] = {"effort": effort}
-        elif effort == OFF_EFFORT and _host_match(endpoint.url, "deepseek.com"):
-            # DeepSeek turns thinking off on its own axis, not with an effort.
+        elif effort == OFF_EFFORT and _documents_thinking_switch(endpoint.url, provider):
             payload["thinking"] = {"type": "disabled"}
         else:
             payload["reasoning_effort"] = effort

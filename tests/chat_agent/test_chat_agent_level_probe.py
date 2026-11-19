@@ -259,8 +259,16 @@ async def test_other_failures_still_fall_back(harness, monkeypatch, level, error
         (503, "phi-4-reasoning is loading", False),
         # A replayed thinking field the server doesn't take.
         (400, "messages[2].reasoning_content: extra fields not permitted", False),
+        # The thinking parameter (Z.ai, Moonshot), named by itself, not as part of a model name.
+        (400, "Parameter `thinking` is invalid", True),
+        (400, "thinking.type: disabled is not supported by this model", True),
+        (404, "model 'kimi-k2-thinking' not found", False),
+        (400, "Prompt too long: the input exceeds the model context window", False),
     ],
-    ids=["lmstudio-effort", "openrouter-mandatory", "model-404", "model-503", "reasoning-content"],
+    ids=[
+        "lmstudio-effort", "openrouter-mandatory", "model-404", "model-503", "reasoning-content",
+        "thinking-param", "thinking-type", "thinking-model-404", "unrelated-400",
+    ],
 )
 async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, monkeypatch, status, message, refused):
     from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
@@ -273,6 +281,31 @@ async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, mo
     assert bool(handed_back) is refused
     learned = (await capabilities.thinking_levels(harness.session.endpoint_url, PRIMARY_MODEL)).support["high"]
     assert (learned == U) is refused
+
+
+ZAI_PAAS = "https://api.z.ai/api/paas/v4"
+# Z.ai's documented error shape (docs.z.ai api-code.md: code 1214 "Parameter ${field} is invalid");
+# the exact text for a refused `thinking` is unconfirmed until the live probe (#145).
+ZAI_THINKING_REFUSED = {"error": {"code": "1214", "message": "Parameter `thinking` is invalid"}}
+
+
+@pytest.mark.asyncio
+async def test_zai_refused_off_is_learned_and_resent_once_without_thinking(harness, monkeypatch):
+    from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
+
+    harness.session.endpoint_url = ZAI_PAAS
+    _provider(harness, monkeypatch, [(400, ZAI_THINKING_REFUSED), ["Hi"]])
+
+    events, body = await _turn(harness, "off")
+
+    refused, resent = harness.captured["provider_requests"]
+    assert refused["thinking"] == {"type": "disabled"} and "reasoning_effort" not in refused
+    assert "thinking" not in resent and "reasoning_effort" not in resent
+    [notice] = [e for e in events if e.get("type") == "thinking_level_refused"]
+    assert notice["level"] == "off"
+    assert not [e for e in events if e.get("type") == "fallback"]
+    assert "event: error" not in body
+    assert (await capabilities.thinking_levels(ZAI_PAAS, PRIMARY_MODEL)).support["off"] == U
 
 
 @pytest.mark.asyncio

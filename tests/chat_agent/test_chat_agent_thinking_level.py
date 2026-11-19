@@ -108,6 +108,14 @@ async def test_servers_reporting_no_levels_leave_every_level_selectable(monkeypa
 THINKING_KEYS = ("reasoning", "reasoning_effort", "thinking", "chat_template_kwargs")
 DEEPSEEK = "https://api.deepseek.com/v1"
 XAI_URL = "https://api.x.ai/v1"
+ZAI_PAAS = "https://api.z.ai/api/paas/v4"
+ZAI_CODING = "https://api.z.ai/api/coding/paas/v4"
+BIGMODEL = "https://open.bigmodel.cn/api/paas/v4"
+MOONSHOT = "https://api.moonshot.ai/v1"
+KIMI_CODE = "https://api.kimi.com/coding/v1"
+OPENAI = "https://api.openai.com/v1"
+LOCAL_VLLM = "http://127.0.0.1:8000/v1"
+THINKING_OFF = {"thinking": {"type": "disabled"}}
 CHATGPT_URL = "https://chatgpt.com/backend-api/codex"
 XAI_ROUND = (FIXTURES / "xai_responses_round2_text.sse").read_bytes()
 
@@ -183,6 +191,23 @@ LLAMA_ROUTES = {"GET /props": BONSAI_PROPS}
         # DeepSeek: Off is thinking.type disabled.
         (DEEPSEEK, "deepseek-flash", {}, "high", {"reasoning_effort": "high"}),
         (DEEPSEEK, "deepseek-flash", {}, "off", {"thinking": {"type": "disabled"}}),
+        # Z.ai (paas, Coding Plan, bigmodel.cn) and Moonshot/Kimi: Off is
+        # thinking.type disabled with no effort; graded levels keep reasoning_effort (#141).
+        (ZAI_PAAS, "glm-5.2", {}, "off", THINKING_OFF),
+        (ZAI_PAAS, "glm-5.2", {}, "high", {"reasoning_effort": "high"}),
+        (ZAI_CODING, "glm-5.3", {}, "off", THINKING_OFF),
+        (ZAI_CODING, "glm-5.3", {}, "high", {"reasoning_effort": "high"}),
+        (BIGMODEL, "glm-5.2", {}, "off", THINKING_OFF),
+        (MOONSHOT, "kimi-k2.6", {}, "off", THINKING_OFF),
+        (MOONSHOT, "kimi-k2.6", {}, "high", {"reasoning_effort": "high"}),
+        (KIMI_CODE, "kimi-k2.7-code", {}, "off", THINKING_OFF),
+        # Negative neighbours: other hosts never get a thinking field, even for a
+        # model whose name says glm or kimi (identity is the host, not the name).
+        (OPENAI, "gpt-5.5", {}, "off", {"reasoning_effort": "none"}),
+        (OPENAI, "gpt-5.5", {}, "high", {"reasoning_effort": "high"}),
+        (LOCAL_VLLM, "glm-5.2", {}, "off", {"reasoning_effort": "none"}),
+        (OPENROUTER, "z-ai/glm-5.2", OPENROUTER_ROUTES, "off", {"reasoning": {"effort": "none"}}),
+        (DEEPSEEK, "kimi-k2.6", {}, "high", {"reasoning_effort": "high"}),
         # xAI Responses: reasoning.effort.
         (XAI_URL, "grok-4.7", {}, "xhigh", {"reasoning": {"effort": "xhigh"}}),
         (XAI_URL, "grok-4.7", {}, "off", {"reasoning": {"effort": "none"}}),
