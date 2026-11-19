@@ -56,6 +56,19 @@ APPROVED = {
 }
 KNOWN_GAPS = {}
 
+def _sse_reasoning_tool_call(reasoning, call):
+    """A scripted round whose `reasoning` delta comes before one tool call."""
+    name, arguments = call
+    chunks = [
+        {"choices": [{"delta": {"reasoning": reasoning}}]},
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_0", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]},
+    ]
+    return ("\n\n".join(["data: " + json.dumps(c) for c in chunks] + ["data: [DONE]"]) + "\n\n").encode()
+
+
 SCENARIOS = {
     "text_reply": {
         "request": {},
@@ -80,6 +93,16 @@ SCENARIOS = {
         "request": {"allow_web_search": "true"},
         "rounds": [
             _sse_tool_calls(("web_search", {"query": "odysseus release"})),
+            _sse_events(["Found it."]),
+        ],
+        "results": {"web_search": {"output": "Odysseus 2.0 shipped.", "exit_code": 0}},
+    },
+    # Reasoning in the `reasoning` field before a tool round (#142); the new runtime
+    # replays it on the second request, which this test does not compare.
+    "reasoning_tool": {
+        "request": {"allow_web_search": "true"},
+        "rounds": [
+            _sse_reasoning_tool_call("Need to search.", ("web_search", {"query": "odysseus release"})),
             _sse_events(["Found it."]),
         ],
         "results": {"web_search": {"output": "Odysseus 2.0 shipped.", "exit_code": 0}},

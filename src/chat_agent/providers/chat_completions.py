@@ -59,8 +59,9 @@ logger = logging.getLogger(__name__)
 from src import model_customization
 
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
-# reasoning_details (in order) and the reasoning_content of DeepSeek-style servers.
-_REASONING_FIELDS = ("reasoning_details", "reasoning_content")
+# reasoning_details (in order), the reasoning_content of DeepSeek-style servers
+# and the plain reasoning of vLLM, Ollama and Groq.
+_REASONING_FIELDS = ("reasoning_details", "reasoning_content", "reasoning")
 # Legacy stream_llm sends stream_options to every Chat Completions provider
 # except these two (llm_core, "Improve OpenRouter and Groq provider requests");
 # OpenRouter reports usage in its last chunk without it.
@@ -208,6 +209,7 @@ async def stream_round(
             return
         details: List[Any] = []
         reasoning_content = ""
+        reasoning_field = ""
         streamed = _RoundText()
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
@@ -236,6 +238,7 @@ async def stream_round(
                 # concatenating all chunks in order".
                 details.extend(delta.get("reasoning_details") or ())
                 reasoning_content += delta.get("reasoning_content") or ""
+                reasoning_field += delta.get("reasoning") or ""
                 # vLLM >= 0.20 and OpenRouter send readable reasoning as
                 # "reasoning"; read one field so a server sending both isn't doubled.
                 reasoning = delta.get("reasoning_content") or delta.get("reasoning")
@@ -248,7 +251,9 @@ async def stream_round(
                     _merge_tool_call(calls, fragment)
         for event in streamed.flush():
             yield event
-        blocks = _blocks(endpoint, streamed.text, details, reasoning_content, streamed.thinking)
+        blocks = _blocks(
+            endpoint, streamed.text, details, reasoning_content, reasoning_field, streamed.thinking,
+        )
         blocks += [
             {"type": "tool_call", "call_id": call["call_id"] or f"call_{uuid.uuid4().hex}",
              "name": call["name"], "arguments": call["arguments"]}
@@ -339,13 +344,18 @@ def _merge_tool_call(calls: Dict[int, Dict[str, str]], fragment: Dict[str, Any])
 
 
 def _blocks(
-    endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str, thinking: str,
+    endpoint: Endpoint, text: str, details: List[Any], reasoning_content: str, reasoning_field: str,
+    thinking: str,
 ) -> List[Dict[str, Any]]:
+    """The round's blocks. ``reasoning`` is kept for replay only when neither
+    ``reasoning_details`` nor ``reasoning_content`` carried the same reasoning
+    (OpenRouter sends ``reasoning`` beside ``reasoning_details``)."""
     blocks: List[Dict[str, Any]] = []
     reasoning = {
         field: value
         for field, value in (
-            ("reasoning_details", details), ("reasoning_content", reasoning_content), ("text", thinking),
+            ("reasoning_details", details), ("reasoning_content", reasoning_content),
+            ("reasoning", "" if details or reasoning_content else reasoning_field), ("text", thinking),
         )
         if value
     }
