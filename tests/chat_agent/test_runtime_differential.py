@@ -48,6 +48,11 @@ APPROVED = {
     ("tool_start", "tool_call_id"): "new runtime sends call_id instead (spec #44); no UI reader",
     ("tool_output", "tool_call_id"): "new runtime sends call_id instead (spec #44); no UI reader",
     ("tool_output", "action_receipt"): "dropped by the result_events port; no UI reader",
+    ("tool_output", "ask_user"): "legacy repeats the card on tool_output; chat.js reads the ask_user event, "
+                                 "which the new runtime sends, and the card is saved on the tool event (#139)",
+    ("final_response", "render_owner"): "legacy ends its turn at the question and marks that reply as "
+                                        "replacing the turn; the new runtime's reply comes after the answer",
+    ("final_response", "replacement_scope"): "same as final_response.render_owner (#139)",
 }
 KNOWN_GAPS = {}
 
@@ -78,6 +83,25 @@ SCENARIOS = {
             _sse_events(["Found it."]),
         ],
         "results": {"web_search": {"output": "Odysseus 2.0 shipped.", "exit_code": 0}},
+    },
+    # A question next to another call (#139). Non-interactive, so the new runtime's wait
+    # is answered "deny" at once; the legacy loop has no wait and ends its turn at the question.
+    "ask_user_plus_tool": {
+        "request": {"interactive": "false"},
+        "rounds": [
+            _sse_tool_calls(
+                ("manage_notes", {"action": "add", "title": "Groceries", "content": "milk"}),
+                ("ask_user", {"question": "Which list?", "options": [{"label": "Work"}, {"label": "Home"}]}),
+            ),
+            _sse_events(["Noted."]),
+        ],
+        "results": {
+            "manage_notes": {"output": "saved", "exit_code": 0},
+            "ask_user": {
+                "output": "", "exit_code": 0,
+                "ask_user": {"question": "Which list?", "options": [{"label": "Work"}, {"label": "Home"}]},
+            },
+        },
     },
 }
 

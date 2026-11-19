@@ -75,6 +75,10 @@ logger = logging.getLogger(__name__)
 
 TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
 ASK_EXPIRED_REASON = "Not run: the user did not answer the request in time."
+# A round holding ask_user next to other calls asks first (spec #146, Asking):
+# the first ask_user runs, every other call of the round is answered as not run.
+ASK_USER = "ask_user"
+ASK_HELD_REASON = "Not run: waiting for the user's answer to ask_user; call it again if still needed"
 FINISH_REASON = "Not run: the user asked to finish with the results so far."
 REPEAT_STOP_REASON = (
     f"Not run: this exact call was repeated {repeat_guard.STOP_STREAK} times in a row, "
@@ -607,7 +611,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = round_record["results"] = []
             round_outcomes = []
-            for call in calls:
+            asked = next((call for call in calls if call["name"] == ASK_USER), None)
+            for call in sorted(calls, key=lambda call: call is not asked):
+                held = asked is not None and call is not asked
                 # tool_search and load_skill are the runtime's own tools: they
                 # are answered here, never converted for the legacy executor.
                 own_tool = call["name"] in (tools.TOOL_SEARCH, tools.LOAD_SKILL) and call["name"] in offered
@@ -625,14 +631,17 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                 reminder = None
                 # The last card this call raised, stored on its tool event.
                 ask = None
-                if record.stop_reason is None and agent_runs.should_finish(turn.session_id):
+                if not held and record.stop_reason is None and agent_runs.should_finish(turn.session_id):
                     record.stop_reason = transcript.STOP_INTERRUPTED
-                if record.stop_reason is None and caps.max_tool_calls and tool_calls_used >= caps.max_tool_calls:
+                if (not held and record.stop_reason is None and caps.max_tool_calls
+                        and tool_calls_used >= caps.max_tool_calls):
                     record.stop_reason = transcript.STOP_BUDGET
                 if record.stop_reason is not None:
                     # Every call still gets a result, so the round replays
                     # as a complete call/result pair.
                     decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
+                elif held:
+                    decision = permissions.Decision(permissions.DENY, ASK_HELD_REASON)
                 else:
                     tool_calls_used += 1
                     signal = guard.observe(call["name"], call["arguments"])
