@@ -8,6 +8,7 @@ The legacy message sanitizer is deliberately not used: it drops
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
@@ -15,9 +16,12 @@ from src.chat_agent.providers import (
     OFF_EFFORT,
     Endpoint,
     ProviderError,
-    RoundEnd,
     ReasoningDelta,
+    RoundEnd,
     RoundEvent,
+    STOP_ERROR,
+    STOP_NORMAL,
+    STOP_REFUSED,
     TextDelta,
     Usage,
     provider_key,
@@ -47,6 +51,8 @@ from src.llm_core import (
     _stream_timeout,
     _uses_max_completion_tokens,
 )
+
+logger = logging.getLogger(__name__)
 
 # Relied on: apply_sampling writes only the per-model sampling fields this
 # URL's provider format carries (never temperature), in place; no entry is a no-op.
@@ -151,6 +157,28 @@ def _request_headers(endpoint: Endpoint, messages: List[Dict[str, Any]]) -> Dict
     return headers
 
 
+# Provider finish reasons by outcome. Values do not collide across providers
+# (Z.ai, DeepSeek, OpenAI, OpenRouter), so one table serves all hosts. "length"
+# is the output limit and is handled apart from this table.
+_NORMAL_FINISH = frozenset({"stop", "tool_calls", "function_call", "length"})
+_REFUSED_FINISH = frozenset({"sensitive", "content_filter"})
+_ERROR_FINISH = frozenset({
+    "network_error", "error", "aborted", "insufficient_system_resource", "model_context_window_exceeded",
+})
+
+
+def _classify_stop(finish_reason: Optional[str]) -> str:
+    """Normal, refused or error for a round's raw finish reason. An unknown
+    non-null reason is logged and counts as normal."""
+    if finish_reason in _REFUSED_FINISH:
+        return STOP_REFUSED
+    if finish_reason in _ERROR_FINISH:
+        return STOP_ERROR
+    if finish_reason and finish_reason not in _NORMAL_FINISH:
+        logger.warning("Unknown finish_reason %r treated as a normal stop", finish_reason)
+    return STOP_NORMAL
+
+
 async def stream_round(
     endpoint: Endpoint,
     conversation: List[Dict[str, Any]],
@@ -184,7 +212,7 @@ async def stream_round(
         # Tool calls stream as fragments keyed by index; complete at stream end.
         calls: Dict[int, Dict[str, str]] = {}
         usage = None
-        output_limit = False
+        finish_reason = None
         async for line in response.aiter_lines():
             # SSE allows "data:value" without the space.
             if not line.startswith("data:"):
@@ -203,7 +231,7 @@ async def stream_round(
                 usage = _usage(chunk["usage"])
             for choice in chunk.get("choices") or ():
                 delta = choice.get("delta") or {}
-                output_limit = output_limit or choice.get("finish_reason") == "length"
+                finish_reason = choice.get("finish_reason") or finish_reason
                 # OpenRouter: "the complete reasoning sequence is built by
                 # concatenating all chunks in order".
                 details.extend(delta.get("reasoning_details") or ())
@@ -226,7 +254,8 @@ async def stream_round(
              "name": call["name"], "arguments": call["arguments"]}
             for _, call in sorted(calls.items())
         ]
-        yield RoundEnd(blocks, usage, output_limit)
+        stop = _classify_stop(finish_reason)
+        yield RoundEnd(blocks, usage, finish_reason == "length", stop, finish_reason if stop != STOP_NORMAL else None)
 
 
 # Inline thinking (spec #89): only these tags, only when they open a round's

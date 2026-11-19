@@ -45,6 +45,9 @@ from src.chat_agent.providers import (
     ReasoningDelta,
     RoundEnd,
     RoundEvent,
+    STOP_ERROR,
+    STOP_NORMAL,
+    STOP_REFUSED,
     TextDelta,
     chat_completions,
     provider_key,
@@ -97,6 +100,9 @@ OUTPUT_LIMIT_TOOL_CALL = (
     "Stopped: {model} reached the output limit in the middle of a tool call; the call was not run."
 )
 OUTPUT_LIMIT_NOTICE = "stopped at output limit"
+# A round the provider refused or failed (spec #146, Provider stops). No retry.
+PROVIDER_STOP = "Stopped: {model} stopped the answer: the provider {what} (finish_reason: {finish_reason})."
+PROVIDER_STOP_WHAT = {STOP_REFUSED: "refused it", STOP_ERROR: "failed"}
 # With no fallback configured, one retry on these (the legacy foreground
 # availability retry, spec #44 Providers).
 SINGLE_CANDIDATE_RETRY_STATUSES = frozenset({502, 503, 504, 529})
@@ -576,6 +582,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             if end.output_limit:
                 failure = _output_limit(record, round_record, calls, endpoint.model)
                 saved = failure is not None
+            elif end.stop != STOP_NORMAL:
+                failure, saved = _provider_stop(round_record, end, endpoint.model), True
             record.rounds.append(round_record)
             usage.add_round(len(record.rounds), end, conversation)
             writer.checkpoint()
@@ -836,6 +844,16 @@ def _output_limit(
         return ProviderError(502, OUTPUT_LIMIT_THINKING.format(model=model))
     record.notice = OUTPUT_LIMIT_NOTICE
     return None
+
+
+def _provider_stop(round_record: Dict[str, Any], end: RoundEnd, model: str) -> ProviderError:
+    """The error that ends a turn whose round the provider refused or failed.
+    The round's calls are not run and not kept (a call with no result would
+    not replay); the streamed text stays."""
+    round_record["blocks"] = [b for b in round_record["blocks"] if b["type"] != "tool_call"]
+    return ProviderError(502, PROVIDER_STOP.format(
+        model=model, what=PROVIDER_STOP_WHAT[end.stop], finish_reason=end.finish_reason,
+    ))
 
 
 def _without_text(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

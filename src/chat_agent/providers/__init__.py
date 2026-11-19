@@ -75,12 +75,19 @@ class Usage:
     reasoning_tokens: int
 
 
+STOP_NORMAL, STOP_REFUSED, STOP_ERROR = "normal", "refused", "error"
+
+
 @dataclass(frozen=True)
 class RoundEnd:
     blocks: List[Dict[str, Any]]
     usage: Optional[Usage]
     # The provider stopped the round at its output limit (finish_reason=length).
     output_limit: bool = False
+    # The provider's own stop reason when it refused or failed the round
+    # (``stop`` is STOP_REFUSED or STOP_ERROR); ``finish_reason`` is the raw value.
+    stop: str = STOP_NORMAL
+    finish_reason: Optional[str] = None
 
 
 RoundEvent = Union[TextDelta, ReasoningDelta, ProviderError, RoundEnd]
