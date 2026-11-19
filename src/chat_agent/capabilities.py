@@ -71,9 +71,12 @@ _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
 # The effort parameter by name ("Unexpected reasoning effort" from llama.cpp
 # templates, LM Studio's "reasoning_effort" 400) or OpenRouter's refusal to turn
 # mandatory reasoning off (#80); bare "reasoning" also names models and fields.
-# The thinking parameter (Z.ai, Moonshot) counts only as a standalone word, not
-# inside a model name such as "kimi-k2-thinking".
-_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory|(?<![\w-])thinking(?![\w-])", re.IGNORECASE)
+_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory", re.IGNORECASE)
+# The thinking parameter (Z.ai, Moonshot) as a standalone word, not inside a
+# model name such as "kimi-k2-thinking"; it counts only when the request carried
+# a thinking field (Moonshot's replay 400 and OpenRouter's ":thinking" variant
+# 404 name it too).
+_THINKING_REJECTED = re.compile(r"(?<![\w-])thinking(?![\w-])", re.IGNORECASE)
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
 
@@ -179,8 +182,12 @@ def is_tools_rejection(status: Optional[int], message: str) -> bool:
     return _native_tool_transport_rejected(message) or _OLLAMA_TOOLS_REJECTED in (message or "").lower()
 
 
-def is_effort_rejection(status: Optional[int], message: str) -> bool:
-    return status is not None and 400 <= status < 600 and bool(_EFFORT_REJECTED.search(message or ""))
+def is_effort_rejection(status: Optional[int], message: str, sent_thinking: bool) -> bool:
+    """``sent_thinking``: the refused request carried a ``thinking`` field."""
+    if status is None or not 400 <= status < 600:
+        return False
+    message = message or ""
+    return bool(_EFFORT_REJECTED.search(message) or (sent_thinking and _THINKING_REJECTED.search(message)))
 
 
 async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Report]:

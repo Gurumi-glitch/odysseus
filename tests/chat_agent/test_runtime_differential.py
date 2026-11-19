@@ -50,11 +50,13 @@ APPROVED = {
     ("tool_output", "action_receipt"): "dropped by the result_events port; no UI reader",
     ("tool_output", "ask_user"): "legacy repeats the card on tool_output; chat.js reads the ask_user event, "
                                  "which the new runtime sends, and the card is saved on the tool event (#139)",
+}
+KNOWN_GAPS = {
     ("final_response", "render_owner"): "legacy ends its turn at the question and marks that reply as "
-                                        "replacing the turn; the new runtime's reply comes after the answer",
+                                        "replacing the turn; the new runtime's reply comes after the answer. "
+                                        "chatRenderer.js and chat.js read it to replace the streamed turn (#139)",
     ("final_response", "replacement_scope"): "same as final_response.render_owner (#139)",
 }
-KNOWN_GAPS = {}
 
 def _sse_reasoning_tool_call(reasoning, call):
     """A scripted round whose `reasoning` delta comes before one tool call."""
