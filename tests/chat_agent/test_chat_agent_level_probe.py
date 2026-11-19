@@ -259,15 +259,17 @@ async def test_other_failures_still_fall_back(harness, monkeypatch, level, error
         (503, "phi-4-reasoning is loading", False),
         # A replayed thinking field the server doesn't take.
         (400, "messages[2].reasoning_content: extra fields not permitted", False),
-        # The thinking parameter (Z.ai, Moonshot), named by itself, not as part of a model name.
-        (400, "Parameter `thinking` is invalid", True),
-        (400, "thinking.type: disabled is not supported by this model", True),
+        # "thinking" refuses only a request that carried a thinking field; High sends reasoning_effort.
+        (400, "Parameter `thinking` is invalid", False),
+        (400, "thinking is enabled but reasoning_content is missing in assistant tool call message", False),
+        (404, "No endpoints found for moonshotai/kimi-k2:thinking", False),
         (404, "model 'kimi-k2-thinking' not found", False),
         (400, "Prompt too long: the input exceeds the model context window", False),
     ],
     ids=[
         "lmstudio-effort", "openrouter-mandatory", "model-404", "model-503", "reasoning-content",
-        "thinking-param", "thinking-type", "thinking-model-404", "unrelated-400",
+        "thinking-param-not-sent", "moonshot-replay-400", "openrouter-variant-404", "thinking-model-404",
+        "unrelated-400",
     ],
 )
 async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, monkeypatch, status, message, refused):
@@ -306,6 +308,26 @@ async def test_zai_refused_off_is_learned_and_resent_once_without_thinking(harne
     assert not [e for e in events if e.get("type") == "fallback"]
     assert "event: error" not in body
     assert (await capabilities.thinking_levels(ZAI_PAAS, PRIMARY_MODEL)).support["off"] == U
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "refused"),
+    [
+        ("Parameter `thinking` is invalid", True),
+        ("thinking.type: disabled is not supported by this model", True),
+        ("model 'glm-thinking' not found", False),
+    ],
+    ids=["thinking-param", "thinking-type", "thinking-model-name"],
+)
+async def test_a_sent_thinking_field_is_refused_by_a_standalone_thinking(harness, monkeypatch, message, refused):
+    harness.session.endpoint_url = ZAI_PAAS
+    _provider(harness, monkeypatch, [(400, {"error": {"message": message}}), ["Hi"], ["Hi"]])
+
+    events, _ = await _turn(harness, "off")
+
+    assert harness.captured["provider_requests"][0]["thinking"] == {"type": "disabled"}
+    assert bool([e for e in events if e.get("type") == "thinking_level_refused"]) is refused
 
 
 @pytest.mark.asyncio

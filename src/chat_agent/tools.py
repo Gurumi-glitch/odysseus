@@ -163,10 +163,7 @@ def _with_ask_user_description(schema: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _runtime_schemas() -> List[Dict[str, Any]]:
-    return [
-        _with_ask_user_description(s) if schema_name(s) == ASK_USER else s
-        for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in EDITOR_ONLY_TOOLS
-    ]
+    return [s for s in FUNCTION_TOOL_SCHEMAS if schema_name(s) not in EDITOR_ONLY_TOOLS]
 
 
 def upfront_tool_names() -> List[str]:
@@ -174,13 +171,14 @@ def upfront_tool_names() -> List[str]:
 
 
 def upfront_schemas(denied: Iterable[str], surface: str) -> List[Dict[str, Any]]:
+    """The upfront schemas on this tool surface. ask_user keeps its description
+    on the compact surface too: it is the only text saying the answer comes back
+    as the tool result."""
     denied = set(denied)
     schemas = [
         schema for schema in _runtime_schemas()
         if schema_name(schema) not in DEFERRED_TOOLS and schema_name(schema) not in denied
     ]
-    # The compact surface strips descriptions; ask_user keeps its own because
-    # it is the only text that says the answer comes back as the tool result.
     return [
         _with_ask_user_description(schema) if schema_name(schema) == ASK_USER else schema
         for schema in _apply_tool_surface_to_schemas(schemas, surface)

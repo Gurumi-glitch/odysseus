@@ -406,3 +406,49 @@ async def test_an_expired_ask_still_ends_the_turn_and_holds_the_other_calls(harn
     assert row.metadata["stop_reason"] == "ask_expired"
     held = next(e for e in row.metadata["tool_events"] if e["tool"] == "manage_notes")
     assert held["exit_code"] == 126
+
+
+def _broken_ask_user_then(call):
+    """A round whose first call is an ask_user with unparseable arguments, then ``call``."""
+    name, arguments = call
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 0, "id": "call_0", "type": "function",
+            "function": {"name": "ask_user", "arguments": '{"question": "Which'},
+        }]}}]},
+        {"choices": [{"delta": {"tool_calls": [{
+            "index": 1, "id": "call_1", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]},
+    ]
+    lines = ["data: " + json.dumps(chunk) for chunk in chunks]
+    return ("\n\n".join(lines + ["data: [DONE]"]) + "\n\n").encode()
+
+
+@pytest.mark.asyncio
+async def test_calls_held_by_an_ask_user_that_was_never_asked_say_so(harness, note_worker):
+    harness.provider_rounds = [_broken_ask_user_then(NOTE), _sse_events(["Sorry."])]
+
+    body = await send_and_answer(harness, _Request("agent"), answering(harness))
+
+    assert _events(body, "ask_user") == []
+    assert note_worker == []
+    _, second = harness.captured["provider_requests"]
+    held = next(m["content"] for m in second["messages"] if m.get("tool_call_id") == "call_1")
+    assert "waiting for the user's answer" not in held
+    assert "ask_user in this round was not asked" in held
+
+
+@pytest.mark.asyncio
+async def test_tool_results_replay_in_the_order_of_the_assistants_calls(harness, note_worker):
+    harness.provider_rounds = [_sse_tool_calls(NOTE, QUESTION), _sse_events(["Using Home."])]
+
+    await send_and_answer(harness, _Request("agent"), answering(harness, ("answer", "Home")))
+
+    _, second = harness.captured["provider_requests"]
+    [assistant] = [m for m in second["messages"] if m.get("tool_calls")]
+    replayed = [m["tool_call_id"] for m in second["messages"] if m["role"] == "tool"]
+    assert replayed == [call["id"] for call in assistant["tool_calls"]] == ["call_0", "call_1"]
+    [row] = harness.saved
+    [stored] = [r for r in row.metadata["agent_v2"]["rounds"] if r.get("results")]
+    assert [result["call_id"] for result in stored["results"]] == ["call_0", "call_1"]

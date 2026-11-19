@@ -77,8 +77,9 @@ TOOL_CALL_CAP_REASON = "Not run: this message reached its tool-call limit."
 ASK_EXPIRED_REASON = "Not run: the user did not answer the request in time."
 # A round holding ask_user next to other calls asks first (spec #146, Asking):
 # the first ask_user runs, every other call of the round is answered as not run.
-ASK_USER = "ask_user"
 ASK_HELD_REASON = "Not run: waiting for the user's answer to ask_user; call it again if still needed"
+# The same hold when that ask_user was refused or invalid, so no question was shown.
+ASK_NOT_ASKED_REASON = "Not run: ask_user in this round was not asked; call it again if still needed"
 FINISH_REASON = "Not run: the user asked to finish with the results so far."
 REPEAT_STOP_REASON = (
     f"Not run: this exact call was repeated {repeat_guard.STOP_STREAK} times in a row, "
@@ -318,7 +319,8 @@ async def _round_with_fallback(
                     yield event
             if failure is None:
                 return
-            if thinking is not None and capabilities.is_effort_rejection(failure.status, failure.message):
+            if thinking is not None and capabilities.is_effort_rejection(
+                    failure.status, failure.message, failure.sent_thinking):
                 # The level failed, not the model: re-send once on this
                 # candidate at the server's default, before any fallback (#80).
                 capabilities.learn_unsupported_level(candidate.endpoint.url, candidate.endpoint.model, level)
@@ -611,7 +613,8 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
             conversation.append({"role": "assistant", "blocks": end.blocks})
             results = round_record["results"] = []
             round_outcomes = []
-            asked = next((call for call in calls if call["name"] == ASK_USER), None)
+            asked = next((call for call in calls if call["name"] == tools.ASK_USER), None)
+            question_shown = False
             for call in sorted(calls, key=lambda call: call is not asked):
                 held = asked is not None and call is not asked
                 # tool_search and load_skill are the runtime's own tools: they
@@ -641,7 +644,9 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     # as a complete call/result pair.
                     decision = permissions.Decision(permissions.DENY, _NOT_RUN_REASONS[record.stop_reason])
                 elif held:
-                    decision = permissions.Decision(permissions.DENY, ASK_HELD_REASON)
+                    decision = permissions.Decision(
+                        permissions.DENY, ASK_HELD_REASON if question_shown else ASK_NOT_ASKED_REASON,
+                    )
                 else:
                     tool_calls_used += 1
                     signal = guard.observe(call["name"], call["arguments"])
@@ -710,6 +715,7 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                         provenance = provenance.after(block.tool_type, block.content)
                     question = outcome.result.get("ask_user") if outcome.ok else None
                     if question:
+                        question_shown = True
                         ask = _Ask(turn, asks.question_card(turn.session_id, question), turn_metrics)
                         hold_ask(call, block.tool_type, block.content, ask.card)
                         async for event in ask.events():
@@ -747,10 +753,13 @@ async def run_chat_agent_turn(turn: ChatAgentTurn) -> AsyncGenerator[str, None]:
                     # The reminder is for the model only; the tool card keeps the output.
                     envelope["content"] += reminder
                 results.append(envelope)
-                conversation.append({"role": "tool", **envelope})
                 # Per call, not per round: a restart must not mark a call
                 # that already ran as cancelled (it would replay as not run).
                 writer.checkpoint()
+            # ask_user ran first; providers expect results in the assistant's call order.
+            call_order = {call["call_id"]: index for index, call in enumerate(calls)}
+            results.sort(key=lambda result: call_order[result["call_id"]])
+            conversation.extend({"role": "tool", **result} for result in results)
             conversation = [message for message in conversation if message is not visual]
             visual = tools.visual_evidence([o.result for o in round_outcomes], endpoint.model)
             if visual is not None:

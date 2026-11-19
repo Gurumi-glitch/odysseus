@@ -173,3 +173,21 @@ async def test_unknown_finish_reason_is_logged_once_and_treated_as_normal(harnes
     assert row.content == "Cats are small."
     [record] = [r for r in caplog.records if "brand_new_reason" in r.getMessage()]
     assert record.levelno == logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_each_unknown_finish_reason_is_logged_once_per_process(harness, caplog):
+    harness.provider_rounds = [
+        _stream([{"content": "One."}], finish_reason="repeat_unknown_reason"),
+        _stream([{"content": "Two."}], finish_reason="repeat_unknown_reason"),
+        _stream([{"content": "Three."}], finish_reason="other_unknown_reason"),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger=chat_completions.__name__):
+        for _ in range(3):
+            await harness.send(_Request("agent"))
+
+    assert len(harness.saved) == 3
+    logged = [r.getMessage() for r in caplog.records if "unknown_reason" in r.getMessage()]
+    assert len(logged) == 2
+    assert "repeat_unknown_reason" in logged[0] and "other_unknown_reason" in logged[1]

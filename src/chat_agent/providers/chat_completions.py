@@ -39,9 +39,10 @@ from src.chat_agent.providers import (
 #   _stream_timeout: streaming httpx.Timeout from a read timeout in seconds;
 #   _format_upstream_error: HTTP status + body -> user-readable sentence;
 #   _host_match: the URL's hostname is the domain or a subdomain of it;
-#   _normalize_mistral_content: a delta's content (str, or Mistral's chunk list) ->
-#     (answer text, thinking text), joining only "text" chunks and the text inside
-#     "thinking" chunks and skipping every other chunk type.
+#   _normalize_mistral_content: a delta's content -> (answer text, thinking text):
+#     a str is all answer; Mistral's chunk list joins only "text" chunks and the
+#     "thinking" chunks' text (an inner list of text chunks or a plain string),
+#     skipping every other chunk type; anything else (None) is ("", "").
 from src.llm_core import (
     LLMConfig,
     _detect_provider,
@@ -56,15 +57,17 @@ from src.llm_core import (
     _uses_max_completion_tokens,
 )
 
-logger = logging.getLogger(__name__)
-
 # Relied on: apply_sampling writes only the per-model sampling fields this
 # URL's provider format carries (never temperature), in place; no entry is a no-op.
 from src import model_customization
 
+logger = logging.getLogger(__name__)
+
 # The fields reasoning comes back on and must go back on, unchanged: OpenRouter
 # reasoning_details (in order), the reasoning_content of DeepSeek-style servers
-# and the plain reasoning of vLLM, Ollama and Groq.
+# and the plain reasoning of vLLM, Ollama and Groq (Groq's assistant message
+# takes "reasoning": groq-python ChatCompletionAssistantMessageParam, generated
+# from Groq's OpenAPI spec).
 _REASONING_FIELDS = ("reasoning_details", "reasoning_content", "reasoning")
 # Legacy stream_llm sends stream_options to every Chat Completions provider
 # except these two (llm_core, "Improve OpenRouter and Groq provider requests");
@@ -137,7 +140,9 @@ def _messages(conversation: List[Dict[str, Any]], provider: str, model: str) -> 
 
 
 def _assistant_message(blocks: List[Dict[str, Any]], provider: str, model: str) -> Dict[str, Any]:
-    """Mistral wants the whole assistant message back, its ThinkChunk included
+    """One round's blocks as an assistant message: text, tool calls and the
+    reasoning fields this provider and model produced. Mistral wants the whole
+    message back, its ThinkChunk included
     (docs.mistral.ai/inference/conversations/reasoning), so its content is a chunk list."""
     text = "".join(block["text"] for block in blocks if block["type"] == "text")
     tool_calls = [
@@ -177,16 +182,19 @@ _REFUSED_FINISH = frozenset({"sensitive", "content_filter"})
 _ERROR_FINISH = frozenset({
     "network_error", "error", "aborted", "insufficient_system_resource", "model_context_window_exceeded",
 })
+# Unknown finish reasons already logged by this process: one warning per value.
+_logged_unknown_finish: set = set()
 
 
 def _classify_stop(finish_reason: Optional[str]) -> str:
     """Normal, refused or error for a round's raw finish reason. An unknown
-    non-null reason is logged and counts as normal."""
+    non-null reason counts as normal and is logged the first time it is seen."""
     if finish_reason in _REFUSED_FINISH:
         return STOP_REFUSED
     if finish_reason in _ERROR_FINISH:
         return STOP_ERROR
-    if finish_reason and finish_reason not in _NORMAL_FINISH:
+    if finish_reason and finish_reason not in _NORMAL_FINISH and finish_reason not in _logged_unknown_finish:
+        _logged_unknown_finish.add(finish_reason)
         logger.warning("Unknown finish_reason %r treated as a normal stop", finish_reason)
     return STOP_NORMAL
 
@@ -216,6 +224,7 @@ async def stream_round(
             yield ProviderError(
                 response.status_code,
                 _format_upstream_error(response.status_code, body, endpoint.url),
+                sent_thinking="thinking" in payload,
             )
             return
         details: List[Any] = []

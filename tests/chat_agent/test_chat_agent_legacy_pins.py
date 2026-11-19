@@ -32,6 +32,7 @@ from src.llm_core import (
     _detect_provider,
     _format_upstream_error,
     _host_match,
+    _normalize_mistral_content,
     _normalize_openai_chat_url,
     _provider_headers,
 )
@@ -303,3 +304,19 @@ def test_parse_agent_patch_lists_every_file_a_patch_touches_and_refuses_moves():
     assert [op["path"] for op in _parse_agent_patch(patch)] == ["a.md", "b.md", "c.md"]
     with pytest.raises(ValueError):
         _parse_agent_patch("*** Begin Patch\n*** Update File: a.md\n*** Move to: b.md\n*** End Patch")
+
+
+@pytest.mark.parametrize(
+    ("content", "split"),
+    [
+        ("plain answer", ("plain answer", "")),
+        (None, ("", "")),
+        ([{"type": "thinking", "thinking": [{"type": "text", "text": "hm"}], "closed": True},
+          {"type": "text", "text": "Hi"}], ("Hi", "hm")),
+        ([{"type": "thinking", "thinking": "plain thought"}, {"type": "text", "text": "Hi"}], ("Hi", "plain thought")),
+        ([{"type": "image_url", "image_url": "x"}, {"type": "text", "text": "Hi"}], ("Hi", "")),
+    ],
+    ids=["str", "none", "chunk-list", "plain-string-thinking", "other-chunk-skipped"],
+)
+def test_mistral_content_splits_into_answer_and_thinking(content, split):
+    assert _normalize_mistral_content(content) == split
