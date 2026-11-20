@@ -129,7 +129,7 @@ class Fallback:
 
 @dataclass(frozen=True)
 class LevelRefused:
-    """The thinking level was refused; the round is re-sent without one."""
+    """The thinking level was refused; the round answered without one."""
 
     event: Dict[str, Any]
 
@@ -290,6 +290,7 @@ async def _round_with_fallback(
             candidate.endpoint.url, candidate.endpoint.model, candidate.endpoint.headers,
         )).to_send(level)
         retry_left = len(candidates) == 1
+        resent_without_level = False
         while True:
             failure = None
             committed = False
@@ -305,6 +306,8 @@ async def _round_with_fallback(
                             held.append(event)
                             continue
                         committed = True
+                        if resent_without_level:
+                            yield _learn_refused_level(candidate, level)
                         if index != start:
                             turn.stick_route(candidate)
                             yield Fallback(candidate, request, _fallback_event(
@@ -315,17 +318,13 @@ async def _round_with_fallback(
                     yield event
             if failure is None:
                 return
-            if thinking is not None and capabilities.is_effort_rejection(
-                    failure.status, failure.message, failure.sent_thinking):
-                # The level failed, not the model: re-send once on this
-                # candidate at the server's default, before any fallback (#80).
-                capabilities.learn_unsupported_level(candidate.endpoint.url, candidate.endpoint.model, level)
+            if (thinking is not None
+                    and failure.status in capabilities.LEVEL_REFUSAL_STATUSES):
+                # If a re-send without the level answers, the level was the cause.
+                resent_without_level = True
                 thinking = None
-                yield LevelRefused({
-                    "type": "thinking_level_refused", "level": level,
-                    "message": capabilities.LEVEL_REFUSED.format(model=candidate.endpoint.model, level=level),
-                })
                 continue
+            resent_without_level = False
             if retry_left and failure.status in SINGLE_CANDIDATE_RETRY_STATUSES:
                 retry_left = False
                 logger.warning("chat_agent: retrying %s after pre-output HTTP %s",
@@ -346,6 +345,18 @@ async def _round_with_fallback(
                        candidate.endpoint.model, failure.status)
         reason = reason or failure.message
         failures.append({"candidate_index": index, "model": candidate.endpoint.model, "status": failure.status})
+
+
+def _learn_refused_level(candidate: Candidate, level: str) -> LevelRefused:
+    """Keep ``level`` as refused by the candidate's model; return the notice."""
+    endpoint = candidate.endpoint
+    capabilities.learn_unsupported_level(endpoint.url, endpoint.model, level)
+    return LevelRefused({
+        "type": "thinking_level_refused", "level": level,
+        "message": capabilities.LEVEL_REFUSED.format(
+            model=endpoint.model, level=level,
+        ),
+    })
 
 
 def _fallback_event(

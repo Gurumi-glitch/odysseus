@@ -65,8 +65,6 @@ class ReasoningDelta:
 class ProviderError:
     status: Optional[int]
     message: str
-    # The refused request carried a ``thinking`` field.
-    sent_thinking: bool = False
 
 
 @dataclass(frozen=True)

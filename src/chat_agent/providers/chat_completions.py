@@ -206,7 +206,6 @@ async def stream_round(
             yield ProviderError(
                 response.status_code,
                 _format_upstream_error(response.status_code, body, endpoint.url),
-                sent_thinking="thinking" in payload,
             )
             return
         details: List[Any] = []

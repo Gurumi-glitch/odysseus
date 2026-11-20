@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 import src.chat_helpers as chat_helpers
+from src import constants
 from src.chat_agent import capabilities
 from src.chat_agent.providers import chat_completions
 
@@ -57,7 +58,9 @@ def serve_probes(monkeypatch, routes, *, chat=None):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_caches():
+def _fresh_caches(monkeypatch, tmp_path):
+    # Learned levels are kept on disk: every test gets its own empty store.
+    monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
     caches = (capabilities._reported, capabilities._learned, chat_helpers._lmstudio_models_cache)
     for cache in caches:
         cache.clear()

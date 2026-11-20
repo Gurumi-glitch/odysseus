@@ -130,7 +130,7 @@ async def test_renders_are_redone_after_the_ttl_and_after_a_refresh(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_a_learned_refusal_outranks_the_servers_report_until_refresh(monkeypatch):
+async def test_a_learned_refusal_outranks_the_servers_report_until_a_manual_refresh(monkeypatch):
     serve_probes(monkeypatch, {"GET /props": BONSAI_PROPS, "POST /apply-template": _renders(BONSAI_RENDERS)})
     clock = [1000.0]
     monkeypatch.setattr(capabilities, "_now", lambda: clock[0])
@@ -141,6 +141,9 @@ async def test_a_learned_refusal_outranks_the_servers_report_until_refresh(monke
     assert (await capabilities.thinking_levels(LLAMA, BONSAI)).support["low"] == U
 
     capabilities.forget_endpoint(LLAMA)
+    assert (await capabilities.thinking_levels(LLAMA, BONSAI)).support["low"] == U
+
+    capabilities.forget_learned_levels(LLAMA)
     assert (await capabilities.thinking_levels(LLAMA, BONSAI)).support["low"] == S
 
 
@@ -208,130 +211,120 @@ async def test_refused_level_is_resent_once_as_auto_without_fallback(harness, mo
 
 
 @pytest.mark.asyncio
-async def test_effort_hand_back_runs_before_the_tools_rejection(harness, monkeypatch):
+async def test_a_refusal_that_also_hits_the_resend_learns_no_level(harness, monkeypatch):
     from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
 
     _provider(harness, monkeypatch, [(400, TOOLS_AND_EFFORT), (400, TOOLS_AND_EFFORT)])
 
     events, body = await _turn(harness, "max")
 
-    # The level goes first; the Auto re-send's tools refusal is the tools path's.
+    # The re-send without the level fails the same way: the tools are the cause.
     assert _sent(harness) == [(PRIMARY_MODEL, "max"), (PRIMARY_MODEL, None)]
-    assert [e["level"] for e in events if e.get("type") == "thinking_level_refused"] == ["max"]
+    assert not [e for e in events if e.get("type") == "thinking_level_refused"]
     assert capabilities.NATIVE_TOOLS_REJECTED in body
     url = harness.session.endpoint_url
-    assert (await capabilities.thinking_levels(url, PRIMARY_MODEL)).support["max"] == U
+    assert (await capabilities.thinking_levels(url, PRIMARY_MODEL)).support["max"] == N
     assert await capabilities.native_tools(url, PRIMARY_MODEL) == capabilities.NO
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("level", "error"),
+    ("level", "answers", "sent"),
     [
-        # Auto carried no level: nothing to hand back.
-        ("auto", REFUSED_HIGH),
-        # The error doesn't name reasoning or effort.
-        ("high", {"error": {"message": "upstream 500"}}),
+        # Auto carried no level: nothing to re-send without it.
+        ("auto", [(500, REFUSED_HIGH), ["From backup"]], [None, None]),
+        # The re-send without the level fails too: not the level's fault.
+        ("high", [(500, {"error": {"message": "upstream 500"}})] * 2 + [["From backup"]],
+         ["high", None, "high"]),
     ],
     ids=["auto", "other-500"],
 )
-async def test_other_failures_still_fall_back(harness, monkeypatch, level, error):
+async def test_other_failures_still_fall_back(harness, monkeypatch, level, answers, sent):
     from tests.chat_agent.test_chat_agent_fallback import BACKUP_MODEL, PRIMARY_MODEL
 
-    _provider(harness, monkeypatch, [(500, error), ["From backup"]])
+    _provider(harness, monkeypatch, answers)
 
     events, _ = await _turn(harness, level)
 
-    assert [model for model, _ in _sent(harness)] == [PRIMARY_MODEL, BACKUP_MODEL]
+    models = [PRIMARY_MODEL] * (len(sent) - 1) + [BACKUP_MODEL]
+    assert _sent(harness) == list(zip(models, sent))
     assert not [e for e in events if e.get("type") == "thinking_level_refused"]
     assert [e for e in events if e.get("type") == "fallback"]
+    url = harness.session.endpoint_url
+    assert (await capabilities.thinking_levels(url, PRIMARY_MODEL)).support["high"] == N
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "message", "refused"),
+    ("status", "message"),
     [
         # LM Studio /v1 refusing a value it doesn't list (#80).
-        (400, "Invalid value for 'reasoning_effort': 'max'.", True),
-        (400, "Reasoning is mandatory for this endpoint and cannot be disabled.", True),
-        # A model whose name says reasoning, missing or down: not the level's fault.
-        (404, "model 'phi-4-reasoning' not found", False),
-        (503, "phi-4-reasoning is loading", False),
-        # A replayed thinking field the server doesn't take.
-        (400, "messages[2].reasoning_content: extra fields not permitted", False),
-        # A refused thinking counts only when the request sent a thinking field.
-        (400, "Parameter `thinking` is invalid", False),
-        (400, "thinking is enabled but reasoning_content is missing in assistant tool call message", False),
-        (404, "No endpoints found for moonshotai/kimi-k2:thinking", False),
-        (404, "model 'kimi-k2-thinking' not found", False),
-        (400, "Prompt too long: the input exceeds the model context window", False),
+        (400, "Invalid value for 'reasoning_effort': 'max'."),
+        (400, "Reasoning is mandatory for this endpoint and cannot be disabled."),
+        # xAI, live 2026-11-20: grok-4.7 at max.
+        (400, "Invalid reasoning effort."),
+        # Wording that names no parameter: only the re-send tells.
+        (400, "Request rejected."),
     ],
-    ids=[
-        "lmstudio-effort", "openrouter-mandatory", "model-404", "model-503", "reasoning-content",
-        "thinking-param-not-sent", "moonshot-replay-400", "openrouter-variant-404", "thinking-model-404",
-        "unrelated-400",
-    ],
+    ids=["lmstudio-effort", "openrouter-mandatory", "xai-max", "no-parameter-named"],
 )
-async def test_only_a_refusal_of_the_effort_parameter_is_handed_back(harness, monkeypatch, status, message, refused):
+async def test_a_refusal_the_resend_clears_is_learned_whatever_it_says(harness, monkeypatch, status, message):
     from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
 
-    _provider(harness, monkeypatch, [(status, {"error": {"message": message}}), ["Hi"], ["Hi"]])
+    _provider(harness, monkeypatch, [(status, {"error": {"message": message}}), ["Hi"]])
 
     events, _ = await _turn(harness, "high")
 
-    handed_back = [e for e in events if e.get("type") == "thinking_level_refused"]
-    assert bool(handed_back) is refused
+    assert _sent(harness) == [(PRIMARY_MODEL, "high"), (PRIMARY_MODEL, None)]
+    assert [e["level"] for e in events if e.get("type") == "thinking_level_refused"] == ["high"]
     learned = (await capabilities.thinking_levels(harness.session.endpoint_url, PRIMARY_MODEL)).support["high"]
-    assert (learned == U) is refused
+    assert learned == U
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 404, 429])
+async def test_failures_no_level_refusal_answers_with_are_not_resent(harness, monkeypatch, status):
+    from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
+
+    _provider(harness, monkeypatch, [(status, {"error": {"message": "no"}}), ["From backup"]])
+
+    events, _ = await _turn(harness, "high")
+
+    assert _sent(harness)[0] == (PRIMARY_MODEL, "high")
+    assert (PRIMARY_MODEL, None) not in _sent(harness)
+    assert not [e for e in events if e.get("type") == "thinking_level_refused"]
 
 
 ZAI_PAAS = "https://api.z.ai/api/paas/v4"
-# Handwritten from Z.ai's documented error shape (code 1214, "Parameter
-# ${field} is invalid"); the text is unconfirmed against the live API.
-ZAI_THINKING_REFUSED = {"error": {"code": "1214", "message": "Parameter `thinking` is invalid"}}
+# Z.ai's answer to glm-5.3-flash at off, medium and xhigh (live, 2026-11-20).
+ZAI_LEVEL_REFUSED = {"error": {
+    "code": "1210",
+    "message": "This model always engages in thinking and cannot be disabled; please use low, high, or max",
+}}
 
 
 @pytest.mark.asyncio
-async def test_zai_refused_off_is_learned_and_resent_once_without_thinking(harness, monkeypatch):
+@pytest.mark.parametrize("level", ["off", "medium", "xhigh"])
+async def test_zai_refused_level_is_learned_and_resent_once_without_it(harness, monkeypatch, level):
     from tests.chat_agent.test_chat_agent_fallback import PRIMARY_MODEL
 
     harness.session.endpoint_url = ZAI_PAAS
-    _provider(harness, monkeypatch, [(400, ZAI_THINKING_REFUSED), ["Hi"]])
+    _provider(harness, monkeypatch, [(400, ZAI_LEVEL_REFUSED), ["Hi"]])
 
-    events, body = await _turn(harness, "off")
+    events, body = await _turn(harness, level)
 
     refused, resent = harness.captured["provider_requests"]
-    assert refused["thinking"] == {"type": "disabled"} and "reasoning_effort" not in refused
+    assert "thinking" in refused or refused["reasoning_effort"] == level
     assert "thinking" not in resent and "reasoning_effort" not in resent
     [notice] = [e for e in events if e.get("type") == "thinking_level_refused"]
-    assert notice["level"] == "off"
+    assert notice["level"] == level
     assert not [e for e in events if e.get("type") == "fallback"]
     assert "event: error" not in body
-    assert (await capabilities.thinking_levels(ZAI_PAAS, PRIMARY_MODEL)).support["off"] == U
+    assert (await capabilities.thinking_levels(ZAI_PAAS, PRIMARY_MODEL)).support[level] == U
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("message", "refused"),
-    [
-        ("Parameter `thinking` is invalid", True),
-        ("thinking.type: disabled is not supported by this model", True),
-        ("model 'glm-thinking' not found", False),
-    ],
-    ids=["thinking-param", "thinking-type", "thinking-model-name"],
-)
-async def test_a_sent_thinking_field_is_refused_by_a_standalone_thinking(harness, monkeypatch, message, refused):
-    harness.session.endpoint_url = ZAI_PAAS
-    _provider(harness, monkeypatch, [(400, {"error": {"message": message}}), ["Hi"], ["Hi"]])
-
-    events, _ = await _turn(harness, "off")
-
-    assert harness.captured["provider_requests"][0]["thinking"] == {"type": "disabled"}
-    assert bool([e for e in events if e.get("type") == "thinking_level_refused"]) is refused
-
-
-@pytest.mark.asyncio
-async def test_a_refused_auto_resend_is_not_handed_back_again(harness, monkeypatch):
+async def test_a_failed_resend_is_not_resent_again(harness, monkeypatch):
     from tests.chat_agent.test_chat_agent_fallback import BACKUP_MODEL, PRIMARY_MODEL
 
     _provider(harness, monkeypatch, [(500, REFUSED_HIGH), (500, REFUSED_HIGH), ["From backup"]])
@@ -339,7 +332,51 @@ async def test_a_refused_auto_resend_is_not_handed_back_again(harness, monkeypat
     events, _ = await _turn(harness, "high")
 
     assert _sent(harness) == [(PRIMARY_MODEL, "high"), (PRIMARY_MODEL, None), (BACKUP_MODEL, "high")]
-    assert len([e for e in events if e.get("type") == "thinking_level_refused"]) == 1
+    assert not [e for e in events if e.get("type") == "thinking_level_refused"]
+
+
+# --- Learned levels on disk ---------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_learned_level_outlives_the_process_caches():
+    capabilities.learn_unsupported_level(ZAI_PAAS, "glm-5.3-flash", "medium")
+    # What a restart loses.
+    capabilities._reported.clear()
+    capabilities._learned.clear()
+
+    levels = await capabilities.thinking_levels(ZAI_PAAS, "glm-5.3-flash")
+
+    assert levels.support["medium"] == U
+    assert levels.support["high"] == N
+
+
+@pytest.mark.asyncio
+async def test_a_model_list_probe_keeps_learned_levels_and_a_manual_refresh_drops_them():
+    capabilities.learn_unsupported_level(ZAI_PAAS, "glm-5.3-flash", "medium")
+    capabilities.learn_unsupported_level(LLAMA, BONSAI, "low")
+
+    capabilities.forget_endpoint(ZAI_PAAS)
+    assert (await capabilities.thinking_levels(ZAI_PAAS, "glm-5.3-flash")).support["medium"] == U
+
+    capabilities.forget_learned_levels(ZAI_PAAS)
+    assert (await capabilities.thinking_levels(ZAI_PAAS, "glm-5.3-flash")).support["medium"] == N
+    # Another server's levels stay.
+    assert (await capabilities.thinking_levels(LLAMA, BONSAI)).support["low"] == U
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_learned_store_reports_nothing_learned():
+    from src import constants
+
+    path = Path(constants.CHAT_AGENT_DIR) / "learned" / "thinking_levels.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+
+    levels = await capabilities.thinking_levels(ZAI_PAAS, "glm-5.3-flash")
+
+    assert levels.support["medium"] == N
+    capabilities.learn_unsupported_level(ZAI_PAAS, "glm-5.3-flash", "medium")
+    assert (await capabilities.thinking_levels(ZAI_PAAS, "glm-5.3-flash")).support["medium"] == U
 
 
 @pytest.mark.asyncio
