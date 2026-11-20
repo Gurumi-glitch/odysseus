@@ -2474,6 +2474,32 @@ def test_manual_refresh_uses_long_timeout_and_saves_full_model_list(monkeypatch)
     assert response.headers["X-Model-Refresh-Count"] == "3"
 
 
+@pytest.mark.parametrize("refresh", [True, False])
+def test_only_a_manual_refresh_drops_learned_thinking_levels(monkeypatch, tmp_path, refresh):
+    import asyncio
+
+    from src import constants
+    from src.chat_agent import capabilities
+
+    base = "http://100.117.136.97:34521/v1"
+    ep = _route_ep("proxy", base, cached_models=["m"], endpoint_kind="proxy", refresh_mode="manual")
+    router = model_routes.setup_model_routes(model_discovery=None)
+    monkeypatch.setattr(constants, "CHAT_AGENT_DIR", str(tmp_path / "chat_agent"))
+    monkeypatch.setattr(model_routes, "ModelEndpoint", _RouteModelEndpoint)
+    monkeypatch.setattr(model_routes, "SessionLocal", lambda: _RouteDb([ep]))
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
+    monkeypatch.setattr(model_routes, "_probe_endpoint", lambda base_url, api_key=None, timeout=2: ["m"])
+    monkeypatch.setattr(capabilities, "_probe", lambda *args: asyncio.sleep(0, {}))
+    capabilities.learn_unsupported_level(base, "m", "medium")
+
+    _route_endpoint(router, "/api/model-endpoints/{ep_id}/models")(
+        "proxy", _route_request(), SimpleNamespace(headers={}), refresh=refresh,
+    )
+
+    support = asyncio.run(capabilities.thinking_levels(base, "m")).support
+    assert support["medium"] == ("unknown" if refresh else "unsupported")
+
+
 def test_manual_refresh_defaults_to_proxy_long_timeout(monkeypatch):
     ep = _route_ep(
         "proxy",

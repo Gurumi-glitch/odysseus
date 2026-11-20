@@ -7,8 +7,10 @@ process; sources, verdicts and cache lifetimes: src/chat_agent/README.md.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import re
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
@@ -16,6 +18,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from core.atomic_io import atomic_write_json
+from src import constants
 from src import model_capabilities as mc
 # Relies on: _probe_lmstudio_models(url) returns LM Studio's native model list
 # (dicts with "key"), or None when the host isn't LM Studio or is unreachable;
@@ -68,14 +72,9 @@ CODEX_CATALOG_CLIENT_VERSION = "99.0.0"
 _OLLAMA_TOOLS_REJECTED = "does not support tools"
 # Local servers on these ports have no capability endpoint (vLLM, SGLang).
 _SILENT_LOCAL_VENDORS = frozenset({VENDOR_VLLM, VENDOR_SGLANG})
-# The effort parameter by name ("Unexpected reasoning effort" from llama.cpp
-# templates, LM Studio's "reasoning_effort" 400) or OpenRouter's refusal to turn
-# mandatory reasoning off (#80); bare "reasoning" also names models and fields.
-_EFFORT_REJECTED = re.compile(r"effort|reasoning is mandatory", re.IGNORECASE)
-# "thinking" as its own word, not inside a model name (kimi-k2-thinking).
-# Other errors name it without refusing the field (Moonshot's replay 400,
-# OpenRouter's ":thinking" model ids), so callers gate on a sent thinking field.
-_THINKING_REJECTED = re.compile(r"(?<![\w-])thinking(?![\w-])", re.IGNORECASE)
+# Statuses a refused level has been answered with: 400 (LM Studio, Z.ai,
+# xAI, OpenRouter), 500 (llama.cpp templates).
+LEVEL_REFUSAL_STATUSES = frozenset({400, 500})
 # The key a learned "no native tools" is kept under, beside learned levels.
 _TOOLS = "tools"
 
@@ -105,9 +104,11 @@ class _Report:
 _Key = Tuple[Tuple[str, str, Optional[int]], str]
 # (origin, model) -> (report, expiry): what the server said, for 60s.
 _reported: Dict[_Key, Tuple[_Report, float]] = {}
-# (origin, model) -> {"tools" or a level: NO / UNSUPPORTED}: learned from a
-# rejection, outranks the server, kept until refresh.
+# (origin, model) -> {"tools": NO}: learned from a rejection, outranks the
+# server, kept until refresh.
 _learned: Dict[_Key, Dict[str, str]] = {}
+# Serialises read-modify-write of the learned levels file.
+_learned_levels_lock = threading.Lock()
 _now = time.monotonic
 
 
@@ -125,8 +126,9 @@ async def thinking_levels(endpoint_url: str, model: str, headers: Any = None) ->
     """The thinking levels this (endpoint, model) takes; never raises."""
     key = (_origin(endpoint_url), model)
     reported = (await _report(key, endpoint_url, model, headers)).thinking
-    learned = _learned.get(key, {})
-    support = {level: learned.get(level, verdict) for level, verdict in reported.support.items()}
+    refused = _learned_levels(endpoint_url, model)
+    support = {level: UNSUPPORTED if level in refused else verdict
+               for level, verdict in reported.support.items()}
     return ThinkingLevels(support, reported.binary)
 
 
@@ -135,11 +137,69 @@ def learn_no_native_tools(endpoint_url: str, model: str) -> None:
 
 
 def learn_unsupported_level(endpoint_url: str, model: str, level: str) -> None:
-    _learned.setdefault((_origin(endpoint_url), model), {})[level] = UNSUPPORTED
+    """Keep ``level`` as refused by this server's ``model`` across restarts."""
+    with _learned_levels_lock:
+        data = _load_learned_levels()
+        models = data.get(_origin_name(endpoint_url))
+        models = models if isinstance(models, dict) else {}
+        levels = models.get(model)
+        levels = levels if isinstance(levels, list) else []
+        if level in levels:
+            return
+        models[model] = levels + [level]
+        data[_origin_name(endpoint_url)] = models
+        _save_learned_levels(data)
+
+
+def forget_learned_levels(endpoint_url: str) -> None:
+    """Drop the levels this endpoint's server was learned to refuse (manual
+    model refresh), so a level the provider adds later can be tried again."""
+    with _learned_levels_lock:
+        data = _load_learned_levels()
+        if data.pop(_origin_name(endpoint_url), None) is not None:
+            _save_learned_levels(data)
+
+
+def _learned_levels(endpoint_url: str, model: str) -> list:
+    models = _load_learned_levels().get(_origin_name(endpoint_url))
+    levels = models.get(model) if isinstance(models, dict) else None
+    return levels if isinstance(levels, list) else []
+
+
+def _learned_levels_path() -> str:
+    return os.path.join(
+        constants.CHAT_AGENT_DIR, "learned", "thinking_levels.json",
+    )
+
+
+def _origin_name(endpoint_url: str) -> str:
+    scheme, host, port = _origin(endpoint_url)
+    return f"{scheme}://{host}:{port}"
+
+
+def _load_learned_levels() -> dict:
+    """origin -> model -> [level]; empty when missing or unreadable."""
+    try:
+        with open(_learned_levels_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        logger.warning("chat_agent: learned thinking levels unreadable (%s)", type(exc).__name__)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_learned_levels(data: dict) -> None:
+    try:
+        atomic_write_json(_learned_levels_path(), data, indent=2)
+    except OSError as exc:
+        logger.warning("chat_agent: learned thinking levels not saved (%s)", type(exc).__name__)
 
 
 def forget_endpoint(endpoint_url: str) -> None:
-    """Drop everything known about this endpoint's server (model-list refresh)."""
+    """Drop what is known about this endpoint's server (every model-list
+    probe), except the levels it refused: forget_learned_levels."""
     origin = _origin(endpoint_url)
     # Runs on the model-refresh thread: copy the keys, pop tolerantly.
     for cache in (_reported, _learned):
@@ -179,14 +239,6 @@ def is_tools_rejection(status: Optional[int], message: str) -> bool:
     if status != 400:
         return False
     return _native_tool_transport_rejected(message) or _OLLAMA_TOOLS_REJECTED in (message or "").lower()
-
-
-def is_effort_rejection(status: Optional[int], message: str, sent_thinking: bool) -> bool:
-    """``sent_thinking``: the refused request carried a ``thinking`` field."""
-    if status is None or not 400 <= status < 600:
-        return False
-    message = message or ""
-    return bool(_EFFORT_REJECTED.search(message) or (sent_thinking and _THINKING_REJECTED.search(message)))
 
 
 async def _probe(endpoint_url: str, model: str, headers: Any) -> Dict[str, _Report]:

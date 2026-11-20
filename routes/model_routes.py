@@ -2723,6 +2723,9 @@ def setup_model_routes(model_discovery):
             kind = _effective_endpoint_kind(ep, base)
             picker_requires_pinning = _picker_requires_pinning(base, kind)
             if refresh:
+                from src.chat_agent.capabilities import forget_learned_levels
+                # A user's refresh retries the levels its models refused.
+                forget_learned_levels(base)
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
